@@ -21,7 +21,7 @@ Both ``Run`` methods process their whole batch in one call:
 irrelevant.
 """
 
-from typing import List
+from typing import List, Optional
 
 from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
@@ -39,7 +39,16 @@ class _FullPrefillBase(Method):
     #: backend identifier for ``Result.metadata``.
     backend = "transformers"
 
-    def __init__(self, gpuIds: str, modelPath: str, *, maxNewTokens: int, dtype: str):
+    def __init__(
+        self,
+        gpuIds: str,
+        modelPath: str,
+        *,
+        maxNewTokens: int,
+        dtype: str,
+        tag: Optional[str] = None,
+    ):
+        super().__init__(tag=tag)
         self.gpuIds = gpuIds
         self.modelPath = modelPath or DefaultModelPath()
         self.maxNewTokens = maxNewTokens
@@ -77,8 +86,15 @@ class FullPrefillTransformer(_FullPrefillBase):
         *,
         maxNewTokens: int = 64,
         dtype: str = "bfloat16",
+        tag: Optional[str] = None,
     ):
-        super().__init__(gpuIds, modelPath or "", maxNewTokens=maxNewTokens, dtype=dtype)
+        super().__init__(
+            gpuIds,
+            modelPath or "",
+            maxNewTokens=maxNewTokens,
+            dtype=dtype,
+            tag=tag,
+        )
         self._gen = TransformersGenerator(
             self.modelPath, gpuIds, maxNewTokens=maxNewTokens, dtype=dtype
         )
@@ -109,8 +125,15 @@ class FullPrefillVllm(_FullPrefillBase):
         gpuMemoryUtilization: float = 0.7,
         maxModelLen: int = 98304,
         tensorParallelSize: int = 1,
+        tag: Optional[str] = None,
     ):
-        super().__init__(gpuIds, modelPath or "", maxNewTokens=maxNewTokens, dtype="bfloat16")
+        super().__init__(
+            gpuIds,
+            modelPath or "",
+            maxNewTokens=maxNewTokens,
+            dtype="bfloat16",
+            tag=tag,
+        )
         self.llm = CreateLlm(
             self.modelPath,
             gpuIds,

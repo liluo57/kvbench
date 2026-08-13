@@ -1,7 +1,7 @@
 """Method abstraction: defines *how* to optimize and run."""
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 from .Result import Result
 
@@ -19,12 +19,26 @@ class Method(ABC):
     #: Short identifier used in reports. Override in subclasses.
     name: str = "method"
 
+    #: Optional distinguishing label appended to :attr:`name` in reports, e.g.
+    #: a knob's value: ``name="cacheblend"`` + ``tag="0.15"`` renders as
+    #: ``cacheblend(0.15)``. Set via the constructor's ``tag`` argument.
+    tag: Optional[str] = None
+
     #: Metadata keys that are *method metrics*: per-case values the method
     #: records in ``Result.metadata``, which the engine aggregates (with
     #: :func:`~core.Metrics.AggregateStats`) into the report's
     #: ``method_metrics`` section per (method, task) pair. Empty means the
     #: method has no method metrics and the report omits that section entirely.
     method_metrics: tuple[str, ...] = ()
+
+    def __init__(self, tag: Optional[str] = None):
+        """Initialize with an optional distinguishing :attr:`tag`."""
+        self.tag = tag
+
+    @property
+    def Label(self) -> str:
+        """Report name: :attr:`name`, or ``name(tag)`` when a tag is set."""
+        return f"{self.name}({self.tag})" if self.tag else self.name
 
     @abstractmethod
     def Prepare(self, data: List[List[str]]) -> None:

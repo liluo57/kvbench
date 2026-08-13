@@ -67,7 +67,7 @@ def Main() -> None:
     print(
         f"[main] model={ModelPath()}\n"
         f"[main] tasks={[t.name for t in tasks]} "
-        f"methods={[m.name for m in methods]} batchSize={batchSize} "
+        f"methods={[m.Label for m in methods]} batchSize={batchSize} "
     )
     sys.stdout.flush()
 

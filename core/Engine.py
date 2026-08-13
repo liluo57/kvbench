@@ -82,7 +82,7 @@ class Engine:
         metrics: List[Metric],
     ) -> Dict[str, Any]:
         if self.verbose:
-            print(f"[engine]   method={method.name!r} task={task.name!r}")
+            print(f"[engine]   method={method.Label!r} task={task.name!r}")
 
         for metric in metrics:
             metric.Reset()
@@ -107,7 +107,7 @@ class Engine:
             )
 
         report = {
-            "method": method.name,
+            "method": method.Label,
             "task": task.name,
             "cases": nCases,
             "task_metrics": _AggregateScores(taskScores),

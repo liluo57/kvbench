@@ -48,7 +48,9 @@ class NaiveTransformer(Method):
         *,
         maxNewTokens: int = 64,
         dtype: str = "bfloat16",
+        tag: Optional[str] = None,
     ):
+        super().__init__(tag=tag)
         self.gpuIds = gpuIds
         self.modelPath = modelPath or DefaultModelPath()
         self.maxNewTokens = maxNewTokens

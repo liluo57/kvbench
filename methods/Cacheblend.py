@@ -120,7 +120,9 @@ class CacheBlendMethod(Method):
         repoRoot=None,
         workerPython=None,
         startTimeout: float = 1800.0,
+        tag: Optional[str] = None,
     ):
+        super().__init__(tag=tag)
         self.gpuIds = gpuIds
         self.modelPath = modelPath or DefaultModelPath()
         self.maxNewTokens = maxNewTokens
