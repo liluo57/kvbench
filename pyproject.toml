@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kvbench"
+version = "0.1.0"
+description = "A unified evaluation framework for KV cache optimization methods"
+readme = "readme.md"
+requires-python = ">=3.9"
+dependencies = ["PyYAML>=6.0"]
+
+# ---------------------------------------------------------------------------
+# vLLM backend (system vLLM, used by the full_prefill_vllm method)
+# ---------------------------------------------------------------------------
+# The backend is installed into the *conda base env* (the framework runs with
+# ``python Main.py`` = base python, no separate venv) as a *consistent* CUDA
+# stack: vllm / torch / the CUDA runtime all built for the same CUDA 12.9. It
+# only makes sense on a machine whose NVIDIA driver supports CUDA >= 12.9
+# (driver >= 570).
+#
+# Reproduce the base-env install from the project root with uv:
+#
+#     uv pip uninstall vllm torch torchvision torchaudio \
+#         --python /data/lyh/miniconda3/bin/python
+#     uv pip install vllm==0.25.1 torch==2.11.0 torchvision==0.26.0 \
+#                  torchaudio==2.11.0 \
+#                  --python /data/lyh/miniconda3/bin/python \
+#                  --extra-index-url https://wheels.vllm.ai/0.25.1/cu129/ \
+#                  --extra-index-url https://download.pytorch.org/whl/cu129 \
+#                  --index-strategy unsafe-best-match
+#
+#   - wheels.vllm.ai/0.25.1/cu129 serves vllm 0.25.1+cu129 and the CUDA build
+#     deps it needs (flashinfer, cutlass-dsl, cudnn-frontend).
+#   - download.pytorch.org/whl/cu129 serves torch / torchvision / torchaudio
+#     2.11.0+cu129.
+#   - ``--index-strategy unsafe-best-match`` lets uv combine both indexes so it
+#     picks the cu129 build of every package.
+#
+# With this clean, single-family stack no LD_PRELOAD is needed. One host-side
+# requirement remains: pyarrow must load *before* the CUDA runtimes in any
+# vLLM process (glibc 2.31 dynamic-TLS crash). The base env's
+# ``sitecustomize.py`` handles this; see its header comment. A ``uv pip
+# freeze`` snapshot of the working env is kept in requirements-vllm.txt.
+#
+# The CacheBlend method additionally needs LMCache 0.5.2. The PyPI wheel of
+# lmcache 0.5.2 is a **CUDA 13** build (c_ops links libcudart.so.13, depends on
+# cupy-cuda13x) and cannot run on this host's CUDA 12.8 driver. Install the
+# **cu129** build from LMCache's GitHub release instead (same 0.5.2 source,
+# links libcudart.so.12, depends on cupy-cuda12x):
+#
+#     uv pip uninstall lmcache cupy-cuda13x --python /data/lyh/miniconda3/bin/python
+#     uv pip install "lmcache @ https://github.com/LMCache/LMCache/releases/download/v0.5.2-cu129/lmcache-0.5.2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" \
+#         --no-deps --python /data/lyh/miniconda3/bin/python
+#     uv pip install cupy-cuda12x --python /data/lyh/miniconda3/bin/python
+
+[project.optional-dependencies]
+vllm = [
+    "vllm==0.25.1",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+]
+
+[tool.uv]
+extra-index-url = [
+    "https://wheels.vllm.ai/0.25.1/cu129/",
+    "https://download.pytorch.org/whl/cu129",
+]
+index-strategy = "unsafe-best-match"
