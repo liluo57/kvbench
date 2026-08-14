@@ -1,7 +1,7 @@
 """Concrete benchmark tasks.
 
 Each task's dataset is resolved by *name* against ``DatasetPath`` from
-``configs/datasets.yaml`` (see ``core.Config``):
+``config.yaml`` (see ``core.Config``):
 
 - :class:`NIAHTask` / :class:`NIAHShuffleTask` — RULER needle-in-a-haystack
   (:mod:`tasks.Niah`), read from ``<DatasetPath>/ruler/niah_len*.jsonl``.
@@ -18,13 +18,16 @@ Each task's dataset is resolved by *name* against ``DatasetPath`` from
 
 - :class:`MusiqueTask` / :class:`WikimQATask` / :class:`SamsumTask` — the
   knowledge-base workloads the original CacheBlend repo evaluates on
-  (``<DatasetPath>/musique``, ``/wikimqa``, ``/samsum``).
+  (``<DatasetPath>/musique``, ``/wikimqa``, ``/samsum``; each in its own module
+  sharing the machinery in :mod:`tasks._Cacheblend`).
 """
 
-from .Cacheblend import MusiqueTask, SamsumTask, WikimQATask
 from .Cwe import CWEShuffleTask, CWETask
+from .Musique import MusiqueTask
 from .Niah import NIAHShuffleTask, NIAHTask
+from .Samsum import SamsumTask
 from .Vt import VTShuffleTask, VTTask
+from .WikimQA import WikimQATask
 
 __all__ = [
     "CWEShuffleTask",

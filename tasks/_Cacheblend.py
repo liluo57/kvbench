@@ -1,4 +1,4 @@
-"""CacheBlend's own datasets as KVBench tasks (musique / wikimqa / samsum).
+"""Shared machinery for the CacheBlend knowledge-base tasks (musique / wikimqa / samsum).
 
 These are the knowledge-base workloads the original CacheBlend repo evaluates
 on (``example/blend_musique.py``, ``blend_wikimqa.py``, ``blend_samsum.py``).
@@ -24,6 +24,10 @@ Case payload contract (consumed by every Method)
 
 The ``suffix`` (the fresh question fused against the cached knowledge base) is
 recovered by the reuse methods via ``SplitReuseParts``.
+
+:class:`_KBBase` owns the data loading, the chat-prompt building and the scoring
+shared by the three task families; each family lives in its own module
+(:mod:`tasks.Musique`, :mod:`tasks.Wikimqa`, :mod:`tasks.Samsum`).
 """
 
 import collections
@@ -210,7 +214,7 @@ class _KBBase(Task):
 
 
 # ---------------------------------------------------------------------------
-# Musique / Wikimqa (QA over a knowledge base)
+# QA over a knowledge base (musique / wikimqa)
 # ---------------------------------------------------------------------------
 
 
@@ -242,64 +246,3 @@ class _QABase(_KBBase):
     def Evaluate(self, result: Result, metadata: Dict[str, Any]) -> Dict[str, float]:
         f1, em = self._Score(result, metadata)
         return {"f1": f1, "accuracy": em}
-
-
-class MusiqueTask(_QABase):
-    """Multi-hop QA (cacheblend ``blend_musique.py``)."""
-
-    name = "musique"
-    defaultDataset = "musique"
-    prefixPrompt = (
-        "You will be asked a question after reading several passages. Please "
-        "directly answer the question based on the given passages. Do NOT "
-        "repeat the question. The answer should be within 5 words..\nPassages:\n"
-    )
-    queryPrompt = (
-        "\n\nAnswer the question directly based on the given passages. Do NOT "
-        "repeat the question. The answer should be within 5 words. \nQuestion:"
-    )
-
-
-class WikimQATask(_QABase):
-    """Single-hop QA (cacheblend ``blend_wikimqa.py``)."""
-
-    name = "wikimqa"
-    defaultDataset = "wikimqa"
-    prefixPrompt = (
-        "Answer the question based on the given passages. Only give me the "
-        "answer and do not output any other words.\n\nThe following are given "
-        "passages.\n"
-    )
-    queryPrompt = (
-        "\n\nAnswer the question based on the given passages. Answer the "
-        "question within 5 words. Do NOT repeat the question or output any "
-        "other words. Question: "
-    )
-
-
-# ---------------------------------------------------------------------------
-# Samsum (dialogue summarisation)
-# ---------------------------------------------------------------------------
-
-
-class SamsumTask(_KBBase):
-    """Dialogue summarisation (cacheblend ``blend_samsum.py``)."""
-
-    name = "samsum"
-    defaultDataset = "samsum"
-    prefixPrompt = (
-        "Summarize the dialogue into a few short sentences. The following are "
-        "some examples.\n\n"
-    )
-
-    def _Build(self, sample: Dict[str, Any]) -> Tuple[List[str], str]:
-        chunks = [c["text"] for c in sample.get("ctxs", [])]
-        suffix = "\n\n" + sample["question"]
-        chunks = [self.prefixPrompt + chunks[0]] + chunks[1:] if chunks else []
-        return chunks, suffix
-
-    def Evaluate(self, result: Result, metadata: Dict[str, Any]) -> Dict[str, float]:
-        pred = ParseGeneration(result.output)
-        answers = metadata["answers"]
-        best = max((RougeL(pred, a) for a in answers), default=0.0)
-        return {"rougeL": best}

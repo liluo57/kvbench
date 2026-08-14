@@ -1,8 +1,9 @@
-"""Runtime configuration: dataset / model paths, declared in ``configs/``.
+"""Runtime configuration: dataset / model paths, declared in ``config.yaml``.
 
 KVBench keeps global path settings out of code — they live in
-``configs/datasets.yaml``. This module loads that file and resolves a dataset
-*name* to its directory, e.g. ``DatasetDir("ruler")`` -> ``<DatasetPath>/ruler``.
+``config.yaml`` at the project root. This module loads that file and resolves a
+dataset *name* to its directory, e.g. ``DatasetDir("ruler")`` ->
+``<DatasetPath>/ruler``.
 """
 
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 #: Default config file (project-root relative).
-DefaultConfigPath = Path(__file__).resolve().parent.parent / "configs" / "datasets.yaml"
+DefaultConfigPath = Path(__file__).resolve().parent.parent / "config.yaml"
 
 _ConfigCache: Dict[str, Any] = {}
 

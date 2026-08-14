@@ -9,6 +9,11 @@ Each method takes the task's available GPUs (``gpu_ids``, equivalent to
   generates the whole prompt when reuse is impossible. All runtime wiring lives
   in the framework (``helpers.VllmCacheblendPatches``), so no host-level
   ``sitecustomize.py`` or modified vLLM is required.
+- :class:`CacheblendRepo` — CacheBlend via the *original* repo: a worker
+  subprocess under the repo's venv (patched vLLM 0.4.1, ``helpers.
+  CacheblendRepoHelper``) collects the context KV once and fuses each fresh
+  query against it; ``reuse_ratio`` is reported by the worker. Repo/model paths
+  come from ``config.yaml`` (``Cacheblend.Repo.*``).
 - :class:`FullPrefillTransformer` / :class:`FullPrefillVllm` — the recompute
   baselines: answer the full prompt from scratch every query, over plain
   transformers / the system vLLM.
@@ -18,11 +23,13 @@ Each method takes the task's available GPUs (``gpu_ids``, equivalent to
 """
 
 from .Cacheblend import CacheBlendMethod
+from .CacheblendRepo import CacheblendRepo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Naive import NaiveTransformer
 
 __all__ = [
     "CacheBlendMethod",
+    "CacheblendRepo",
     "FullPrefillTransformer",
     "FullPrefillVllm",
     "NaiveTransformer",

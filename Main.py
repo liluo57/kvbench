@@ -5,7 +5,7 @@ lists below and run from the project root::
 
     python Main.py
 
-The model path comes from ``configs/datasets.yaml`` (``ModelPath``);
+The model path comes from ``config.yaml`` (``ModelPath``);
 datasets resolve by name against ``DatasetPath``.
 
 Methods (each loads its own copy of the model on its ``gpuIds``):
@@ -23,6 +23,7 @@ from metrics import ThroughputMetric, TTFTMetric
 
 from methods import (
     CacheBlendMethod,
+    CacheblendRepo,
     FullPrefillVllm,
     FullPrefillTransformer,
     NaiveTransformer,
@@ -31,6 +32,9 @@ from tasks import (
     CWEShuffleTask,
     NIAHShuffleTask,
     VTShuffleTask,
+    MusiqueTask,
+    SamsumTask,
+    WikimQATask,
 )
 
 MAX_SAMPLES=64
@@ -44,6 +48,9 @@ def Main() -> None:
         NIAHShuffleTask(maxSamples=MAX_SAMPLES),
         CWEShuffleTask(maxSamples=MAX_SAMPLES),
         VTShuffleTask(maxSamples=MAX_SAMPLES),
+        MusiqueTask(maxSamples=MAX_SAMPLES),
+        SamsumTask(maxSamples=MAX_SAMPLES),
+        WikimQATask(maxSamples=MAX_SAMPLES),
     ]
 
     #: Methods to run (edit to taste). Each loads its own copy of the model on
@@ -53,7 +60,8 @@ def Main() -> None:
     #: EngineCore — starting a spawn'd process while the main module is still
     #: being imported raises multiprocessing's "bootstrapping phase" error.
     methods = [
-        CacheBlendMethod(gpuIds="3", maxNewTokens=64, maxLocalCpuSize=96),
+        CacheblendRepo(gpuIds="0", maxNewTokens=64),
+        CacheblendRepo(gpuIds="5", maxNewTokens=64,fullPrefill=True,tag='full_prefill'),
         FullPrefillVllm(gpuIds="1", maxNewTokens=64),
         NaiveTransformer(gpuIds="2", maxNewTokens=64),
     ]

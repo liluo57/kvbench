@@ -420,7 +420,7 @@ def _writeRecords(outPath: Path, records: List[Dict[str, Any]]) -> None:
 
 
 def _defaultModelPath() -> str:
-    cfgPath = Path(__file__).parent / "configs" / "datasets.yaml"
+    cfgPath = Path(__file__).parent / "config.yaml"
     try:
         cfg = yaml.safe_load(cfgPath.read_text()) or {}
         return str(cfg.get("ModelPath", ""))
@@ -445,7 +445,7 @@ def Main() -> None:
 
     tokenizerPath = args.tokenizer or _defaultModelPath()
     if not tokenizerPath:
-        raise SystemExit("no tokenizer: pass --tokenizer or set ModelPath in configs/datasets.yaml")
+        raise SystemExit("no tokenizer: pass --tokenizer or set ModelPath in config.yaml")
     print(f"[ruler] loading tokenizer {tokenizerPath}", flush=True)
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(tokenizerPath)
