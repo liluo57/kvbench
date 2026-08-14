@@ -27,6 +27,31 @@ def _AggregateScores(perCase: Dict[str, List[float]]) -> Dict[str, Any]:
     }
 
 
+def _MeanValue(stats: Dict[str, Any]) -> Any:
+    """Extract a metric's mean from its summary dict.
+
+    Task metrics are ``{"mean": value}``; system/method metrics are
+    ``{"<name>_mean": value, ...}`` (or ``{name: None}`` when empty).
+    """
+    if not stats:
+        return None
+    if "mean" in stats:
+        return stats["mean"]
+    for key, value in stats.items():
+        if key.endswith("_mean"):
+            return value
+    return next(iter(stats.values()), None)
+
+
+def _CoreReport(run: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten one run into ``{method, task, <metric>: mean, ...}``."""
+    core: Dict[str, Any] = {"method": run["method"], "task": run["task"]}
+    for group in ("task_metrics", "system_metrics", "method_metrics"):
+        for name, stats in run.get(group, {}).items():
+            core[name] = _MeanValue(stats)
+    return core
+
+
 class Engine:
     """Controls the evaluation process.
 
@@ -67,12 +92,14 @@ class Engine:
                 f"with {len(metrics)} metric(s)"
             )
 
+        runs = [
+            self._evaluatePair(task, method, metrics)
+            for method in methods
+            for task in tasks
+        ]
         return {
-            "runs": [
-                self._evaluatePair(task, method, metrics)
-                for method in methods
-                for task in tasks
-            ]
+            "runs": runs,
+            "cores": [_CoreReport(run) for run in runs],
         }
 
     def _evaluatePair(
