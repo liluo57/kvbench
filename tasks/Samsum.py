@@ -1,6 +1,6 @@
-"""CacheBlend dialogue summarisation (``example/blend_samsum.py``).
+"""Dialogue summarisation (``example/blend_samsum.py``).
 
-Dataset: ``<DatasetPath>/samsum``. See :mod:`tasks._Cacheblend` for the record
+Dataset: ``<DatasetPath>/samsum``. See :mod:`tasks.bases.KBBase` for the record
 layout, chat-prompt wrapping and scoring.
 """
 
@@ -8,11 +8,11 @@ from typing import Any, Dict, List, Tuple
 
 from core.Result import Result
 
-from ._Cacheblend import _KBBase, ParseGeneration, RougeL
+from .bases.KBBase import KBBase, ParseGeneration, RougeL
 
 
-class SamsumTask(_KBBase):
-    """Dialogue summarisation (cacheblend ``blend_samsum.py``)."""
+class SamsumTask(KBBase):
+    """Dialogue summarisation (``blend_samsum.py``)."""
 
     name = "samsum"
     defaultDataset = "samsum"

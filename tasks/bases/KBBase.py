@@ -1,9 +1,11 @@
-"""Shared machinery for the CacheBlend knowledge-base tasks (musique / wikimqa / samsum).
+"""Shared machinery for the knowledge-base tasks (musique / wikimqa / samsum).
 
 These are the knowledge-base workloads the original CacheBlend repo evaluates
 on (``example/blend_musique.py``, ``blend_wikimqa.py``, ``blend_samsum.py``).
-Each resolves its data by *name* against ``DatasetPath`` (see ``core.Config``):
-``MusiqueTask()`` reads ``<DatasetPath>/musique`` etc.
+The KVBench tasks reuse the same data and prompt layout, but the tasks
+themselves are independent of the CacheBlend method. Each resolves its data by
+*name* against ``DatasetPath`` (see ``core.Config``): ``MusiqueTask()`` reads
+``<DatasetPath>/musique`` etc.
 
 The prompt text mirrors what the original scripts build (same instruction
 prefixes, chunk format and query text) — minus the model-specific chat special
@@ -25,9 +27,9 @@ Case payload contract (consumed by every Method)
 The ``suffix`` (the fresh question fused against the cached knowledge base) is
 recovered by the reuse methods via ``SplitReuseParts``.
 
-:class:`_KBBase` owns the data loading, the chat-prompt building and the scoring
+:class:`KBBase` owns the data loading, the chat-prompt building and the scoring
 shared by the three task families; each family lives in its own module
-(:mod:`tasks.Musique`, :mod:`tasks.Wikimqa`, :mod:`tasks.Samsum`).
+(:mod:`tasks.Musique`, :mod:`tasks.WikimQA`, :mod:`tasks.Samsum`).
 """
 
 import collections
@@ -41,7 +43,7 @@ from core.Config import DatasetDir
 from core.Result import Result
 from core.Task import Case, Task
 
-from .TemplateHelper import AssistantSuffix, UserContext
+from ..TemplateHelper import AssistantSuffix, UserContext
 
 # ---------------------------------------------------------------------------
 # Metric helpers (mirror ``example/utils.py`` without the extra deps)
@@ -141,7 +143,7 @@ def _FlattenAnswers(answers) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-class _KBBase(Task):
+class KBBase(Task):
     """Shared knowledge-base task logic (case generation + eval).
 
     Subclasses implement :meth:`_DefaultDataset` (data dir name) and
@@ -225,7 +227,7 @@ class _KBBase(Task):
 # ---------------------------------------------------------------------------
 
 
-class _QABase(_KBBase):
+class QABase(KBBase):
     """Question-answering over isolated passages (musique / wikimqa).
 
     Prompt structure copied from ``example/blend_musique.py`` /

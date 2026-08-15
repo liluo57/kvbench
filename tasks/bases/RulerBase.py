@@ -14,7 +14,7 @@ is the start of the expected answer the model should continue from. The tasks
 rebuild it as a Qwen chat prompt: the whole ``input`` is the user turn and the
 ``answer_prefix`` opens the assistant turn (see ``TemplateHelper``).
 
-:class:`_RulerBase` owns the data loading, the chat-prompt building and the
+:class:`RulerBase` owns the data loading, the chat-prompt building and the
 string-match scoring shared by the three task families; each family lives in
 its own module (:mod:`tasks.Niah`, :mod:`tasks.Vt`, :mod:`tasks.Cwe`) together
 with its shuffle variant.
@@ -30,7 +30,7 @@ from core.Config import DatasetDir
 from core.Result import Result
 from core.Task import Case, Task
 
-from .TemplateHelper import AssistantSuffix, UserContext
+from ..TemplateHelper import AssistantSuffix, UserContext
 
 
 def StringMatchAll(pred: str, refs) -> float:
@@ -76,7 +76,7 @@ def _findNeedleSentence(body: str, value: str) -> str:
     return body[start:end].strip()
 
 
-class _RulerBase(Task):
+class RulerBase(Task):
     """Shared RULER data loading + chat-prompt building + scoring.
 
     Subclasses pick how a sample's prompt is split for the shuffle variant:
@@ -170,7 +170,7 @@ class _RulerBase(Task):
         """``([A, B, C], fullChatPrompt)`` with the needle split.
 
         A/B/C reassemble exactly to ``fullChatPrompt``:
-            A = "<|im_start|>user\\n" + text before the needle (instruction +
+            A = "<|im_start|>user\n" + text before the needle (instruction +
                 essay-before-needle)
             B = the needle sentence
             C = text after the needle + question + assistant header + prefix

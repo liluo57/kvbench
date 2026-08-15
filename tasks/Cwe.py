@@ -2,8 +2,8 @@
 
 Find the 10 most frequent words in a numbered list; ``outputs`` is those 10
 words, all of which must appear in the prediction. Data come from
-``<DatasetPath>/ruler/cwe_len*.jsonl`` (see :mod:`tasks._Ruler` for the record
-layout and chat-prompt wrapping).
+``<DatasetPath>/ruler/cwe_len*.jsonl`` (see :mod:`tasks.bases.RulerBase` for
+the record layout and chat-prompt wrapping).
 
 Dataset structure (what the shuffle keys on)
 --------------------------------------------
@@ -44,7 +44,7 @@ from core.Result import Result
 from core.Task import Case
 
 from .TemplateHelper import AssistantSuffix, UserContext
-from ._Ruler import _RulerBase
+from .bases.RulerBase import RulerBase
 
 #: The CWE instruction line, used to locate the test example's list.
 _HeaderLine = "Below is a numbered list"
@@ -54,7 +54,7 @@ _ItemPattern = re.compile(r"\d+\.\s")
 _NChunks = 10
 
 
-class CWETask(_RulerBase):
+class CWETask(RulerBase):
     """Common words extraction: list the most frequent words in the haystack.
 
     ``outputs`` is the 10 most common words; all of them must appear in the

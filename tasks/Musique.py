@@ -1,14 +1,14 @@
-"""CacheBlend multi-hop QA over a knowledge base (``example/blend_musique.py``).
+"""Multi-hop QA over a knowledge base (``example/blend_musique.py``).
 
-Dataset: ``<DatasetPath>/musique``. See :mod:`tasks._Cacheblend` for the record
+Dataset: ``<DatasetPath>/musique``. See :mod:`tasks.bases.KBBase` for the record
 layout, chat-prompt wrapping and scoring.
 """
 
-from ._Cacheblend import _QABase
+from .bases.KBBase import QABase
 
 
-class MusiqueTask(_QABase):
-    """Multi-hop QA (cacheblend ``blend_musique.py``)."""
+class MusiqueTask(QABase):
+    """Multi-hop QA over a knowledge base (``blend_musique.py``)."""
 
     name = "musique"
     defaultDataset = "musique"

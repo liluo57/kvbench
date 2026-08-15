@@ -19,7 +19,7 @@ Each task's dataset is resolved by *name* against ``DatasetPath`` from
 - :class:`MusiqueTask` / :class:`WikimQATask` / :class:`SamsumTask` — the
   knowledge-base workloads the original CacheBlend repo evaluates on
   (``<DatasetPath>/musique``, ``/wikimqa``, ``/samsum``; each in its own module
-  sharing the machinery in :mod:`tasks._Cacheblend`).
+  sharing the machinery in :mod:`tasks.bases.KBBase`).
 """
 
 from .Cwe import CWEShuffleTask, CWETask

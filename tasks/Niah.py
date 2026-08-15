@@ -2,7 +2,8 @@
 
 A magic number (the needle) is hidden mid-essay; the question asks for the
 value tied to a word key. Data come from ``<DatasetPath>/ruler/niah_len*.jsonl``
-(see :mod:`tasks._Ruler` for the record layout and chat-prompt wrapping).
+(see :mod:`tasks.bases.RulerBase` for the record layout and chat-prompt
+wrapping).
 
 Case payload contract
 ---------------------
@@ -29,10 +30,10 @@ from core.Result import Result
 from core.Task import Case
 
 from .TemplateHelper import AssistantSuffix, UserContext
-from ._Ruler import _RulerBase
+from .bases.RulerBase import RulerBase
 
 
-class NIAHTask(_RulerBase):
+class NIAHTask(RulerBase):
     """Needle-in-a-haystack: the needle is embedded mid-essay; ask for its value.
 
     The whole prompt is sent in original order with no warm-up — the recompute

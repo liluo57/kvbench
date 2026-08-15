@@ -1,14 +1,14 @@
-"""CacheBlend single-hop QA over a knowledge base (``example/blend_wikimqa.py``).
+"""Single-hop QA over a knowledge base (``example/blend_wikimqa.py``).
 
-Dataset: ``<DatasetPath>/wikimqa``. See :mod:`tasks._Cacheblend` for the record
+Dataset: ``<DatasetPath>/wikimqa``. See :mod:`tasks.bases.KBBase` for the record
 layout, chat-prompt wrapping and scoring.
 """
 
-from ._Cacheblend import _QABase
+from .bases.KBBase import QABase
 
 
-class WikimQATask(_QABase):
-    """Single-hop QA (cacheblend ``blend_wikimqa.py``)."""
+class WikimQATask(QABase):
+    """Single-hop QA over a knowledge base (``blend_wikimqa.py``)."""
 
     name = "wikimqa"
     defaultDataset = "wikimqa"

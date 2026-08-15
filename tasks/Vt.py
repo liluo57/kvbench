@@ -3,7 +3,7 @@
 Track the chain of ``VAR x = y`` assignments to a value; ``outputs`` is the
 list of variable names assigned the queried value, all of which must appear in
 the prediction. Data come from ``<DatasetPath>/ruler/vt_len*.jsonl`` (see
-:mod:`tasks._Ruler` for the record layout and chat-prompt wrapping).
+:mod:`tasks.bases.RulerBase` for the record layout and chat-prompt wrapping).
 
 Dataset structure (what the shuffle keys on)
 --------------------------------------------
@@ -43,13 +43,13 @@ from core.Result import Result
 from core.Task import Case
 
 from .TemplateHelper import AssistantSuffix, UserContext
-from ._Ruler import _RulerBase
+from .bases.RulerBase import RulerBase
 
 #: A ``VAR x = y`` assignment: ``VAR ABCDE = 12345`` or ``VAR FGHIJ = VAR ABCDE``.
 _ChainPattern = re.compile(r"VAR [A-Z]+ = (?:VAR [A-Z]+|\d+)")
 
 
-class VTTask(_RulerBase):
+class VTTask(RulerBase):
     """Variable tracking: track the chain of variable assignments to a value.
 
     ``outputs`` is the list of variable names assigned the queried value; all
