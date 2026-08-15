@@ -239,7 +239,7 @@ def Main():
     ap.add_argument("--num_layers", type=int, default=28)
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.7)
-    ap.add_argument("--max_model_len", type=int, default=98304)
+    ap.add_argument("--max_model_len", type=int, default=40960)
     ap.add_argument("--enforce_eager", action="store_true")
     ap.add_argument("--max_new_tokens", type=int, default=64)
     ap.add_argument("--recomp_ratio", type=float, default=0.0)

@@ -68,8 +68,15 @@ def _tokens(s: str) -> List[str]:
 
 
 def ParseGeneration(s) -> str:
-    """First-line + Yes/No collapse (the original ``utils.parse_generation``)."""
-    s = (s or "").lstrip("\n").split("\n")[0]
+    """First-line + Yes/No collapse (the original ``utils.parse_generation``).
+
+    ``lstrip`` strips *all* leading whitespace, not just newlines: the
+    CacheBlend fork's vLLM (0.4.1) reports ``outputs[0].text`` with a leading
+    space before the first real token (``" \\n\\nExeter College, Oxford"``), so
+    a ``lstrip("\\n")``-only version leaves the first line as a lone space and
+    every token-based metric collapses to 0.
+    """
+    s = (s or "").lstrip().split("\n")[0]
     if s.startswith("Yes") or s.startswith("yes"):
         return "Yes"
     words = s.split()

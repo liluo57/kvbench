@@ -51,6 +51,7 @@ phase only repairs attention, so nothing is subtracted for recomp_ratio). A
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -64,6 +65,16 @@ class CacheBlendWorker:
         self.args = args
         self._torch = __import__("torch")
         print(f"[cacheblend-helper] loading model {args.model} ...", flush=True)
+        # The CacheBlend hooks live only in the xformers attention backend; the
+        # fork's default already resolves there (no flash_attn in this venv),
+        # but pin it so a future flash_attn install cannot silently switch
+        # backends.
+        os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
+        # Qwen3 is not known to the fork's vLLM 0.4.1 / transformers 4.44.2;
+        # the out-of-tree model in Qwen3ForCacheBlendRepo registers itself when
+        # the model's config.json declares Qwen3ForCausalLM. Mistral (the fork's
+        # native model) goes through untouched.
+        self._registerOutOfTreeModel(args.model)
         # dtype="auto" loads the model's own config dtype (Mistral-7B-Instruct
         # v0.2 is bfloat16). enforce_eager is left unset on purpose: CacheBlend's
         # collect reads hack_kv captured during the prefill forward, and the
@@ -74,14 +85,20 @@ class CacheBlendWorker:
         # (max(max_model_len, 2048) = max_model_len here), which guarantees the
         # batched collect's groups (<= max_collect_tokens) prefill in a single
         # forward.
+        #
+        # Qwen3's tokenizer.json was serialized by a newer ``tokenizers`` than
+        # this venv (0.19.x) can parse, so Qwen3 runs on the slow BPE tokenizer
+        # (vocab.json + merges.txt); Mistral keeps its fast tokenizer.
         self.llm = LLM(
             model=args.model,
             dtype="auto",
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_model_len=args.max_model_len,
             max_num_seqs=args.max_num_seqs,
+            **({"tokenizer_mode": "slow"} if self._isQwen3 else {}),
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            args.model, **({"use_fast": False} if self._isQwen3 else {}))
         self.llm.set_tokenizer(self.tokenizer)
         self.sampling_params = SamplingParams
 
@@ -101,6 +118,29 @@ class CacheBlendWorker:
         #: Per-chunk token ids, keyed the same way.
         self._chunkIds = {}
         print("[cacheblend-helper] ready", flush=True)
+
+    def _registerOutOfTreeModel(self, model: str) -> None:
+        """Register the model's architecture if the fork does not know it.
+
+        Reads ``config.json`` at the model path (a local modelscope / HF
+        checkout) and, for architectures the fork's registry lacks, imports and
+        runs the matching out-of-tree registration. The fork ships no Qwen3, so
+        this is where ``Qwen3ForCausalLM`` is wired in — additively, without
+        touching the original repo.
+        """
+        self._isQwen3 = False
+        cfgPath = os.path.join(model, "config.json")
+        try:
+            with open(cfgPath) as f:
+                archs = json.load(f).get("architectures", [])
+        except OSError:
+            return
+        if "Qwen3ForCausalLM" in archs:
+            self._isQwen3 = True
+            import Qwen3ForCacheBlendRepo
+            Qwen3ForCacheBlendRepo.register_qwen3()
+            print("[cacheblend-helper] registered out-of-tree "
+                  "Qwen3ForCausalLM", flush=True)
 
     # ------------------------------------------------------------- collect
     def _collectIds(self, ids: list):

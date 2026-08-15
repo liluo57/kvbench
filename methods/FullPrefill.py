@@ -123,7 +123,7 @@ class FullPrefillVllm(_FullPrefillBase):
         *,
         maxNewTokens: int = 64,
         gpuMemoryUtilization: float = 0.7,
-        maxModelLen: int = 98304,
+        maxModelLen: int = 40960,
         tensorParallelSize: int = 1,
         tag: Optional[str] = None,
     ):

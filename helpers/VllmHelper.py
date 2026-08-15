@@ -107,7 +107,7 @@ def CreateLlm(
     gpuIds: Union[str, List[int]] = "0",
     *,
     gpuMemoryUtilization: float = 0.7,
-    maxModelLen: int = 98304,
+    maxModelLen: int = 40960,
     tensorParallelSize: int = 1,
     dtype: str = "bfloat16",
 ):

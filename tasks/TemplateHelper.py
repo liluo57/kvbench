@@ -1,4 +1,4 @@
-"""Chat-template prompt pieces for the configured model (Qwen2.5-Instruct).
+"""Chat-template prompt pieces for the configured model (Qwen chat format).
 
 Shared by the RULER tasks (via ``_Ruler``) and the cacheblend knowledge-base
 tasks (``Cacheblend``). The reference data is Mistral-formatted (``[INST]`` /
@@ -13,10 +13,47 @@ tokenizer tokenizes them correctly). A complete prompt is one user turn whose
 ``UserContext`` / ``AssistantSuffix`` assemble the two reusable pieces that
 reuse methods cache and fuse (the fresh query is the tail of the user turn,
 closed by the assistant header).
+
+Qwen3 thinking mode
+-------------------
+Qwen3-Instruct defaults to **thinking mode**: given ``<|im_start|>assistant\n``
+it opens a ``<think>`` block and reasons before answering. KVBench runs greedy
+(``temperature=0``) with a small token budget, so on the knowledge-base tasks
+the whole budget is consumed by the reasoning trace and the real answer never
+appears — F1 / ROUGE-L collapse to 0. (The RULER shuffle tasks only survive
+because their ``answer_prefix`` forces the answer value out *before* the trace.)
+
+vLLM's ``enable_thinking`` switch lives at the chat-template / entrypoint layer;
+KVBench feeds the methods raw token ids, so the switch must be baked into the
+prompt text. Qwen3's own chat template renders non-thinking mode as an
+*empty, pre-closed* think block right after the assistant header:
+
+    "<|im_start|>assistant\n<think>\n\n</think>"
+
+:func:`AssistantSuffix` appends exactly that when the configured model defaults
+to thinking (detected from the model's ``config.json`` ``architectures``), so
+every method shares the fix. Non-Qwen models keep the plain header.
 """
+
+import json
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
+
+from core.Config import ModelPath as _ModelPath
 
 ImStart = "<|im_start|>"
 ImEnd = "<|im_end|>"
+
+#: Architectures whose Instruct chat defaults to thinking mode (Qwen3). The
+#: out-of-tree CacheBlend helper uses the same ``config.json`` signal to detect
+#: Qwen3, so the two stay consistent.
+_ThinkingDefaultArchs = ("Qwen3ForCausalLM",)
+
+#: The exact prefix Qwen3's chat template emits for ``enable_thinking=False``:
+#: an empty, pre-closed think block that tells the model to answer directly.
+_NonThinkingBlock = "<think>\n\n</think>"
 
 
 def UserContext(body: str) -> str:
@@ -24,6 +61,39 @@ def UserContext(body: str) -> str:
     return f"{ImStart}user\n{body}"
 
 
-def AssistantSuffix(tail: str) -> str:
-    """Close the user turn and open the assistant turn (suffix part)."""
-    return f"{tail}{ImEnd}\n{ImStart}assistant\n"
+def AssistantSuffix(
+    tail: str, *, nonThinking: Optional[bool] = None
+) -> str:
+    """Close the user turn and open the assistant turn (suffix part).
+
+    For a thinking-default model (Qwen3) the assistant header is followed by
+    the empty pre-closed ``<think></think>`` block, so the model answers
+    directly instead of burning the generation budget on a reasoning trace.
+    ``nonThinking`` overrides the auto-detection.
+    """
+    header = f"{tail}{ImEnd}\n{ImStart}assistant\n"
+    if nonThinking is False:
+        return header
+    if nonThinking is None and not _ThinksByDefault():
+        return header
+    return header + _NonThinkingBlock
+
+
+@lru_cache(maxsize=1)
+def _ThinksByDefault() -> bool:
+    """Whether the configured model's Instruct chat defaults to thinking.
+
+    Reads ``config.json`` at the configured ``ModelPath`` and looks for a
+    thinking-default architecture (``Qwen3ForCausalLM``). Any failure (missing
+    model dir / config) falls back to ``False`` — the plain assistant header.
+    """
+    modelPath = _ModelPath()
+    if not modelPath:
+        return False
+    try:
+        cfgPath = Path(modelPath) / "config.json"
+        with open(cfgPath, encoding="utf-8") as f:
+            archs = json.load(f).get("architectures", [])
+    except (OSError, ValueError):
+        return False
+    return any(a in _ThinkingDefaultArchs for a in archs)

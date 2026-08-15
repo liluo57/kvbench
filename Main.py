@@ -46,9 +46,9 @@ def Main() -> None:
     #: (omit for all samples).
     tasks = [
         NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        # VTShuffleTask(maxSamples=MAX_SAMPLES),
-        # MusiqueTask(maxSamples=MAX_SAMPLES),
+        CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        VTShuffleTask(maxSamples=MAX_SAMPLES),
+        MusiqueTask(maxSamples=MAX_SAMPLES),
         SamsumTask(maxSamples=MAX_SAMPLES),
         WikimQATask(maxSamples=MAX_SAMPLES),
     ]
@@ -63,7 +63,7 @@ def Main() -> None:
         CacheblendRepo(gpuIds="0", maxNewTokens=64),
         CacheblendRepo(gpuIds="5", maxNewTokens=64,fullPrefill=True,tag='full_prefill'),
         FullPrefillVllm(gpuIds="1", maxNewTokens=64),
-        NaiveTransformer(gpuIds="2", maxNewTokens=64),
+        # NaiveTransformer(gpuIds="2", maxNewTokens=64),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]

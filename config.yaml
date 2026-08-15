@@ -21,8 +21,7 @@
 DatasetPath: /data/lyh/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-# (Qwen2.5-7B-Instruct-1M, the model cacheblend's niah examples run on.)
-ModelPath: /data/lyh/.cache/modelscope/models/Qwen--Qwen2.5-7B-Instruct-1M/snapshots/master
+ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B
 
 # The CacheblendRepo method (methods/CacheblendRepo.py) runs the *original*
 # CacheBlend repo (YaoJiayi/CacheBlend): a patched vLLM 0.4.1 whose collect /
@@ -35,7 +34,10 @@ Cacheblend:
     RepoPath: /data/lyh/cache-blend/CacheBlend
     # Mistral-7B-Instruct-v0.2. The HF cache here has only config/tokenizer
     # files (no weights), so the complete modelscope copy is used.
-    ModelPath: /data/lyh/.cache/modelscope/hub/models/mistralai/Mistral-7B-Instruct-v0___2
+    # The worker self-resolves the model: pointing ModelPath at a Qwen3
+    # loads it additively via helpers/Qwen3ForCacheBlendRepo.py, without
+    # touching the official repo.
+    ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B
 
 # The system vLLM is installed in the conda base env
 # (vllm==0.25.1+cu129 + torch==2.11.0+cu129, a consistent CUDA stack). No

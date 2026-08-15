@@ -108,7 +108,7 @@ class CacheBlendMethod(Method):
         modelPath: Optional[str] = None,
         *,
         maxNewTokens: int = 64,
-        maxModelLen: int = 98304,
+        maxModelLen: int = 40960,
         gpuMemoryUtilization: float = 0.7,
         recompRatio: float = 0.15,
         maxLocalCpuSize: float = 5.0,

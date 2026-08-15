@@ -779,7 +779,7 @@ def CreateBlendLlm(
     gpuIds: str = "0",
     *,
     gpuMemoryUtilization: float = 0.7,
-    maxModelLen: int = 98304,
+    maxModelLen: int = 40960,
     dtype: str = "bfloat16",
     enforceEager: bool = True,
 ):
