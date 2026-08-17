@@ -782,12 +782,19 @@ def CreateBlendLlm(
     maxModelLen: int = 40960,
     dtype: str = "bfloat16",
     enforceEager: bool = True,
+    tensorParallelSize: int = 1,
 ):
     """Build the vLLM ``LLM`` wired for in-process LMCache CacheBlend.
 
     ``kv_role="kv_both"`` + ``LMCacheConnectorV1`` makes the engine store KV in
     (and retrieve from) the CPU cache. Assumes :func:`SetBlendEnv` +
     :func:`ApplyPatches` already ran (they must precede vLLM import).
+
+    Tensor parallelism: ``tensor_parallel_size`` (default 1, the single-GPU
+    path). With ``tensor_parallel_size>1``, ``gpuIds`` must name that many
+    devices (e.g. ``"0,1"``), each TP rank gets its own vLLM worker process and
+    its own LMCache engine, and the blend patches run per rank over that rank's
+    KV shard.
     """
     from helpers.VllmHelper import SanitizedModelDir, SetCudaVisibleDevices
 
@@ -811,6 +818,7 @@ def CreateBlendLlm(
         dtype=dtype,
         gpu_memory_utilization=gpuMemoryUtilization,
         max_model_len=maxModelLen,
+        tensor_parallel_size=tensorParallelSize,
         enable_prefix_caching=False,
         enforce_eager=enforceEager,
     )

@@ -114,6 +114,7 @@ class CacheBlendMethod(Method):
         maxLocalCpuSize: float = 5.0,
         dtype: str = "bfloat16",
         enforceEager: bool = True,
+        tensorParallelSize: int = 1,
         # Kept for signature compatibility with the old worker subprocess
         # implementation; no longer used.
         numLayers: int = 28,
@@ -132,6 +133,7 @@ class CacheBlendMethod(Method):
         self.maxLocalCpuSize = maxLocalCpuSize
         self.dtype = dtype
         self.enforceEager = enforceEager
+        self.tensorParallelSize = tensorParallelSize
 
         #: Per-case state accumulated by :meth:`Prepare` and consumed by
         #: :meth:`Run`: each entry is ``{"prepare", "context_tokens"}`` (the
@@ -153,6 +155,7 @@ class CacheBlendMethod(Method):
             maxModelLen=maxModelLen,
             dtype=dtype,
             enforceEager=enforceEager,
+            tensorParallelSize=tensorParallelSize,
         )
         self.tokenizer = self.llm.get_tokenizer()
         self.sep = SepTokens(self.tokenizer)
