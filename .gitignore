@@ -6,5 +6,5 @@ dist/
 build/
 *.egg-info/
 
-# benchmark data (populated via configs/datasets.yaml DatasetPath)
+# benchmark data (populated via config.yaml DatasetPath)
 data/
