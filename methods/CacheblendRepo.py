@@ -22,11 +22,9 @@ Per case the engine calls, in order:
     Run(prompt)      -> per case the method strips the context off ``prompt``:
                           * prefix found  -> fuse the prepare chunks in their
                             original order against the fresh suffix;
-                          * no prefix     -> SplitReorderedReuse re-detects the
-                            prepared chunks inside ``prompt`` in their run order
-                            and fuses *those* (the shuffle tasks); the worker
-                            concatenates the per-chunk KVs in that run order and
-                            the check phase repairs the important tokens;
+                          * no prefix     -> ComposeReuse finds longest prefix
+                            of chunks forming a prefix of prompt (preferring
+                            original order), fuses those chunks + fresh suffix;
                           * neither       -> the worker generates the whole
                             prompt (``full`` op: no reuse)
     Reset()          -> cached per-chunk KVs are dropped
@@ -65,7 +63,7 @@ from core.Config import Get
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
-from helpers.Prompt import SplitReorderedReuse, SplitReuseParts
+from helpers.Prompt import ComposeReuse
 
 #: Worker readiness marker printed on the helper's stdout at startup.
 _ReadyLine = "[cacheblend-helper] ready"
@@ -255,18 +253,17 @@ class CacheblendRepo(Method):
     def _splitForFuse(self, chunks: List[str], prompt: str):
         """Return ``(runOrderChunks, suffixText, reordered)`` for a fuse.
 
-        - prefix preserved: the prepare chunks in their original order and the
-          fresh tail as ``suffix``;
-        - shuffled (no prefix): the chunks re-detected in ``prompt``'s order
-          (``SplitReorderedReuse``), ``suffix`` the uncovered text after them;
-        - otherwise ``(None, None, False)`` — the caller must full-prefill.
+        Uses ``ComposeReuse`` to find the longest prefix of ``prompt``
+        explainable by ``chunks`` (preferring original order). Returns:
+        - ``(order, suffix, reordered)`` when chunks form a prefix:
+          ``order`` is the chunk list in run order, ``suffix`` the fresh tail,
+          ``reordered`` indicates if order differs from original.
+        - ``(None, None, False)`` — the caller must full-prefill.
         """
-        _, suffix = SplitReuseParts(chunks, prompt)
-        if suffix is not None:
-            return chunks, suffix, False
-        order, suffix = SplitReorderedReuse(chunks, prompt)
+        order, suffix = ComposeReuse(chunks, prompt)
         if order is not None:
-            return order, suffix, True
+            reordered = order != chunks
+            return order, suffix, reordered
         return None, None, False
 
     def _runFull(self, prompt: str) -> Result:

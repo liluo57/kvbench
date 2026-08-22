@@ -24,29 +24,22 @@ lists, ``Run`` the batch's prompts, ``Reset`` clears the whole batch):
     Prepare(chunks)  -> for each case, encode each chunk at the token level,
                         joined by the literal ``' # # '`` sep ids, and prefill
                         it once so lmcache stores per-chunk KV segments.
-    Run(prompt)      -> per case: 1. SplitReuseParts strips the prepared
-                            context off ``prompt``: suffix found -> assemble
-                            context tokens + fresh suffix tokens and generate;
-                            lmcache reuses the cached chunk KV and blends the
-                            boundary.
-                        2. no prefix (shuffled order) -> SplitReorderedReuse
-                            re-detects the prepared chunks inside ``prompt`` in
-                            their run order, and the shuffled sep-joined stream
-                            still hits the stored per-chunk KV (lmcache keys
-                            segments by content hash) while the blender repairs
-                            positions.
-                        3. neither works -> generate the whole prompt (no
-                            reuse, e.g. empty prepare).
+    Run(prompt)      -> per case: 1. ComposeReuse finds the longest prefix of
+                            ``prompt`` explainable by prepared chunks (preferring
+                            original order), returns (order, suffix). If found,
+                            assemble reordered context tokens + fresh suffix
+                            tokens and generate; lmcache reuses cached chunk KV
+                            and blends the boundary.
+                        2. no match -> generate the whole prompt (no reuse,
+                            e.g. empty prepare or no chunks match the start).
     Reset()          -> drop the per-case token state (segment keys are
                         content-hashed, so stale cached KV is simply never hit).
     Close()          -> drop the LLM + free GPU cache.
 
 Note on the shuffle tasks (NIAHShuffleTask etc.): their ``run_input`` is the
-prepared chunks in a different order, so ``SplitReuseParts`` finds no prefix.
-Reuse still happens via :func:`helpers.Prompt.SplitReorderedReuse` — that is
-what the shuffle variants exist to exercise: a cacheblend method should reuse
-the per-chunk KV it stored during ``Prepare`` even when the chunks are re-ordered
-in ``run``, rather than recomputing. LMCache keys segments by *content hash*
+prepared chunks in a different order, so the old ``SplitReuseParts`` would find
+no prefix. Now ``ComposeReuse`` handles this by searching for reordered chunks
+after trying the original order first. LMCache keys segments by *content hash*
 (position-independent), so the shuffled sep-joined stream still hits ~100% of
 the stored chunk KV; the blender recomputes the important (reordered) tokens it
 detects. Only a prompt that cannot be explained by the prepared chunks at all
@@ -68,7 +61,7 @@ from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
-from helpers.Prompt import SplitReorderedReuse, SplitReuseParts
+from helpers.Prompt import ComposeReuse
 from helpers.VllmCacheblendPatches import (
     ApplyPatches,
     BuildContextTokens,
@@ -261,58 +254,33 @@ class CacheBlendMethod(Method):
         for run_input, state in zip(data, self._states):
             prepare: List[str] = state["prepare"]
             contextTokens: List[int] = state["context_tokens"]
-            _, suffix = SplitReuseParts(prepare, run_input)
-            if suffix is None and prepare:
-                # No reusable prefix, but the prepared chunks may still be inside
-                # the prompt in a different order (the shuffle tasks). Re-detect
-                # them: lmcache keys segments by content hash, so the reordered
-                # sep-joined stream hits the stored per-chunk KV, and the blender
-                # repairs the positions. If the prompt can't be explained by the
-                # chunks we fall through to a full prefill of ``run_input``.
-                order, suffix = SplitReorderedReuse(prepare, run_input)
-                if order is not None:
-                    ids = self._SaltedContextTokens(order, prepare)
-                    if suffix:
-                        # The trailing fresh text is salted too, so it can never
-                        # collide with another case's segment keys (it is never
-                        # stored, only computed fresh).
-                        ids = (
-                            ids
-                            + self.sep
-                            + self._SaltTokens(prepare)
-                            + EncodeText(self.tokenizer, suffix)
-                        )
-                    tokenStreams.append(ids)
-                    nInput = len(ids)
-                    metas.append({"reordered": True, "n_input": nInput})
-                    continue
-                suffix = None
-            if suffix is None or not contextTokens:
-                # No reusable content (empty warm-up, shuffled order not
-                # explained by the prepared chunks, or the prompt no longer
-                # starts with the context): generate the whole prompt.
-                ids = EncodeText(self.tokenizer, run_input)
+            order, suffix = ComposeReuse(prepare, run_input)
+            if order is not None and contextTokens:
+                # Found reusable chunks forming a prefix of run_input
+                ids = self._SaltedContextTokens(order, prepare)
+                if suffix:
+                    # The trailing fresh text is salted too, so it can never
+                    # collide with another case's segment keys (it is never
+                    # stored, only computed fresh).
+                    ids = (
+                        ids
+                        + self.sep
+                        + self._SaltTokens(prepare)
+                        + EncodeText(self.tokenizer, suffix)
+                    )
                 tokenStreams.append(ids)
                 nInput = len(ids)
-                metas.append({"n_input": nInput})
-            else:
-                # Fused run: cached context tokens + a trailing sep + fresh
-                # suffix. The trailing sep makes the suffix its own DB segment,
-                # so the LAST chunk also hits its stored key (without it, the
-                # final chunk would merge with the suffix into one new segment
-                # and not be reused). lmcache loads the chunk KV, computes the
-                # suffix fresh and blends. The suffix is salted like every other
-                # segment so a shared question across samples can never collide
-                # on its key (it is never stored).
-                ids = (
-                    contextTokens
-                    + self.sep
-                    + self._SaltTokens(prepare)
-                    + EncodeText(self.tokenizer, suffix)
-                )
-                tokenStreams.append(ids)
-                nInput = len(ids)
-                metas.append({"n_input": nInput})
+                # Check if order differs from original prepare order
+                reordered = order != prepare
+                metas.append({"reordered": reordered, "n_input": nInput})
+                continue
+            
+            # No reusable content (empty warm-up, or no chunks match the start
+            # of run_input): generate the whole prompt.
+            ids = EncodeText(self.tokenizer, run_input)
+            tokenStreams.append(ids)
+            nInput = len(ids)
+            metas.append({"n_input": nInput})
 
         batchOut = self._GenerateBatch(tokenStreams, self.maxNewTokens)
         results = []
