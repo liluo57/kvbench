@@ -24,7 +24,7 @@ from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
-from helpers.Prompt import SplitReuseParts
+from helpers.Prompt import ComposeReuse
 from helpers.TransformersHelper import CacheLayerPairs, TransformersGenerator
 
 
@@ -84,7 +84,7 @@ class NaiveTransformer(Method):
             prepare: List[str] = state["prepare"]
             past: Any = state["past"]
             lastId: Optional[int] = state["last_id"]
-            _, suffix = SplitReuseParts(prepare, run_input)
+            order, suffix = ComposeReuse(prepare, run_input)
             if past is None:
                 # Nothing was warmed up (niah / vt / cwe): recompute the whole
                 # prompt from scratch — the recompute baseline.
@@ -92,21 +92,30 @@ class NaiveTransformer(Method):
                 text, ttft, total, nTokens = self._gen.Generate(ids)
                 nInput = len(ids)
                 reuseRatio = 0.0
-            elif suffix:
-                # The prompt starts with the cached context and has fresh tokens
-                # after it: decode only the suffix against the stitched KV.
-                ids = self._gen.Encode(suffix)
-                text, ttft, total, nTokens = self._gen.Generate(
-                    ids, pastKeyValues=past
-                )
-                nInput = len(ids) + past.get_seq_length()
-                reuseRatio = 1.0
+            elif order is not None:
+                # Found reusable chunks forming a prefix of run_input
+                if suffix:
+                    # The prompt starts with cached context and has fresh tokens
+                    # after it: decode only the suffix against the stitched KV.
+                    ids = self._gen.Encode(suffix)
+                    text, ttft, total, nTokens = self._gen.Generate(
+                        ids, pastKeyValues=past
+                    )
+                    nInput = len(ids) + past.get_seq_length()
+                    reuseRatio = 1.0
+                else:
+                    # Prompt is exactly the cached context (nothing fresh to fuse).
+                    # Naive serves the stitched KV, decoding the answer from cache.
+                    nInput = past.get_seq_length()
+                    text, ttft, total, nTokens = self._decodeFromCache(
+                        past, lastId, prepare
+                    )
+                    reuseRatio = 1.0
             else:
-                # Either the prompt no longer starts with the cached context
-                # (niah_shuffle's shuffled order) or it is exactly the context
-                # (nothing fresh to fuse). Naive does not detect the change and
-                # blindly serves the stitched KV, decoding the answer from the
-                # cache — exactly what the recombination breaks.
+                # No chunks match the start of run_input (e.g., shuffled order).
+                # Naive does not detect the change and blindly serves the
+                # stitched KV, decoding the answer from the cache — exactly what
+                # the recombination breaks.
                 nInput = past.get_seq_length()  # before _decodeFromCache crops
                 text, ttft, total, nTokens = self._decodeFromCache(
                     past, lastId, prepare

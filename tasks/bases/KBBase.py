@@ -24,7 +24,7 @@ Case payload contract (consumed by every Method)
 ``metadata`` = ``{"answers", "question", "n_chunks", ...}``
 
 The ``suffix`` (the fresh question fused against the cached knowledge base) is
-recovered by the reuse methods via ``SplitReuseParts``.
+recovered by the reuse methods via ``ComposeReuse``.
 
 :class:`KBBase` owns the data loading, the chat-prompt building and the scoring
 shared by the three task families; each family lives in its own module
