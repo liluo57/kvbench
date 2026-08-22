@@ -2,27 +2,37 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List
 
 from .Result import Result
+
+if TYPE_CHECKING:
+    from .Workload import Workload
 
 
 @dataclass
 class Case:
     """A single evaluation sample.
 
+    A Case combines:
+    - input: The raw benchmark data (type defined by Workload, e.g. RAGInput)
+    - workload: A stateful execution policy that maps input to Method calls
+    - metadata: Extra info for Task.Evaluate (e.g. expected answer)
+
+    The Workload produces Actions (Prepare/Run) that the Engine executes.
+    This design supports both static RAG (prepare→run) and dynamic multi-agent
+    scenarios where the execution graph emerges at runtime.
+
     Attributes:
-        prepare_input: Text segments fed to ``Method.Prepare`` as warm-up
-            (e.g. the document whose KV cache is prefilled). An empty list
-            means no warm-up.
-        run_input: The complete prompt fed to ``Method.Run`` — always the full
-            text to generate from.
+        input: Input data for this workload. Type is defined by the Workload.
+        workload: Stateful execution policy. Decides how to map input to
+            a sequence of Method.Prepare/Run calls.
         metadata: Extra information needed for correctness evaluation
             (e.g. the expected answer).
     """
 
-    prepare_input: List[str] = field(default_factory=list)
-    run_input: str = ""
+    input: Any = None
+    workload: "Workload" = None  # type: ignore
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

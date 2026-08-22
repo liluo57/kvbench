@@ -1,10 +1,12 @@
 """The KVBench evaluation engine."""
 
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 from .Metrics import AggregateStats, Metric
 from .Method import Method
+from .Result import Result
 from .Task import Case, Task
+from .Workload import Action, ActionKind, ActionResult, Workload
 
 
 def _NormalizeScores(scores: Any) -> Dict[str, float]:
@@ -156,18 +158,88 @@ class Engine:
         taskScores: Dict[str, List[float]],
         methodScores: Dict[str, List[float]],
     ) -> int:
-        """Run one batch of cases through ``Prepare -> Run``.
+        """Run one batch of cases through the Workload action loop.
 
-        ``batch`` is a list of :class:`Case` objects (at most ``batchSize``).
-        The method is prepared on all cases at once, run on all prompts at once
-        (results in the same order), then each result is scored per-sample and
-        fed to every system :class:`Metric`; finally :meth:`Method.Reset` clears
-        the batch's state. Returns the number of cases in the batch.
+        Each Case's Workload maintains its own execution state. The Engine
+        collects Actions from all active Workloads at each step, batches them
+        by kind (all PREPARE or all RUN), executes via Method, and dispatches
+        results back to Workloads.
+
+        This design supports:
+        - Static RAG (prepare → run)
+        - Sequential agents (run → run → run)
+        - Fixed graph (run(A), run(B)+run(C), run(D))
+        - Dynamic agents (run → route → run → ...)
+
+        Returns the number of cases in the batch.
         """
-        method.Prepare([c.prepare_input for c in batch])
-        results = method.Run([c.run_input for c in batch])
+        workloads = [c.workload for c in batch]
+        final_results: Dict[int, Result] = {}  # case_id → last RUN result
 
-        for case, result in zip(batch, results):
+        # Main action loop
+        while True:
+            # 1. Collect next actions from all active workloads
+            step_actions: List[Action] = []
+            wl_slices: List[Tuple[Workload, int, int]] = []  # (wl, start, end)
+
+            for wl in workloads:
+                if wl.finished:
+                    continue
+                actions = wl.next()
+                if actions is None:
+                    continue
+                start = len(step_actions)
+                step_actions.extend(actions)
+                wl_slices.append((wl, start, start + len(actions)))
+
+            if not step_actions:
+                break  # All workloads finished
+
+            # 2. Verify same kind in one step (required for batching)
+            kinds = {a.kind for a in step_actions}
+            if len(kinds) > 1:
+                raise RuntimeError(
+                    f"Mixed action kinds in one step: {kinds}. "
+                    f"All actions in one step must be either PREPARE or RUN."
+                )
+            kind = kinds.pop()
+
+            # 3. Execute via Method
+            if kind == ActionKind.PREPARE:
+                # Prepare: batch all prepare_data lists
+                method.Prepare([a.data for a in step_actions])
+                step_results = [
+                    ActionResult(
+                        case_id=a.case_id,
+                        result=Result(),  # Prepare doesn't produce output
+                        tag=a.tag,
+                    )
+                    for a in step_actions
+                ]
+            else:  # RUN
+                results = method.Run([a.data for a in step_actions])
+                step_results = [
+                    ActionResult(
+                        case_id=a.case_id,
+                        result=r,
+                        tag=a.tag,
+                    )
+                    for a, r in zip(step_actions, results)
+                ]
+                # Record final RUN results
+                for sr in step_results:
+                    final_results[sr.case_id] = sr.result
+
+            # 4. Dispatch results to workloads
+            for wl, start, end in wl_slices:
+                wl.observe(step_results[start:end])
+
+        # 6. Evaluate using final results
+        for case in batch:
+            result = final_results.get(case.workload.case_id)
+            if result is None:
+                # No RUN was executed (shouldn't happen in normal cases)
+                continue
             for name, value in _NormalizeScores(
                 task.Evaluate(result, case.metadata)
             ).items():

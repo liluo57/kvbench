@@ -45,11 +45,11 @@ def Main() -> None:
     #: ``<DatasetPath>/ruler/<name>_len*.jsonl``; ``maxSamples`` caps the count
     #: (omit for all samples).
     tasks = [
-        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        VTShuffleTask(maxSamples=MAX_SAMPLES),
-        MusiqueTask(maxSamples=MAX_SAMPLES),
-        SamsumTask(maxSamples=MAX_SAMPLES),
+        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        # VTShuffleTask(maxSamples=MAX_SAMPLES),
+        # MusiqueTask(maxSamples=MAX_SAMPLES),
+        # SamsumTask(maxSamples=MAX_SAMPLES),
         WikimQATask(maxSamples=MAX_SAMPLES),
     ]
 

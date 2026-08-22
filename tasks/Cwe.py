@@ -23,12 +23,12 @@ correct answer untouched. That is exactly what makes a shuffle a fair test here
 Case payload contract
 ---------------------
 :class:`CWETask`:
-    ``prepare_input = []``             (no warm-up)
-    ``run_input     = fullChatPrompt`` (the complete prompt, original order)
+    ``input = RAGInput(prepare_input=[], run_input=fullChatPrompt)``
+    ``workload = RAGWorkload`` (skip Prepare, just Run)
 
 :class:`CWEShuffleTask`:
-    ``prepare_input = [head, *chunks, tail]``  (original order segments)
-    ``run_input     = head + shuffle(chunks).join("") + tail``
+    ``input = RAGInput(prepare_input=segments, run_input=shuffled_prompt)``
+    ``workload = RAGWorkload`` (Prepare → Run)
 
 ``chunks`` are fixed-size blocks of the test list's numbered items. ``head``
 (few-shot example + test instruction) and ``tail`` (test question + assistant
@@ -42,6 +42,7 @@ from typing import Any, Dict, Iterator, List
 
 from core.Result import Result
 from core.Task import Case
+from core.Workload import RAGInput, RAGWorkload
 
 from .TemplateHelper import AssistantSuffix, UserContext
 from .bases.RulerBase import RulerBase
@@ -69,8 +70,8 @@ class CWETask(RulerBase):
             body, answerPrefix = self._StripTemplate(s)
             fullPrompt = self._FullChat(body, answerPrefix)
             yield Case(
-                prepare_input=[],
-                run_input=fullPrompt,
+                input=RAGInput(prepare_input=[], run_input=fullPrompt),
+                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=[], run_input=fullPrompt)),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 
@@ -133,8 +134,9 @@ class CWEShuffleTask(CWETask):
             segments = self._SplitSegments(s, body, answerPrefix)
             fullPrompt = "".join(segments)
             chunks = self._Shuffled(segments[1:-1], seed=int(s.get("index", i)))
+            run_input = segments[0] + "".join(chunks) + segments[-1]
             yield Case(
-                prepare_input=segments,
-                run_input=segments[0] + "".join(chunks) + segments[-1],
+                input=RAGInput(prepare_input=segments, run_input=run_input),
+                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=segments, run_input=run_input)),
                 metadata=self._Metadata(i, s, fullPrompt),
             )

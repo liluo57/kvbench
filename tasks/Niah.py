@@ -8,12 +8,12 @@ wrapping).
 Case payload contract
 ---------------------
 :class:`NIAHTask`:
-    ``prepare_input = []``             (no warm-up)
-    ``run_input     = fullChatPrompt`` (the complete prompt, original order)
+    ``input = RAGInput(prepare_input=[], run_input=fullChatPrompt)``
+    ``workload = RAGWorkload`` (skip Prepare, just Run)
 
 :class:`NIAHShuffleTask`:
-    ``prepare_input = [prefix, *essays, needle, suffix]``  (original order)
-    ``run_input     = prefix + shuffle([*essays, needle]).join("") + suffix``
+    ``input = RAGInput(prepare_input=parts, run_input=shuffled_prompt)``
+    ``workload = RAGWorkload`` (Prepare → Run)
 
 ``prefix`` (user opener + instruction) and ``suffix`` (question + assistant
 header + answer prefix) are kept in place, so the shuffled prompt stays a
@@ -28,6 +28,7 @@ from typing import Any, Dict, Iterator, List, Tuple
 
 from core.Result import Result
 from core.Task import Case
+from core.Workload import RAGInput, RAGWorkload
 
 from .TemplateHelper import AssistantSuffix, UserContext
 from .bases.RulerBase import RulerBase
@@ -47,8 +48,8 @@ class NIAHTask(RulerBase):
         for i, s in enumerate(self._LoadSamples()):
             _, fullPrompt = self._BuildChatParts(s, splitNeedle=True)
             yield Case(
-                prepare_input=[],
-                run_input=fullPrompt,
+                input=RAGInput(prepare_input=[], run_input=fullPrompt),
+                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=[], run_input=fullPrompt)),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 
@@ -84,9 +85,10 @@ class NIAHShuffleTask(NIAHTask):
         for i, s in enumerate(self._LoadSamples()):
             parts, fullPrompt = self._SplitSegments(s)
             shuffled = self._Shuffled(parts[1:-1], seed=int(s.get("index", i)))
+            run_input = parts[0] + "".join(shuffled) + parts[-1]
             yield Case(
-                prepare_input=parts,
-                run_input=parts[0] + "".join(shuffled) + parts[-1],
+                input=RAGInput(prepare_input=parts, run_input=run_input),
+                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=parts, run_input=run_input)),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 

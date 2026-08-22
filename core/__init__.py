@@ -6,8 +6,12 @@ from .Metrics import Metric
 from .Method import Method
 from .Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from .Task import Case, Task
+from .Workload import Action, ActionKind, ActionResult, RAGInput, RAGWorkload, Workload
 
 __all__ = [
+    "Action",
+    "ActionKind",
+    "ActionResult",
     "Case",
     "DatasetDir",
     "Engine",
@@ -17,8 +21,11 @@ __all__ = [
     "Method",
     "ModelPath",
     "NumOutputTokensKey",
+    "RAGInput",
+    "RAGWorkload",
     "Result",
-    "TotalTimeKey",
     "Task",
+    "TotalTimeKey",
     "TtftKey",
+    "Workload",
 ]

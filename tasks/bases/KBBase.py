@@ -19,10 +19,9 @@ Data shape (the original ``inputs/*.json``):
 
 Case payload contract (consumed by every Method)
 -------------------------------------------------
-``prepare_input = chunks``      (List[str]; the first chunk carries the
-                                 instruction prefix and the user-turn header)
-``run_input     = fullPrompt``  (``"".join(wrappedChunks) + suffix``)
-``metadata``    = ``{"answers", "question", "n_chunks", ...}``
+``input = RAGInput(prepare_input=chunks, run_input=fullPrompt)``
+``workload = RAGWorkload`` (Prepare → Run)
+``metadata`` = ``{"answers", "question", "n_chunks", ...}``
 
 The ``suffix`` (the fresh question fused against the cached knowledge base) is
 recovered by the reuse methods via ``SplitReuseParts``.
@@ -42,6 +41,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from core.Config import DatasetDir
 from core.Result import Result
 from core.Task import Case, Task
+from core.Workload import RAGInput, RAGWorkload
 
 from ..TemplateHelper import AssistantSuffix, UserContext
 
@@ -192,8 +192,8 @@ class KBBase(Task):
             suffix = AssistantSuffix(suffix)
             fullPrompt = "".join(chunks) + suffix
             yield Case(
-                prepare_input=chunks,          # isolated knowledge chunks
-                run_input=fullPrompt,          # whole prompt to generate
+                input=RAGInput(prepare_input=chunks, run_input=fullPrompt),
+                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=chunks, run_input=fullPrompt)),
                 metadata={
                     "case_id": i,
                     "question": s.get("question"),
