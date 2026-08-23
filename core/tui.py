@@ -5,6 +5,7 @@ import os
 import select
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -217,7 +218,17 @@ class BenchmarkTui:
         return table
 
     def _Schedule(self, snapshot: Dict[str, Any]):
-        gpu = Table(title="GPU pool", expand=True)
+        sampledAt = snapshot.get("gpu_snapshot_at")
+        sampleLabel = (
+            time.strftime("%H:%M:%S", time.localtime(sampledAt))
+            if isinstance(sampledAt, (int, float))
+            else "waiting"
+        )
+        error = snapshot.get("gpu_snapshot_error", "")
+        title = f"GPU pool (updated {sampleLabel}, every 1s)"
+        if error:
+            title += " [NVML error; showing last sample]"
+        gpu = Table(title=title, expand=True)
         for column in ("id", "state", "memory", "util", "worker"):
             gpu.add_column(column)
         assignments = {}

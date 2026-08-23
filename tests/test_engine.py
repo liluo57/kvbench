@@ -265,6 +265,58 @@ def test_perf_weight_drives_initial_instance_allocation(tmp_path):
     assert [event["method_index"] for event in initial].count(1) == 1
 
 
+def test_tui_gpu_snapshot_is_refreshed_from_nvml(tmp_path):
+    baseline = [_gpu(0)]
+    live = [GpuInfo(0, "fake", 100, 60, 0.6, 87)]
+    queried = iter([baseline, live])
+
+    class RecordingTui:
+        enabled = True
+        cancelRequested = False
+
+        def __init__(self):
+            self.snapshots = []
+
+        def Start(self):
+            pass
+
+        def Update(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def FinishAndWait(self):
+            pass
+
+        def Stop(self):
+            pass
+
+    dashboard = RecordingTui()
+
+    def query():
+        return next(queried, baseline)
+
+    with patch("core.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
+        "core.Engine.QueryGpus", side_effect=query
+    ), patch("core.Engine.BenchmarkTui", return_value=dashboard), patch(
+        "core.Engine._GPU_SNAPSHOT_INTERVAL", 0
+    ):
+        engine = Engine(
+            outputRoot=tmp_path,
+            tui=True,
+            verbose=False,
+            initializeTimeout=5,
+            taskTimeout=5,
+            shutdownGracePeriod=1,
+            gpuReleaseStableSeconds=0,
+        )
+        engine.Evaluate([FakeTask("task", "text")], [FakeMethod()], [])
+
+    assert any(
+        snapshot["gpu_snapshot"][0]["utilization"] == 87
+        and snapshot["gpu_snapshot"][0]["memoryRatio"] == 0.6
+        for snapshot in dashboard.snapshots
+    )
+
+
 def test_gpu_is_not_rescheduled_until_nvml_reports_release(tmp_path):
     baseline = [_gpu(0)]
     busy = [GpuInfo(0, "fake", 100, 50, 0.5, 0)]

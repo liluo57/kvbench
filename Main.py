@@ -44,7 +44,7 @@ from tasks import (
 )
 from tasks.FreshGap import FreshGapTask
 
-MAX_SAMPLES=4
+MAX_SAMPLES=64
 MAX_NEW_TOKENS=64
 
 
@@ -54,16 +54,16 @@ def Main() -> None:
     #: (omit for all samples).
     tasks = [
         NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        # VTShuffleTask(maxSamples=MAX_SAMPLES),
-        # MusiqueTask(maxSamples=MAX_SAMPLES),
-        # SamsumTask(maxSamples=MAX_SAMPLES),
-        # WikimQATask(maxSamples=MAX_SAMPLES),
-        # FreshGapTask(nCases=MAX_SAMPLES),
-        # KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        # KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-        # KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+        CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        VTShuffleTask(maxSamples=MAX_SAMPLES),
+        MusiqueTask(maxSamples=MAX_SAMPLES),
+        SamsumTask(maxSamples=MAX_SAMPLES),
+        WikimQATask(maxSamples=MAX_SAMPLES),
+        FreshGapTask(nCases=MAX_SAMPLES),
+        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
     ]
 
     #: Methods to run (edit to taste). Constructors are lightweight: concrete

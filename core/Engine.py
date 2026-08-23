@@ -20,6 +20,9 @@ from .Worker import WorkerMain
 from .tui import BenchmarkTui
 
 
+_GPU_SNAPSHOT_INTERVAL = 1.0
+
+
 def _MeanValue(stats: Dict[str, Any]) -> Any:
     if not stats:
         return None
@@ -182,6 +185,9 @@ class Engine:
         gpuBaseline = {gpu.id: gpu.memoryUsed for gpu in gpuSnapshot}
         gpuBaselinePids = {gpu.id: set(gpu.computePids) for gpu in gpuSnapshot}
         lastGpuReleasePoll = 0.0
+        lastGpuSnapshotPoll = startedMono
+        gpuSnapshotAt = startedWall
+        gpuSnapshotError = ""
         workerSerial = 0
         fatalError: Optional[str] = None
         fatalStatus: Optional[str] = None
@@ -633,6 +639,23 @@ class Engine:
                 freeGpus.append(gpuId)
             freeGpus.sort(key=gpuPool.index)
 
+        def refreshGpuSnapshot(now: float) -> None:
+            """Refresh dashboard GPU telemetry once per second."""
+            nonlocal gpuSnapshot, lastGpuSnapshotPoll
+            nonlocal gpuSnapshotAt, gpuSnapshotError
+            if not tui.enabled or now - lastGpuSnapshotPoll < _GPU_SNAPSHOT_INTERVAL:
+                return
+            lastGpuSnapshotPoll = now
+            try:
+                gpuSnapshot = QueryGpus()
+            except RuntimeError as exc:
+                # Telemetry is best-effort: retain the last good sample instead
+                # of interrupting a running benchmark for a transient NVML error.
+                gpuSnapshotError = str(exc)
+                return
+            gpuSnapshotAt = time.time()
+            gpuSnapshotError = ""
+
         def recoverCurrentPair(worker: _WorkerState, reason: str, kind: str) -> None:
             if worker.taskIndex is None:
                 return
@@ -739,6 +762,8 @@ class Engine:
                 "free_gpus": freeGpus,
                 "cooling_gpus": sorted(coolingGpus),
                 "gpu_snapshot": [gpu.AsDict() for gpu in gpuSnapshot],
+                "gpu_snapshot_at": gpuSnapshotAt,
+                "gpu_snapshot_error": gpuSnapshotError,
                 "workers": [worker.Snapshot() for worker in workers.values()],
                 "runs": [results[pair] for pair in sorted(results)],
                 "cores": [_CoreReport(results[pair]) for pair in sorted(results)],
@@ -841,6 +866,7 @@ class Engine:
                     if not workers and not coolingGpus:
                         break
 
+                refreshGpuSnapshot(now)
                 if now - lastTuiUpdate >= 0.2:
                     tui.Update(snapshot())
                     lastTuiUpdate = now
