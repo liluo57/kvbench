@@ -10,8 +10,9 @@ it over JSON-lines:
 
     {"op": "fuse", "parts": [[cached, text], ...]}
         Generate an interleaved prompt. ``cached=True`` spans use previously
-        collected KV; ``cached=False`` spans are fresh. Fresh spans before the
-        trailing suffix are forced into CacheBlend's recomputation set.
+        collected KV; ``cached=False`` spans are fresh. Middle-fresh spans are
+        forced into CacheBlend's recomputation set; later cached spans remain
+        subject to the normal V-difference top-k repair.
 
     {"op": "full", "text": ...}
         Generate the whole prompt from scratch.
@@ -41,6 +42,51 @@ import json
 import os
 import sys
 import time
+
+
+def _repair_plan(segments: list, prefix_len: int, ratio: float) -> dict:
+    """Describe positions the suffix-only check layer must recompute.
+
+    The patched vLLM fork can express one native trailing suffix, but a fresh
+    span in the middle must be explicitly selected.  Cached tokens after it
+    remain candidates for the fork's normal V-difference top-k selection; this
+    is the important distinction between CacheBlend repair and full tail
+    recomputation.  Keeping this calculation pure makes the behavior testable
+    without loading vLLM.
+    """
+    first_fresh = next(
+        (start for cached, _, _, start, _ in segments
+         if not cached and start < prefix_len),
+        None,
+    )
+    forced = {
+        pos
+        for cached, _, _, start, end in segments
+        if not cached
+        for pos in range(start, min(end, prefix_len))
+    }
+    cached_prefix = sum(
+        max(0, min(end, prefix_len) - start)
+        for cached, _, _, start, end in segments
+        if cached and start < prefix_len
+    )
+    ratio_repair = max(0, min(cached_prefix, int(cached_prefix * float(ratio))))
+    topk_count = max(0, min(prefix_len, len(forced) + ratio_repair))
+    if prefix_len <= 0 or topk_count <= 0:
+        effective_ratio = 0.0
+    elif topk_count >= prefix_len:
+        effective_ratio = 1.0
+    else:
+        # The fork executes int(prefix_len * recomp_ratio).  This midpoint
+        # maps back to topk_count without floating point boundary surprises.
+        effective_ratio = (topk_count + 0.5) / prefix_len
+    return {
+        "first_fresh": first_fresh,
+        "forced": forced,
+        "cached_prefix": cached_prefix,
+        "topk_count": topk_count,
+        "effective_ratio": effective_ratio,
+    }
 
 
 class CacheBlendWorker:
@@ -95,6 +141,7 @@ class CacheBlendWorker:
         self.device = next(engine.parameters()).device
         self.cfm = engine.model.cache_fuse_metadata
         self.cfm["recomp_ratio"] = args.recomp_ratio
+        self._installIndexedCheckMask()
 
         #: Per-chunk cached KV, keyed by the chunk's exact text: chunk text ->
         #: per-layer ``[[k, v], ...]``. Collected once per batch in ``collect``,
@@ -105,6 +152,70 @@ class CacheBlendWorker:
         #: Per-chunk token ids, keyed the same way.
         self._chunkIds = {}
         print("[cacheblend-helper] ready", flush=True)
+
+    def _installIndexedCheckMask(self) -> None:
+        """Make sparse check queries attend at their real token positions.
+
+        CacheBlend's fork installs ``LowerTriangularFromBottomRightMask`` for
+        every check pass.  That mask is valid only when selected queries are a
+        contiguous suffix.  Interleaved repair selects token rows by absolute
+        ``imp_indices``; use an AttentionBias whose materialized rows follow
+        those indices while retaining the fork's global key length. The result
+        is a tensor bias because xFormers dispatch only accepts registered bias
+        types, not an ad-hoc AttentionBias subclass.
+        """
+        try:
+            import vllm.attention.backends.xformers as backend
+        except Exception:  # pragma: no cover - worker dependencies are required
+            return
+
+        cfm = self.cfm
+        first_attn = self.layers[0].self_attn
+        cfm["_num_kv_heads"] = first_attn.num_kv_heads
+        cfm["_num_queries_per_kv"] = first_attn.num_heads // first_attn.num_kv_heads
+        native_mask = backend.LowerTriangularFromBottomRightMask
+
+        def indexed_causal_mask():
+            """Return a tensor bias in the fork's BMGHK layout."""
+            import torch
+
+            indices = cfm.get("imp_indices")
+            key_len = int(cfm.get("org_seq_len") or 0)
+            if indices is None or key_len <= 0:
+                return native_mask()
+            rows = indices.to(device=indices.device, dtype=torch.int64)
+            # CUTLASS requires the query-row stride (the padded key length) to
+            # be aligned to 8.  Materialize a padded key axis and slice back
+            # to the real sequence length; the slice preserves the aligned
+            # stride while no padded key is exposed to attention.
+            padded_key_len = (key_len + 7) // 8 * 8
+            keys = torch.arange(
+                padded_key_len, device=rows.device, dtype=torch.int64
+            )
+            allowed = keys.unsqueeze(0) <= rows.unsqueeze(1)
+            dtype = cfm.get("kv_cache_dtype") or torch.float32
+            neg_inf = torch.finfo(dtype).min
+            bias = torch.where(
+                allowed,
+                torch.zeros((), device=rows.device, dtype=dtype),
+                torch.full((), neg_inf, device=rows.device, dtype=dtype),
+            )
+            bias = bias[:, :key_len]
+            # The causal matrix is shared by every GQA head.  ``expand``
+            # supplies xFormers' required BMGHK logical shape without copying
+            # the potentially very large query/key matrix for each head.
+            return bias.view(1, 1, 1, rows.numel(), key_len).expand(
+                1,
+                cfm["_num_kv_heads"],
+                cfm["_num_queries_per_kv"],
+                rows.numel(),
+                key_len,
+            )
+
+        # The backend resolves this symbol at call time. Returning a Tensor is
+        # intentional: xFormers kernels accept tensor biases, while an ad-hoc
+        # AttentionBias subclass would be rejected during operator dispatch.
+        backend.LowerTriangularFromBottomRightMask = indexed_causal_mask
 
     def _registerOutOfTreeModel(self, model: str) -> None:
         """Register the model's architecture if the fork does not know it.
@@ -285,10 +396,10 @@ class CacheBlendWorker:
         Cached spans use KV collected by :meth:`Collect`.
 
         The original CacheBlend fork only has a native *trailing* ``suffix``.
-        Middle-fresh tokens therefore receive placeholder old KV and are forced
-        into the check layer's top-k recomputation set. After that check layer,
-        the fork overwrites those positions with their freshly computed KV, so
-        later layers see the real fresh tokens.
+        A middle-fresh span and every later token therefore receive a repair
+        marker in the check layer's top-k set. After that check layer, the fork
+        overwrites those positions with freshly computed KV, so later layers
+        do not consume cache captured before the inserted span.
         """
         if not parts:
             return {"ok": False, "error": "fuse: no prompt parts"}
@@ -346,38 +457,11 @@ class CacheBlendWorker:
         suffixLen = 1 if lastCached else len(lastIds)
         prefixLen = fullLen - suffixLen
 
-        # Count genuinely fresh tokens that lie before the native suffix. Every
-        # one of them must be selected by the check layer.
-        freshPrefixTokens = 0
-        for cached, _, _, start, end in segments:
-            if cached:
-                continue
-            overlapEnd = min(end, prefixLen)
-            if overlapEnd > start:
-                freshPrefixTokens += overlapEnd - start
-
-        cachedPrefixTokens = max(0, prefixLen - freshPrefixTokens)
-
-        # Preserve the configured CacheBlend repair ratio for cached positions,
-        # then add all middle-fresh positions to the same top-k budget.
         baseRatio = float(self.args.recomp_ratio)
-        repairCachedTokens = int(cachedPrefixTokens * baseRatio)
-        repairCachedTokens = max(
-            0,
-            min(cachedPrefixTokens, repairCachedTokens),
-        )
-
-        topkCount = freshPrefixTokens + repairCachedTokens
-        topkCount = max(0, min(prefixLen, topkCount))
-
-        if prefixLen <= 0 or topkCount <= 0:
-            effectiveRatio = 0.0
-        elif topkCount >= prefixLen:
-            effectiveRatio = 1.0
-        else:
-            # The fork later executes int(prefixLen * recomp_ratio). Choose a
-            # value safely inside the interval that maps back to topkCount.
-            effectiveRatio = (topkCount + 0.5) / prefixLen
+        repairPlan = _repair_plan(segments, prefixLen, baseRatio)
+        forcedPositions = repairPlan["forced"]
+        topkCount = repairPlan["topk_count"]
+        effectiveRatio = repairPlan["effective_ratio"]
 
         checkLayers = self.cfm.get("check_layers") or [1]
         checkLayer = checkLayers[0]
@@ -391,8 +475,10 @@ class CacheBlendWorker:
 
             for cached, ids, kv, start, end in segments:
                 if cached:
-                    keyParts.append(kv[layerIndex][0])
-                    valueParts.append(kv[layerIndex][1])
+                    keyPart = kv[layerIndex][0]
+                    valuePart = kv[layerIndex][1]
+                    keyParts.append(keyPart)
+                    valueParts.append(valuePart)
                     continue
 
                 shape = (len(ids), *sampleK.shape[1:])
@@ -401,8 +487,9 @@ class CacheBlendWorker:
 
                 # At the first check layer the fork ranks tokens by the squared
                 # V difference. Infinity guarantees that every middle-fresh
-                # token ranks ahead of ordinary cached repair candidates. The
-                # trailing suffix is already selected by suffix_len.
+                # token is selected. Cached C is deliberately left finite: the
+                # normal CacheBlend V-diff top-k selects its repair set (rather
+                # than forcing a full C-tail recomputation).
                 if layerIndex == checkLayer:
                     forceEnd = min(end, prefixLen)
                     if forceEnd > start:
@@ -439,6 +526,20 @@ class CacheBlendWorker:
             self.cfm["recomp_ratio"] = oldRatio
 
         resp["reuse_ratio"] = self._reuseRatio(fullLen, reusedTokens)
+        resp["cacheblend_debug"] = {
+            "suffix_len": suffixLen,
+            "prefix_len": prefixLen,
+            "first_fresh": repairPlan["first_fresh"],
+            "repair_tokens": topkCount,
+            "forced_tokens": len(forcedPositions),
+            "effective_recomp_ratio": effectiveRatio,
+        }
+        selected = self.cfm.get("imp_indices")
+        if selected is not None:
+            resp["cacheblend_debug"]["selected_indices"] = (
+                selected.detach().cpu().tolist()
+                if hasattr(selected, "detach") else list(selected)
+            )
         return resp
 
     def FuseSuffix(self, chunks: list, suffix: str):

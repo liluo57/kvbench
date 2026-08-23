@@ -13,10 +13,10 @@ worker subprocess imports the repo's patched vLLM, so this method cannot pollute
 the other methods' environment. The worker's ``sys.path`` is its own.
 
 ``reuse_ratio`` (the method's metric) is reported by the worker from the cache
-state: the share of the input tokens served from the cached context KV
-(``(len - suffix_len) / len``) for a fused run, 0 for a full run. This follows
-the official CacheBlend semantics — the whole context comes from cache and the
-check phase only repairs attention, so nothing is subtracted for ``recompRatio``.
+spans supplied to the fuse request: cached input tokens divided by full input
+tokens, with the deliberately recomputed native suffix excluded. This remains
+meaningful for interleaved parts; the old ``(len - suffix_len) / len`` formula
+was suffix-only.
 
 Batch scope: the collect phase (the expensive per-chunk prefill) is truly
 batched. The fused *run* is one ``generate`` per case — the fork's check phase
@@ -277,6 +277,8 @@ class CacheblendRepo(Method):
             "recomp_ratio": self.recompRatio,
             "n_input": resp.get("n_input"),
         }
+        if "cacheblend_debug" in resp:
+            metadata["cacheblend_debug"] = resp["cacheblend_debug"]
         if full:
             metadata["full_prefill"] = True
         if reordered:

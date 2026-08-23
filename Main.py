@@ -38,7 +38,7 @@ from tasks import (
 )
 from tasks.FreshGap import FreshGapTask
 
-MAX_SAMPLES=16
+MAX_SAMPLES=64
 
 
 def Main() -> None:
@@ -46,12 +46,12 @@ def Main() -> None:
     #: ``<DatasetPath>/ruler/<name>_len*.jsonl``; ``maxSamples`` caps the count
     #: (omit for all samples).
     tasks = [
-        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
         # CWEShuffleTask(maxSamples=MAX_SAMPLES),
         # VTShuffleTask(maxSamples=MAX_SAMPLES),
         # MusiqueTask(maxSamples=MAX_SAMPLES),
-        # SamsumTask(maxSamples=MAX_SAMPLES),
-        # WikimQATask(maxSamples=MAX_SAMPLES),
+        SamsumTask(maxSamples=MAX_SAMPLES),
+        WikimQATask(maxSamples=MAX_SAMPLES),
         FreshGapTask(nCases=MAX_SAMPLES),
     ]
 
@@ -63,9 +63,9 @@ def Main() -> None:
     #: being imported raises multiprocessing's "bootstrapping phase" error.
     methods = [
         CacheblendRepo(gpuIds="3", maxNewTokens=64),
-        CacheblendRepo(gpuIds="4", maxNewTokens=64,fullPrefill=True,tag='full_prefill'),
-        FullPrefillVllm(gpuIds="5", maxNewTokens=64),
-        NaiveTransformer(gpuIds="2", maxNewTokens=64),
+        # CacheblendRepo(gpuIds="4", maxNewTokens=64,fullPrefill=True,tag='full_prefill'),
+        # FullPrefillVllm(gpuIds="5", maxNewTokens=64),
+        # NaiveTransformer(gpuIds="2", maxNewTokens=64),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
