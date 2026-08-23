@@ -1,5 +1,7 @@
 """Throughput system metric."""
 
+import math
+
 from core.Metrics import AggregateStats, Metric
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey
 
@@ -7,10 +9,10 @@ from core.Result import NumOutputTokensKey, Result, TotalTimeKey
 class ThroughputMetric(Metric):
     """Measures generation throughput in output tokens per second.
 
-    Per case: ``numOutputTokens / totalTime``. The summary additionally
-    reports ``throughput_total_tokens_per_sec`` — the aggregate throughput over
-    the whole run (sum tokens / sum time), the more meaningful number for an
-    amortized / batched workload.
+    Per inference RUN: ``numOutputTokens / totalTime``. The summary
+    additionally reports ``throughput_total_tokens_per_sec`` — the aggregate
+    throughput over the whole run (sum tokens / sum time), the more meaningful
+    number for an amortized / batched workload.
     """
 
     name = "throughput"
@@ -29,10 +31,19 @@ class ThroughputMetric(Metric):
     def Update(self, result: Result) -> None:
         tokens = result.performance.get(self.tokensKey)
         time_ = result.performance.get(self.timeKey)
-        if tokens is None or not time_:
+        if tokens is None or time_ is None:
             return
         tokens = float(tokens)
         time_ = float(time_)
+        if not math.isfinite(tokens) or tokens < 0:
+            raise ValueError(
+                f"{self.tokensKey} must be a finite non-negative number, "
+                f"got {tokens!r}"
+            )
+        if not math.isfinite(time_) or time_ <= 0:
+            raise ValueError(
+                f"{self.timeKey} must be a finite positive number, got {time_!r}"
+            )
         self._samples.append(tokens / time_)
         self._totalTokens += tokens
         self._totalTime += time_

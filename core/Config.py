@@ -36,7 +36,8 @@ def LoadConfig(path: Optional[Path] = None) -> Dict[str, Any]:
 
 def Get(key: str, default: Any = None, config: Optional[Dict[str, Any]] = None) -> Any:
     """Read a top-level config value, e.g. ``Get("DatasetPath")``."""
-    return (config or LoadConfig()).get(key, default)
+    source = LoadConfig() if config is None else config
+    return source.get(key, default)
 
 
 def DatasetDir(dataset: str, config: Optional[Dict[str, Any]] = None) -> Path:

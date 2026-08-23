@@ -67,9 +67,12 @@ class RAGWorkload(Workload):
         return None
 
     def observe(self, results: List[ActionResult]) -> None:
-        # RAG doesn't need to make decisions based on results
-        # But we store the last result for potential use
-        if results and results[0].result.output is not None:
+        if len(results) != 1:
+            raise ValueError("RAGWorkload expects exactly one ActionResult per step")
+        # ``next`` advances _step before the action is executed. Step 1 is the
+        # optional PREPARE placeholder; step 2 is the real RUN result, whose
+        # output may legitimately be None while diagnostics remain useful.
+        if self._step == 2:
             self._final_result = results[0].result
 
     @property

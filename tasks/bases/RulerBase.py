@@ -33,10 +33,24 @@ from core.Task import Case, Task
 from ..TemplateHelper import AssistantSuffix, UserContext
 
 
-def StringMatchAll(pred: str, refs) -> float:
-    """RULER's string-match metric: fraction of ``refs`` found in ``pred``."""
+def _References(refs) -> List[Any]:
+    """Normalize and validate the non-empty RULER reference list."""
     if isinstance(refs, str):
         refs = [refs]
+    elif refs is None:
+        refs = []
+    else:
+        refs = list(refs)
+    if not refs:
+        raise ValueError("RULER metrics require at least one reference answer")
+    if any(ref is None or not str(ref).strip() for ref in refs):
+        raise ValueError("RULER reference answers must not be null or blank")
+    return refs
+
+
+def StringMatchAll(pred: str, refs) -> float:
+    """RULER's string-match metric: fraction of ``refs`` found in ``pred``."""
+    refs = _References(refs)
     if not pred:
         return 0.0
     predLower = str(pred).lower()
@@ -45,8 +59,7 @@ def StringMatchAll(pred: str, refs) -> float:
 
 def ExactMatch(pred: str, refs) -> float:
     """1.0 if the stripped lower-cased prediction equals any of ``refs``."""
-    if isinstance(refs, str):
-        refs = [refs]
+    refs = _References(refs)
     if not pred:
         return 0.0
     predNorm = str(pred).strip().lower()
@@ -117,11 +130,24 @@ class RulerBase(Task):
         samples: List[Dict[str, Any]] = []
         for path in files:
             lenHint = _LengthFromName(path)
-            for line in path.open(encoding="utf-8"):
+            for lineNumber, line in enumerate(path.open(encoding="utf-8"), 1):
                 line = line.strip()
                 if not line:
                     continue
                 sample = json.loads(line)
+                outputs = sample.get("outputs")
+                if (
+                    not isinstance(outputs, list)
+                    or not outputs
+                    or any(
+                        output is None or not str(output).strip()
+                        for output in outputs
+                    )
+                ):
+                    raise ValueError(
+                        f"RULER sample requires a non-empty outputs list: "
+                        f"{path}:{lineNumber}"
+                    )
                 sample["file"] = path.name
                 seqLen = sample.get("max_seq_length") or lenHint
                 if self.maxSeqLength is not None and seqLen != self.maxSeqLength:

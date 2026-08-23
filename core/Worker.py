@@ -114,12 +114,29 @@ def _ProcessBatch(
                 continue
             actions = workload.next()
             if actions is None:
+                if not workload.finished:
+                    raise RuntimeError(
+                        f"Workload case_id={workload.case_id} returned no "
+                        "Actions while unfinished"
+                    )
                 continue
+            if not actions:
+                raise RuntimeError(
+                    f"Workload case_id={workload.case_id} returned an empty "
+                    "Action list"
+                )
             start = len(stepActions)
             stepActions.extend(actions)
             workloadSlices.append((workload, start, start + len(actions)))
 
         if not stepActions:
+            unfinished = [
+                workload.case_id for workload in workloads if not workload.finished
+            ]
+            if unfinished:
+                raise RuntimeError(
+                    f"Workloads produced no Actions while unfinished: {unfinished}"
+                )
             break
         kinds = {action.kind for action in stepActions}
         if len(kinds) != 1:
@@ -167,10 +184,18 @@ def _ProcessBatch(
         for workload, start, end in workloadSlices:
             workload.observe(stepResults[start:end])
 
+    missingResults = [
+        case.workload.case_id
+        for case in batch
+        if case.workload.case_id not in finalResults
+    ]
+    if missingResults:
+        raise RuntimeError(
+            f"Workloads finished without a RUN result: {missingResults}"
+        )
+
     for case in batch:
-        result = finalResults.get(case.workload.case_id)
-        if result is None:
-            continue
+        result = finalResults[case.workload.case_id]
         scores = _NormalizeScores(task.Evaluate(result, case.metadata))
         for name, value in scores.items():
             taskScores.setdefault(name, []).append(float(value))

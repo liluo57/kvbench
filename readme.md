@@ -527,6 +527,19 @@ KVBench/
 
 ---
 
+# Testing
+
+The default suite is CPU-only and does not load a model or require a GPU:
+
+```bash
+pytest -q
+```
+
+Regression tests cover the core contracts, batch/Workload execution loop,
+metrics, prompt-reuse matching, task helpers, and scheduler failure paths.
+
+---
+
 # Future Directions
 
 Possible future extensions:

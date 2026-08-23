@@ -128,13 +128,21 @@ def RougeL(pred: str, gold: str) -> float:
 
 
 def _FlattenAnswers(answers) -> List[str]:
-    """Accept both ``["a"]`` and ``[["a"]]`` (wikimqa nests its answers)."""
+    """Flatten scalar/nested answers and discard null or blank entries."""
     flat: List[str] = []
-    for a in answers or []:
-        if isinstance(a, (list, tuple)):
-            flat.extend(str(x) for x in a if x)
-        else:
-            flat.append(str(a))
+
+    def Visit(value) -> None:
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                Visit(item)
+            return
+        if value is None:
+            return
+        text = str(value)
+        if text.strip():
+            flat.append(text)
+
+    Visit(answers)
     return flat
 
 
