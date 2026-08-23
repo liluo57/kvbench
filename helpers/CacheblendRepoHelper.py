@@ -1,52 +1,39 @@
-"""CacheBlend helper: a thin driver that *calls* the original CacheBlend code.
+"""CacheBlend helper: thin subprocess driver for the original CacheBlend repo.
 
-This script is a worker subprocess for :class:`~methods.CacheblendRepo.CacheblendRepo`.
-It runs under the **original repo's own venv** (``<RepoPath>/.venv/bin/python``),
-whose ``vllm==0.4.1`` is an editable install of the repo's patched ``vllm_blend``
-— so ``import vllm`` here resolves to the CacheBlend fork with the collect /
-check / fusion machinery, without any ``sys.path`` manipulation.
+This worker is launched by :class:`~methods.CacheblendRepo.CacheblendRepo` under
+the original CacheBlend repo's own venv (patched vLLM 0.4.1). KVBench talks to
+it over JSON-lines:
 
-The framework's main process (the bare conda env, vllm 0.25) never imports this
-module's heavy deps: torch / vllm / transformers are imported only inside the
-worker class constructor, which runs in this subprocess. Importing the module
-from the framework process is therefore a no-op.
+    {"op": "collect", "chunks": [...]}
+        Cache every reusable chunk independently. Collection is batched and the
+        resulting per-chunk KV is kept on CPU between runs.
 
-KVBench's method launches it once per method instance and talks to it over
-JSON-lines on stdin/stdout:
+    {"op": "fuse", "parts": [[cached, text], ...]}
+        Generate an interleaved prompt. ``cached=True`` spans use previously
+        collected KV; ``cached=False`` spans are fresh. Fresh spans before the
+        trailing suffix are forced into CacheBlend's recomputation set.
 
-    {"op": "collect", "chunks": [...]}  cache each chunk's KV in isolation
-                                        (all chunks of the batch, batched)
-    {"op": "fuse", "chunks": [...], "suffix": ""}
-        generate a prompt whose context is the chunks, concatenated *in the
-        given run order*, fused against their cached KV (check phase).
-        ``chunks`` are the run-order context segments; ``suffix`` is fresh
-        text after them (empty when the whole prompt is explained by the
-        chunks — then the last chunk's tail is treated as the fresh suffix).
-    {"op": "full", "text": ...}         generate the whole prompt from scratch
-                                        (no reuse — shuffle / no warm-up)
-    {"op": "reset"}                     drop the cached per-chunk KVs
-    {"op": "close"}                     terminate
+    {"op": "full", "text": ...}
+        Generate the whole prompt from scratch.
 
-The CacheBlend *algorithm* (partial attention, check layers, important-token
-recomputation) is not reimplemented here — it lives in the original patched
-vLLM. This worker only orchestrates the model hooks the same way the original
-``example/blend.py`` does: set ``cache_fuse_metadata["collect"]`` / ``["check"]``,
-read ``layer.self_attn.hack_kv``, and install ``model.old_kvs``.
+    {"op": "reset"}
+        Drop all cached per-chunk KV.
 
-``collect`` is batched: each chunk is its own *sequence* in the generate call
-(vLLM keeps sequences isolated, so chunk ``i`` never attends to chunk ``j`` —
-the chunk-isolated knowledge-base setup CacheBlend's check phase later
-repairs), the prefill's concatenated KV is captured from ``hack_kv`` and split
-back by the known chunk lengths. The batch is grouped so each generate's
-prefill stays a single forward (≤ ``max_collect_tokens`` < ``max_num_batched_tokens``);
-a length mismatch (vLLM chunked the prefill) halves the group and retries.
+    {"op": "close"}
+        Terminate the worker.
 
-The ``reuse_ratio`` the method reports is returned here, straight from the cache
-state: for a fused run it is the share of the input tokens served from the
-cached context KV — ``(len(fullIds) - suffix_len) / len(fullIds)`` — the
-official CacheBlend semantics (the whole context comes from cache; the check
-phase only repairs attention, so nothing is subtracted for recomp_ratio). A
-``full`` run has ``reuse_ratio`` 0.
+The legacy ``fuse/chunks/suffix`` request is still accepted temporarily for
+compatibility.
+
+The CacheBlend algorithm itself remains in the authors' patched vLLM. This
+helper only orchestrates its hooks: ``cache_fuse_metadata``, per-layer
+``hack_kv``, and ``model.old_kvs``.
+
+``reuse_ratio`` is computed from the spans actually supplied by stored cached
+KV, divided by the full input length. CacheBlend's selective repair does not
+reduce this metric, matching the previous CacheBlend semantics. A final cached
+token that is deliberately used as the fork-required native suffix is not
+counted as reused because it is fully recomputed.
 """
 
 import argparse
@@ -280,22 +267,185 @@ class CacheBlendWorker:
             "n_input": len(fullIds),
         }
 
-    def _reuseRatio(self, fullLen: int, suffixLen: int):
-        return round((fullLen - suffixLen) / fullLen, 6) if fullLen else 0.0
+    def _reuseRatio(self, fullLen: int, reusedTokens: int):
+        return round(reusedTokens / fullLen, 6) if fullLen else 0.0
 
-    def Fuse(self, chunks: list, suffix: str):
-        """Generate the run prompt from the cached chunk KVs in ``chunks`` order.
+    def Fuse(self, parts: list):
+        """Fuse cached and fresh spans appearing anywhere in one prompt.
 
-        ``chunks`` are the context segments in their *run* order (a prefix
-        order for prefix-reuse cases, a re-detected order for shuffled ones);
-        their cached KVs are concatenated in that order and fused against the
-        fresh suffix (``suffix`` non-empty) — or, when the whole run is
-        explained by ``chunks``, the last chunk's tail is the "suffix" that is
-        always recomputed (it ends at the prompt's last token, which the check
-        run must repair to produce correct logits).
+        ``parts`` has the form::
+
+            [
+                [True,  cachedText],
+                [False, freshText],
+                [True,  cachedText],
+                [False, freshText],
+            ]
+
+        Cached spans use KV collected by :meth:`Collect`.
+
+        The original CacheBlend fork only has a native *trailing* ``suffix``.
+        Middle-fresh tokens therefore receive placeholder old KV and are forced
+        into the check layer's top-k recomputation set. After that check layer,
+        the fork overwrites those positions with their freshly computed KV, so
+        later layers see the real fresh tokens.
         """
+        if not parts:
+            return {"ok": False, "error": "fuse: no prompt parts"}
+
+        segments = []
+        fullIds = []
+        sampleKv = None
+
+        # Resolve every segment first. Cached KV stays on CPU here; the complete
+        # per-layer old_kvs tensor is moved to GPU only after concatenation.
+        for part in parts:
+            if not isinstance(part, (list, tuple)) or len(part) != 2:
+                return {
+                    "ok": False,
+                    "error": f"fuse: invalid part {part!r}",
+                }
+
+            cached, text = part
+            cached = bool(cached)
+
+            if cached:
+                if text not in self._chunkKv:
+                    return {
+                        "ok": False,
+                        "error": f"fuse: chunk not collected: {text[:60]!r}",
+                    }
+                ids = self._chunkIds[text]
+                kv = self._chunkKv[text]
+                if sampleKv is None:
+                    sampleKv = kv
+            else:
+                ids = self.tokenizer.encode(text, add_special_tokens=False)
+                kv = None
+
+            if not ids:
+                continue
+
+            start = len(fullIds)
+            fullIds.extend(ids)
+            end = len(fullIds)
+            segments.append((cached, ids, kv, start, end))
+
+        if not segments:
+            return {"ok": False, "error": "fuse: empty prompt"}
+
+        if sampleKv is None:
+            return {"ok": False, "error": "fuse: no cached span"}
+
+        fullLen = len(fullIds)
+
+        # The fork's check path assumes suffix_len > 0 and always recomputes
+        # those final tokens. Use a real trailing fresh span when one exists.
+        # Otherwise sacrifice exactly one final cached token as the suffix.
+        lastCached, lastIds, _, _, _ = segments[-1]
+        suffixLen = 1 if lastCached else len(lastIds)
+        prefixLen = fullLen - suffixLen
+
+        # Count genuinely fresh tokens that lie before the native suffix. Every
+        # one of them must be selected by the check layer.
+        freshPrefixTokens = 0
+        for cached, _, _, start, end in segments:
+            if cached:
+                continue
+            overlapEnd = min(end, prefixLen)
+            if overlapEnd > start:
+                freshPrefixTokens += overlapEnd - start
+
+        cachedPrefixTokens = max(0, prefixLen - freshPrefixTokens)
+
+        # Preserve the configured CacheBlend repair ratio for cached positions,
+        # then add all middle-fresh positions to the same top-k budget.
+        baseRatio = float(self.args.recomp_ratio)
+        repairCachedTokens = int(cachedPrefixTokens * baseRatio)
+        repairCachedTokens = max(
+            0,
+            min(cachedPrefixTokens, repairCachedTokens),
+        )
+
+        topkCount = freshPrefixTokens + repairCachedTokens
+        topkCount = max(0, min(prefixLen, topkCount))
+
+        if prefixLen <= 0 or topkCount <= 0:
+            effectiveRatio = 0.0
+        elif topkCount >= prefixLen:
+            effectiveRatio = 1.0
+        else:
+            # The fork later executes int(prefixLen * recomp_ratio). Choose a
+            # value safely inside the interval that maps back to topkCount.
+            effectiveRatio = (topkCount + 0.5) / prefixLen
+
+        checkLayers = self.cfm.get("check_layers") or [1]
+        checkLayer = checkLayers[0]
+        oldKvs = []
+
+        for layerIndex in range(len(self.layers)):
+            sampleK = sampleKv[layerIndex][0]
+            sampleV = sampleKv[layerIndex][1]
+            keyParts = []
+            valueParts = []
+
+            for cached, ids, kv, start, end in segments:
+                if cached:
+                    keyParts.append(kv[layerIndex][0])
+                    valueParts.append(kv[layerIndex][1])
+                    continue
+
+                shape = (len(ids), *sampleK.shape[1:])
+                keyPart = sampleK.new_zeros(shape)
+                valuePart = sampleV.new_zeros(shape)
+
+                # At the first check layer the fork ranks tokens by the squared
+                # V difference. Infinity guarantees that every middle-fresh
+                # token ranks ahead of ordinary cached repair candidates. The
+                # trailing suffix is already selected by suffix_len.
+                if layerIndex == checkLayer:
+                    forceEnd = min(end, prefixLen)
+                    if forceEnd > start:
+                        valuePart[:forceEnd - start].fill_(float("inf"))
+
+                keyParts.append(keyPart)
+                valueParts.append(valuePart)
+
+            oldKvs.append(
+                [
+                    self._torch.cat(keyParts).to(self.device),
+                    self._torch.cat(valueParts).to(self.device),
+                ]
+            )
+
+        reusedTokens = sum(
+            end - start
+            for cached, _, _, start, end in segments
+            if cached
+        )
+        if lastCached:
+            reusedTokens = max(0, reusedTokens - suffixLen)
+
+        self.engine.model.old_kvs = oldKvs
+        self.cfm["collect"] = False
+        self.cfm["check"] = True
+        self.cfm["suffix_len"] = suffixLen
+
+        oldRatio = self.cfm.get("recomp_ratio", baseRatio)
+        self.cfm["recomp_ratio"] = effectiveRatio
+        try:
+            resp = self._Generate(fullIds)
+        finally:
+            self.cfm["recomp_ratio"] = oldRatio
+
+        resp["reuse_ratio"] = self._reuseRatio(fullLen, reusedTokens)
+        return resp
+
+    def FuseSuffix(self, chunks: list, suffix: str):
+        """Legacy contiguous-prefix + fresh-suffix fuse path."""
         if not chunks:
             return {"ok": False, "error": "fuse: no context chunks"}
+
         ctxIds = []
         ctxKv = []
         for text in chunks:
@@ -315,9 +465,6 @@ class CacheBlendWorker:
         )
 
         fullIds = [i for ids in ctxIds for i in ids]
-        # The stored chunk KVs are on CPU (collected for the whole batch, see
-        # ``_CollectGroup``); bring only this case's chunks to the device and
-        # concatenate them there.
         ctxGpu = [
             [
                 self._torch.cat([kv[l][0] for kv in ctxKv]).to(self.device),
@@ -325,14 +472,12 @@ class CacheBlendWorker:
             ]
             for l in range(nLayers)
         ]
+
         if sufIds:
-            # Fresh suffix KV, collected in isolation and appended so old_kvs
-            # spans the whole prompt (the check layer compares value_old[:-len]
-            # against the fresh value). qKv is already on the device.
             qKv = self._collectIds(sufIds)
             fullIds += sufIds
             suffixLen = len(sufIds)
-            old_kvs = [
+            oldKvs = [
                 [
                     self._torch.cat([ctxGpu[l][0], qKv[l][0]]),
                     self._torch.cat([ctxGpu[l][1], qKv[l][1]]),
@@ -341,14 +486,16 @@ class CacheBlendWorker:
             ]
         else:
             suffixLen = len(ctxIds[-1])
-            old_kvs = ctxGpu
+            oldKvs = ctxGpu
 
         self.cfm["collect"] = False
         self.cfm["check"] = True
         self.cfm["suffix_len"] = suffixLen
-        self.engine.model.old_kvs = old_kvs
+        self.engine.model.old_kvs = oldKvs
+
         resp = self._Generate(fullIds)
-        resp["reuse_ratio"] = self._reuseRatio(len(fullIds), suffixLen)
+        reusedTokens = max(0, len(fullIds) - suffixLen)
+        resp["reuse_ratio"] = self._reuseRatio(len(fullIds), reusedTokens)
         return resp
 
     def Full(self, text: str):
@@ -381,7 +528,15 @@ class CacheBlendWorker:
                 if op == "collect":
                     _stdout(self.Collect(req["chunks"]))
                 elif op == "fuse":
-                    _stdout(self.Fuse(req["chunks"], req.get("suffix", "")))
+                    if "parts" in req:
+                        _stdout(self.Fuse(req["parts"]))
+                    else:
+                        _stdout(
+                            self.FuseSuffix(
+                                req["chunks"],
+                                req.get("suffix", ""),
+                            )
+                        )
                 elif op == "full":
                     _stdout(self.Full(req["text"]))
                 elif op == "reset":

@@ -36,8 +36,9 @@ from tasks import (
     SamsumTask,
     WikimQATask,
 )
+from tasks.FreshGap import FreshGapTask
 
-MAX_SAMPLES=64
+MAX_SAMPLES=16
 
 
 def Main() -> None:
@@ -51,6 +52,7 @@ def Main() -> None:
         # MusiqueTask(maxSamples=MAX_SAMPLES),
         # SamsumTask(maxSamples=MAX_SAMPLES),
         # WikimQATask(maxSamples=MAX_SAMPLES),
+        FreshGapTask(nCases=MAX_SAMPLES),
     ]
 
     #: Methods to run (edit to taste). Each loads its own copy of the model on
@@ -61,16 +63,16 @@ def Main() -> None:
     #: being imported raises multiprocessing's "bootstrapping phase" error.
     methods = [
         CacheblendRepo(gpuIds="3", maxNewTokens=64),
-        # CacheblendRepo(gpuIds="4", maxNewTokens=64,fullPrefill=True,tag='full_prefill'),
-        # FullPrefillVllm(gpuIds="5", maxNewTokens=64),
-        # NaiveTransformer(gpuIds="2", maxNewTokens=64),
+        CacheblendRepo(gpuIds="4", maxNewTokens=64,fullPrefill=True,tag='full_prefill'),
+        FullPrefillVllm(gpuIds="5", maxNewTokens=64),
+        NaiveTransformer(gpuIds="2", maxNewTokens=64),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
 
     #: Cases per batch handed to each method (see Engine). Edit to taste;
     #: 1 keeps the per-case behavior. No CLI args by design.
-    batchSize = 16
+    batchSize = 8
 
     print(
         f"[main] model={ModelPath()}\n"

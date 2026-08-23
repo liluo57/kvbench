@@ -12,23 +12,6 @@ The main process stays on the framework's bare conda env (vllm 0.25): only the
 worker subprocess imports the repo's patched vLLM, so this method cannot pollute
 the other methods' environment. The worker's ``sys.path`` is its own.
 
-Per case the engine calls, in order:
-
-    Prepare(chunks)  -> the worker collects every chunk's KV *in isolation*,
-                        batched across the whole batch in one (or a few,
-                        token-budgeted) generate call — each chunk is its own
-                        sequence, so no cross-chunk attention. Skipped when
-                        ``fullPrefill``.
-    Run(prompt)      -> per case the method strips the context off ``prompt``:
-                          * prefix found  -> fuse the prepare chunks in their
-                            original order against the fresh suffix;
-                          * no prefix     -> ComposeReuse finds longest prefix
-                            of chunks forming a prefix of prompt (preferring
-                            original order), fuses those chunks + fresh suffix;
-                          * neither       -> the worker generates the whole
-                            prompt (``full`` op: no reuse)
-    Reset()          -> cached per-chunk KVs are dropped
-
 ``reuse_ratio`` (the method's metric) is reported by the worker from the cache
 state: the share of the input tokens served from the cached context KV
 (``(len - suffix_len) / len``) for a fused run, 0 for a full run. This follows
@@ -63,7 +46,7 @@ from core.Config import Get
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
-from helpers.Prompt import ComposeReuse
+from helpers.Prompt import ComposeInterleavedReuse
 
 #: Worker readiness marker printed on the helper's stdout at startup.
 _ReadyLine = "[cacheblend-helper] ready"
@@ -227,44 +210,62 @@ class CacheblendRepo(Method):
             self._Request({"op": "collect", "chunks": flat})
 
     def Run(self, data: List[str]) -> List[Result]:
-        """Run a batch of prompts, fusing each against its cached chunk KVs.
-
-        Per case the shared context is either a prefix of the prompt (fuse the
-        prepare chunks in their original order) or a re-detected reordering of
-        them (shuffle tasks — fuse the chunks in their *run* order); a prompt
-        explainable by neither falls back to a full prefill. The fused run is
-        one generate per case (the fork's check phase is single-sequence).
-        """
+        """Run a batch of prompts, fusing cached and fresh spans in prompt order."""
         results: List[Result] = []
+
         for prompt, chunks in zip(data, self._chunks):
             if self.fullPrefill:
                 results.append(self._runFull(prompt))
                 continue
-            order, suffix, reordered = self._splitForFuse(chunks, prompt)
-            if order is None:
+
+            parts, reordered = self._splitForFuse(chunks, prompt)
+
+            if parts is None:
                 results.append(self._runFull(prompt))
                 continue
+
             resp = self._Request(
-                {"op": "fuse", "chunks": order, "suffix": suffix or ""}
+                {
+                    "op": "fuse",
+                    "parts": [
+                        [prepareIndex is not None, text]
+                        for prepareIndex, text in parts
+                    ],
+                }
             )
-            results.append(self._Result(resp, full=False, reordered=reordered))
+
+            results.append(
+                self._Result(
+                    resp,
+                    full=False,
+                    reordered=reordered,
+                )
+            )
+
         return results
 
-    def _splitForFuse(self, chunks: List[str], prompt: str):
-        """Return ``(runOrderChunks, suffixText, reordered)`` for a fuse.
 
-        Uses ``ComposeReuse`` to find the longest prefix of ``prompt``
-        explainable by ``chunks`` (preferring original order). Returns:
-        - ``(order, suffix, reordered)`` when chunks form a prefix:
-          ``order`` is the chunk list in run order, ``suffix`` the fresh tail,
-          ``reordered`` indicates if order differs from original.
-        - ``(None, None, False)`` — the caller must full-prefill.
+    def _splitForFuse(self, chunks: List[str], prompt: str):
+        """Return interleaved cached/fresh parts for a fused run.
+
+        Returns ``(parts, reordered)`` when at least one prepared chunk occurs in
+        the prompt. ``parts`` is the result of ``ComposeInterleavedReuse``.
+
+        Returns ``(None, False)`` when nothing can be reused, in which case the
+        caller performs a full prefill.
         """
-        order, suffix = ComposeReuse(chunks, prompt)
-        if order is not None:
-            reordered = order != chunks
-            return order, suffix, reordered
-        return None, None, False
+        parts = ComposeInterleavedReuse(chunks, prompt)
+
+        reuseOrder = [
+            chunks[prepareIndex]
+            for prepareIndex, _ in parts
+            if prepareIndex is not None
+        ]
+
+        if not reuseOrder:
+            return None, False
+
+        return parts, reuseOrder != chunks
 
     def _runFull(self, prompt: str) -> Result:
         resp = self._Request({"op": "full", "text": prompt})

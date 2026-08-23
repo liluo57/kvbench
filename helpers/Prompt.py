@@ -1,14 +1,11 @@
 """Prompt helpers shared by tasks and reuse methods.
 
-``ComposeReuse`` is the contract between a task's ``Case`` and the reuse
-methods (CacheBlend, CacheBlendRepo, Naive): given prepared chunks and a run
-prompt, it returns the longest prefix of ``run`` that can be explained as a
-concatenation of prepared chunks (in some order), plus the fresh suffix.
+``ComposeReuse`` supports suffix-style reuse: prepared chunks must form a
+contiguous prefix of ``run``, followed by at most one fresh suffix.
 
-The algorithm prioritizes the original prepare order (cheap for typical cases
-where run follows prepare order), then falls back to searching other
-permutations. It only supports suffix-style reuse: cached chunks form a
-contiguous prefix, and any fresh text appears as a trailing suffix.
+``ComposeInterleavedReuse`` supports interleaved reuse: prepared chunks may
+appear anywhere in ``run``, with fresh text before, between, or after reused
+chunks.
 """
 
 from typing import List, Optional, Tuple
@@ -30,7 +27,7 @@ def ComposeReuse(
       appear in ``run``. Prefer the original prepare order when possible.
     - ``suffix`` is the remaining text after the matched prefix (empty if the
       entire ``run`` is covered).
-    
+
     Returns ``(None, run)`` when no prepare chunk matches the start of ``run``.
 
     The algorithm:
@@ -40,84 +37,207 @@ def ComposeReuse(
     3. Return the longest match found (original order wins on ties).
 
     This supports suffix-only reuse: cached blocks form a contiguous prefix,
-    and fresh text is always a trailing suffix. Methods that cannot blend
-    intermediate fresh segments can use this directly; methods with blending
-    capability can further process the result.
+    and fresh text is always a trailing suffix.
     """
     if not prepare:
         return None, run
 
     n = len(prepare)
-    
+
     # Strategy 1: Try original order first (fast path for typical cases)
-    original_order: List[str] = []
+    originalOrder: List[str] = []
     pos = 0
+
     for chunk in prepare:
         if run.startswith(chunk, pos):
-            original_order.append(chunk)
+            originalOrder.append(chunk)
             pos += len(chunk)
         else:
             break
-    
-    if original_order:
-        # Found at least one chunk in original order
-        # Check if we can extend with DFS from current position
-        best_len = pos
-        best_order: List[str] = original_order
-        
-        # Try to extend beyond what original order achieved
+
+    if originalOrder:
+        bestLen = pos
+        bestOrder: List[str] = originalOrder
+
         used = [False] * n
-        for i, chunk in enumerate(original_order):
-            # Mark chunks used in original_order
-            for j, p in enumerate(prepare):
-                if p == chunk and not used[j]:
-                    used[j] = True
+
+        for chunk in originalOrder:
+            for i, preparedChunk in enumerate(prepare):
+                if preparedChunk == chunk and not used[i]:
+                    used[i] = True
                     break
-        
-        def dfs_extend(cur_pos: int, current_order: List[str]):
-            nonlocal best_len, best_order
-            if cur_pos > best_len:
-                best_len = cur_pos
-                best_order = list(current_order)
+
+        def DfsExtend(curPos: int, currentOrder: List[str]) -> None:
+            nonlocal bestLen, bestOrder
+
+            if curPos > bestLen:
+                bestLen = curPos
+                bestOrder = list(currentOrder)
+
             for i in range(n):
                 if used[i]:
                     continue
-                c = prepare[i]
-                if run.startswith(c, cur_pos):
+
+                chunk = prepare[i]
+
+                if run.startswith(chunk, curPos):
                     used[i] = True
-                    current_order.append(c)
-                    dfs_extend(cur_pos + len(c), current_order)
-                    current_order.pop()
+                    currentOrder.append(chunk)
+
+                    DfsExtend(curPos + len(chunk), currentOrder)
+
+                    currentOrder.pop()
                     used[i] = False
-        
-        dfs_extend(pos, list(original_order))
-        
-        if best_len > 0:
-            return best_order, run[best_len:]
-    
-    # Strategy 2: Full DFS search (no match in original order)
+
+        DfsExtend(pos, list(originalOrder))
+
+        if bestLen > 0:
+            return bestOrder, run[bestLen:]
+
+    # Strategy 2: Full DFS search
     used = [False] * n
     order: List[str] = []
     best: Tuple[int, List[str]] = (0, [])
 
-    def bt(cur_pos: int) -> None:
+    def Dfs(curPos: int) -> None:
         nonlocal best
-        if cur_pos > best[0]:
-            best = (cur_pos, list(order))
+
+        if curPos > best[0]:
+            best = (curPos, list(order))
+
         for i in range(n):
             if used[i]:
                 continue
-            c = prepare[i]
-            if run.startswith(c, cur_pos):
+
+            chunk = prepare[i]
+
+            if run.startswith(chunk, curPos):
                 used[i] = True
-                order.append(c)
-                bt(cur_pos + len(c))
+                order.append(chunk)
+
+                Dfs(curPos + len(chunk))
+
                 order.pop()
                 used[i] = False
 
-    bt(0)
-    
+    Dfs(0)
+
     if best[0] > 0:
         return best[1], run[best[0]:]
-    
+
     return None, run
+
+
+def ComposeInterleavedReuse(
+    prepare: List[str],
+    run: str,
+) -> List[Tuple[Optional[int], str]]:
+    """Split ``run`` into interleaved reusable and fresh segments.
+
+    Each returned item is ``(prepareIndex, text)``:
+
+    - ``prepareIndex is None`` means ``text`` is fresh and must be prefetched.
+    - Otherwise, ``text`` corresponds to ``prepare[prepareIndex]`` and may be
+      reused.
+
+    Each prepared chunk can be used at most once.
+
+    Unlike ``ComposeReuse``, reusable chunks do not need to form a contiguous
+    prefix. Fresh text may appear before, between, or after reusable chunks.
+
+    The search maximizes the total number of reused characters. When multiple
+    solutions reuse the same amount of text, earlier chunks in ``prepare`` are
+    preferred because DFS explores them first.
+
+    Examples::
+
+        prepare = ["A", "C"]
+        run = "ABCD"
+
+        -> [
+            (0, "A"),
+            (None, "B"),
+            (1, "C"),
+            (None, "D"),
+        ]
+
+        prepare = ["A", "C"]
+        run = "BACD"
+
+        -> [
+            (None, "B"),
+            (0, "A"),
+            (1, "C"),
+            (None, "D"),
+        ]
+
+    Empty prepared chunks are ignored because they carry no reusable text.
+    """
+    if not run:
+        return []
+
+    if not prepare:
+        return [(None, run)]
+
+    n = len(prepare)
+    used = [False] * n
+
+    currentMatches: List[Tuple[int, int, int]] = []
+    bestMatches: List[Tuple[int, int, int]] = []
+    bestReusedLen = 0
+
+    def Dfs(curPos: int, reusedLen: int) -> None:
+        nonlocal bestMatches, bestReusedLen
+
+        # Strictly greater only: because candidates are visited in prepare
+        # order, the first solution wins when reused length ties.
+        if reusedLen > bestReusedLen:
+            bestReusedLen = reusedLen
+            bestMatches = list(currentMatches)
+
+        for i in range(n):
+            if used[i]:
+                continue
+
+            chunk = prepare[i]
+
+            if not chunk:
+                continue
+
+            matchPos = run.find(chunk, curPos)
+
+            if matchPos < 0:
+                continue
+
+            used[i] = True
+            matchEnd = matchPos + len(chunk)
+
+            currentMatches.append((i, matchPos, matchEnd))
+
+            Dfs(
+                matchEnd,
+                reusedLen + len(chunk),
+            )
+
+            currentMatches.pop()
+            used[i] = False
+
+    Dfs(0, 0)
+
+    if not bestMatches:
+        return [(None, run)]
+
+    result: List[Tuple[Optional[int], str]] = []
+    pos = 0
+
+    for prepareIndex, start, end in bestMatches:
+        if start > pos:
+            result.append((None, run[pos:start]))
+
+        result.append((prepareIndex, run[start:end]))
+        pos = end
+
+    if pos < len(run):
+        result.append((None, run[pos:]))
+
+    return result

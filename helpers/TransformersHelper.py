@@ -118,30 +118,38 @@ class TransformersGenerator:
                 input_ids=inputTensor, past_key_values=pastKeyValues
             )
 
-    def Prefill(self, inputIds: List[int]):
+    def Prefill(self, inputIds: List[int], pastKeyValues=None):
         """Prefill ``inputIds``, chunking long inputs to bound peak memory.
+
+        ``pastKeyValues`` may contain an already assembled prefix. New tokens are
+        prefetched after that prefix and extend the same cache.
 
         Without a flash-attention backend, one big eager prefill materializes
         the full ``seq x seq`` attention matrix (~tens of GB for a 7.5k prompt).
-        Feeding ≤``KVBENCH_PREFILL_CHUNK`` tokens per forward is mathematically
-        identical (positions accumulate through the cache) and keeps the
+        Feeding ≤``KVBENCH_PREFILL_CHUNK`` tokens per forward keeps the
         per-step attention matrix small.
-
-        Runs under ``no_grad``: outside a grad context the eager attention
-        scores would be retained by the autograd graph (≈seq² × heads per
-        layer), which alone can exceed the GPU.
         """
         with self._torch.no_grad():
             n = len(inputIds)
+
             if n <= self.prefillChunk:
-                return self.Forward(inputIds, None, useCache=True)
-            past = None
+                return self.Forward(
+                    inputIds,
+                    pastKeyValues,
+                    useCache=True,
+                )
+
+            past = pastKeyValues
             out = None
+
             for i in range(0, n, self.prefillChunk):
                 out = self.Forward(
-                    inputIds[i: i + self.prefillChunk], past, useCache=True
+                    inputIds[i: i + self.prefillChunk],
+                    past,
+                    useCache=True,
                 )
                 past = out.past_key_values
+
             return out
 
     # ------------------------------------------------------------- generation
