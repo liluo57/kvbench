@@ -14,7 +14,7 @@ the framework's vLLM path is untouched.
 How the patches reach the spawned EngineCore (vLLM's engine runs in a child
 process): vLLM spawns the EngineCore with ``multiprocessing``, which re-runs the
 **main module's** top-level imports (``from methods import ...``) in the child.
-The env var set here in ``__init__`` is inherited by the child, so the
+The env var set here in ``Initialize`` is inherited by the child, so the
 module-level guard below re-applies the patches there, before the child imports
 the vLLM model runner — without any host-level file.
 
@@ -46,7 +46,7 @@ detects. Only a prompt that cannot be explained by the prepared chunks at all
 falls back to a full prefill. The naive control (blindly serving the stale
 un-shuffled KV, no re-detection) is what the shuffle tests fail.
 
-A throwaway **warmup** request is issued at construction: on this class of
+A throwaway **warmup** request is issued during worker initialization: on this class of
 hosts lmcache's *first* store in a fresh EngineCore writes corrupt KV
 (nondeterministic — EOS or wrong content on later reuse); every later store is
 clean. Warming up makes the real stores always clean.
@@ -55,7 +55,7 @@ clean. Warming up makes the real stores always clean.
 import hashlib
 import os
 import time
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Sequence
 
 from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
@@ -75,8 +75,8 @@ from helpers.VllmCacheblendPatches import (
 # The spawned EngineCore child re-runs this module's import (vLLM re-executes
 # the main module's top-level `from methods import ...`), and the parent's
 # ``LMCACHE_ENABLE_BLENDING`` is inherited, so the patches self-apply in the
-# child before the vLLM model runner is imported there. In the *parent* the env
-# is not yet set at import time; ``__init__`` applies them explicitly.
+# child before the vLLM model runner is imported there. In the coordinator the
+# env is not set; the worker's ``Initialize`` applies the patches explicitly.
 if os.environ.get("LMCACHE_ENABLE_BLENDING") or os.environ.get(
     "LMCACHE_EC_ENABLE_BLENDING"
 ):
@@ -97,7 +97,8 @@ class CacheblendLmcache(Method):
 
     def __init__(
         self,
-        gpuIds: Union[str, List[int]] = "0",
+        gpuNums: int = 1,
+        perfWeight: float = 1.0,
         modelPath: Optional[str] = None,
         *,
         maxNewTokens: int = 64,
@@ -107,7 +108,6 @@ class CacheblendLmcache(Method):
         maxLocalCpuSize: float = 5.0,
         dtype: str = "bfloat16",
         enforceEager: bool = True,
-        tensorParallelSize: int = 1,
         # Kept for signature compatibility with the old worker subprocess
         # implementation; no longer used.
         numLayers: int = 28,
@@ -116,8 +116,7 @@ class CacheblendLmcache(Method):
         startTimeout: float = 1800.0,
         tag: Optional[str] = None,
     ):
-        super().__init__(tag=tag)
-        self.gpuIds = gpuIds
+        super().__init__(gpuNums=gpuNums, perfWeight=perfWeight, tag=tag)
         self.modelPath = modelPath or DefaultModelPath()
         self.maxNewTokens = maxNewTokens
         self.maxModelLen = maxModelLen
@@ -126,29 +125,30 @@ class CacheblendLmcache(Method):
         self.maxLocalCpuSize = maxLocalCpuSize
         self.dtype = dtype
         self.enforceEager = enforceEager
-        self.tensorParallelSize = tensorParallelSize
 
         #: Per-case state accumulated by :meth:`Prepare` and consumed by
         #: :meth:`Run`: each entry is ``{"prepare", "context_tokens"}`` (the
         #: case's warm-up chunks and their salted, sep-joined token stream).
         self._states: List[dict] = []
 
+    def Initialize(self, gpuIds: Sequence[int]) -> None:
+        super().Initialize(gpuIds)
         # Order matters: env vars must be set (and patches applied) before vLLM
         # is imported, so the spawned EngineCore inherits the right config and
         # the model runner gets patched in the child.
         SetBlendEnv(
-            recompRatio=recompRatio,
-            maxLocalCpuSize=maxLocalCpuSize,
+            recompRatio=self.recompRatio,
+            maxLocalCpuSize=self.maxLocalCpuSize,
         )
         ApplyPatches()
         self.llm = CreateBlendLlm(
             self.modelPath,
             self.gpuIds,
-            gpuMemoryUtilization=gpuMemoryUtilization,
-            maxModelLen=maxModelLen,
-            dtype=dtype,
-            enforceEager=enforceEager,
-            tensorParallelSize=tensorParallelSize,
+            gpuMemoryUtilization=self.gpuMemoryUtilization,
+            maxModelLen=self.maxModelLen,
+            dtype=self.dtype,
+            enforceEager=self.enforceEager,
+            tensorParallelSize=self.gpuNums,
         )
         self.tokenizer = self.llm.get_tokenizer()
         self.sep = SepTokens(self.tokenizer)

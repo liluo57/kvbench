@@ -8,7 +8,8 @@ lists below and run from the project root::
 The model path comes from ``config.yaml`` (``ModelPath``);
 datasets resolve by name against ``DatasetPath``.
 
-Methods (each loads its own copy of the model on its ``gpuIds``):
+Methods declare only ``gpuNums`` / ``perfWeight``.  Engine assigns concrete
+GPU ids and initializes every instance in its own spawned process:
     cacheblend          CacheBlend via vLLM 0.25 + LMCache in-process blending
     full_prefill        FullPrefillTransformer (transformers, recompute all)
     full_prefill_vllm   FullPrefillVllm (system vLLM, recompute all)
@@ -51,31 +52,28 @@ def Main() -> None:
     #: ``<DatasetPath>/ruler/<name>_len*.jsonl``; ``maxSamples`` caps the count
     #: (omit for all samples).
     tasks = [
-        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
         # CWEShuffleTask(maxSamples=MAX_SAMPLES),
         # VTShuffleTask(maxSamples=MAX_SAMPLES),
         # MusiqueTask(maxSamples=MAX_SAMPLES),
         # SamsumTask(maxSamples=MAX_SAMPLES),
         # WikimQATask(maxSamples=MAX_SAMPLES),
         # FreshGapTask(nCases=MAX_SAMPLES),
-        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        # KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
         # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
     ]
 
-    #: Methods to run (edit to taste). Each loads its own copy of the model on
-    #: its ``gpuIds``; adjust the GPU ids to match your GPU count / memory.
-    #: Constructed *inside* ``Main()`` (never at module top level): the method
-    #: constructors load the models, and CacheblendLmcache spawns a vLLM
-    #: EngineCore — starting a spawn'd process while the main module is still
-    #: being imported raises multiprocessing's "bootstrapping phase" error.
+    #: Methods to run (edit to taste). Constructors are lightweight: concrete
+    #: GPU ids are assigned later by Engine. perfWeight is relative expected
+    #: per-task runtime and controls how additional instances are distributed.
     methods = [
         # COPY benchmark expects Method(maxNewTokens=512).
-        CacheblendRepo(gpuIds="4", maxNewTokens=MAX_NEW_TOKENS),
-        # CacheblendRepo(gpuIds="4", maxNewTokens=MAX_NEW_TOKENS,fullPrefill=True,tag='full_prefill'),
-        # FullPrefillVllm(gpuIds="5", maxNewTokens=MAX_NEW_TOKENS),
-        # NaiveTransformer(gpuIds="2", maxNewTokens=MAX_NEW_TOKENS),
+        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
+        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
+        FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
+        NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
@@ -87,15 +85,29 @@ def Main() -> None:
     print(
         f"[main] model={ModelPath()}\n"
         f"[main] tasks={[t.name for t in tasks]} "
-        f"methods={[m.Label for m in methods]} batchSize={batchSize} "
+        f"methods={[(m.Label, m.gpuNums, m.perfWeight) for m in methods]} "
+        f"batchSize={batchSize}"
     )
     sys.stdout.flush()
 
-    engine = Engine(verbose=True, batchSize=batchSize)
+    engine = Engine(
+        availableGpuIds="auto",
+        batchSize=batchSize,
+        initializeTimeout=1800,
+        taskTimeout=3600,
+        shutdownGracePeriod=30,
+        gpuReleaseTimeout=30,
+        gpuReleaseStableSeconds=1,
+        gpuReleaseMemoryToleranceMiB=256,
+        pairRetries=1,
+        tui=True,
+        verbose=True,
+    )
     report = engine.Evaluate(tasks=tasks, methods=methods, metrics=metrics)
 
     print("\n=== KVBench report ===")
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+    print(json.dumps(report["cores"], indent=2, ensure_ascii=False))
+    print(f"full outputs: {report['output_dir']}")
 
 
 if __name__ == "__main__":

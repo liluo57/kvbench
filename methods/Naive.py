@@ -14,7 +14,7 @@ the recombination, so its accuracy is exactly what KV stitching breaks.
 """
 
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
@@ -37,25 +37,47 @@ class NaiveTransformer(Method):
 
     def __init__(
         self,
-        gpuIds: Union[str, list[int]] = "0",
+        gpuNums: int = 1,
+        perfWeight: float = 1.0,
         modelPath: str | None = None,
         *,
         maxNewTokens: int = 64,
         dtype: str = "bfloat16",
         tag: Optional[str] = None,
     ):
-        super().__init__(tag=tag)
-        self.gpuIds = gpuIds
+        super().__init__(
+            gpuNums=gpuNums,
+            perfWeight=perfWeight,
+            maxGpuNums=1,
+            tag=tag,
+        )
         self.modelPath = modelPath or DefaultModelPath()
         self.maxNewTokens = maxNewTokens
-        self._gen = TransformersGenerator(
-            self.modelPath, gpuIds, maxNewTokens=maxNewTokens, dtype=dtype
-        )
+        self.dtype = dtype
+        self._gen = None
 
         #: Per-case state accumulated by :meth:`Prepare` and :meth:`Run`.
         #: ``segments``, ``caches`` and ``ids`` stay aligned and contain both
         #: prepared chunks and outputs retained for possible future reuse.
         self._states: List[Dict[str, Any]] = []
+
+    def Initialize(self, gpuIds: Sequence[int]) -> None:
+        super().Initialize(gpuIds)
+        self._gen = TransformersGenerator(
+            self.modelPath,
+            self.gpuIds,
+            maxNewTokens=self.maxNewTokens,
+            dtype=self.dtype,
+        )
+
+    def Close(self) -> None:
+        self._states = []
+        self._gen = None
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------------------------------------------------------------- Method
     def Prepare(self, data: List[List[str]]) -> None:

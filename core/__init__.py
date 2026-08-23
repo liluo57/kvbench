@@ -1,7 +1,11 @@
 """KVBench core abstractions."""
 
 from .Config import DatasetDir, Get, LoadConfig, ModelPath
-from .Engine import Engine
+from .Engine import (
+    BenchmarkInitializationError,
+    BenchmarkResourceReleaseError,
+    Engine,
+)
 from .Metrics import Metric
 from .Method import Method
 from .Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
@@ -13,6 +17,8 @@ __all__ = [
     "ActionKind",
     "ActionResult",
     "Case",
+    "BenchmarkInitializationError",
+    "BenchmarkResourceReleaseError",
     "DatasetDir",
     "Engine",
     "Get",

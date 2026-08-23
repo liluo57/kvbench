@@ -7,8 +7,8 @@ from scratch. Two backends:
 - :class:`FullPrefillVllm` — the system vLLM.
 
 This is the correctness / TTFT baseline that cacheblend's ``blend_niah.py``
-compares its fused runs against. The constructor takes the task's available
-GPUs (``gpu_ids``, equivalent to ``CUDA_VISIBLE_DEVICES``).
+compares its fused runs against. The constructor declares a strict GPU count;
+the Engine assigns concrete ids when the worker initializes.
 
 Both ``Run`` methods process their whole batch in one call:
 
@@ -21,7 +21,7 @@ Both ``Run`` methods process their whole batch in one call:
 irrelevant.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
@@ -41,15 +41,21 @@ class _FullPrefillBase(Method):
 
     def __init__(
         self,
-        gpuIds: str,
         modelPath: str,
         *,
+        gpuNums: int,
+        perfWeight: float,
+        maxGpuNums: int | None,
         maxNewTokens: int,
         dtype: str,
         tag: Optional[str] = None,
     ):
-        super().__init__(tag=tag)
-        self.gpuIds = gpuIds
+        super().__init__(
+            gpuNums=gpuNums,
+            perfWeight=perfWeight,
+            maxGpuNums=maxGpuNums,
+            tag=tag,
+        )
         self.modelPath = modelPath or DefaultModelPath()
         self.maxNewTokens = maxNewTokens
         self.dtype = dtype
@@ -72,6 +78,17 @@ class _FullPrefillBase(Method):
             metadata={"backend": self.backend, **metadata},
         )
 
+    def Close(self) -> None:
+        if hasattr(self, "_gen"):
+            self._gen = None
+        if hasattr(self, "llm"):
+            self.llm = None
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
 
 class FullPrefillTransformer(_FullPrefillBase):
     """Full recomputation of the whole prompt over plain ``transformers``."""
@@ -81,7 +98,8 @@ class FullPrefillTransformer(_FullPrefillBase):
 
     def __init__(
         self,
-        gpuIds: str = "0",
+        gpuNums: int = 1,
+        perfWeight: float = 1.0,
         modelPath: str | None = None,
         *,
         maxNewTokens: int = 64,
@@ -89,14 +107,23 @@ class FullPrefillTransformer(_FullPrefillBase):
         tag: Optional[str] = None,
     ):
         super().__init__(
-            gpuIds,
             modelPath or "",
+            gpuNums=gpuNums,
+            perfWeight=perfWeight,
+            maxGpuNums=1,
             maxNewTokens=maxNewTokens,
             dtype=dtype,
             tag=tag,
         )
+        self._gen = None
+
+    def Initialize(self, gpuIds: Sequence[int]) -> None:
+        super().Initialize(gpuIds)
         self._gen = TransformersGenerator(
-            self.modelPath, gpuIds, maxNewTokens=maxNewTokens, dtype=dtype
+            self.modelPath,
+            self.gpuIds,
+            maxNewTokens=self.maxNewTokens,
+            dtype=self.dtype,
         )
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
@@ -122,28 +149,36 @@ class FullPrefillVllm(_FullPrefillBase):
 
     def __init__(
         self,
-        gpuIds: str | list[int] = "0",
+        gpuNums: int = 1,
+        perfWeight: float = 1.0,
         modelPath: str | None = None,
         *,
         maxNewTokens: int = 64,
         gpuMemoryUtilization: float = 0.7,
         maxModelLen: int = 40960,
-        tensorParallelSize: int = 1,
         tag: Optional[str] = None,
     ):
         super().__init__(
-            gpuIds,
             modelPath or "",
+            gpuNums=gpuNums,
+            perfWeight=perfWeight,
+            maxGpuNums=None,
             maxNewTokens=maxNewTokens,
             dtype="bfloat16",
             tag=tag,
         )
+        self.gpuMemoryUtilization = gpuMemoryUtilization
+        self.maxModelLen = maxModelLen
+        self.llm = None
+
+    def Initialize(self, gpuIds: Sequence[int]) -> None:
+        super().Initialize(gpuIds)
         self.llm = CreateLlm(
             self.modelPath,
-            gpuIds,
-            gpuMemoryUtilization=gpuMemoryUtilization,
-            maxModelLen=maxModelLen,
-            tensorParallelSize=tensorParallelSize,
+            self.gpuIds,
+            gpuMemoryUtilization=self.gpuMemoryUtilization,
+            maxModelLen=self.maxModelLen,
+            tensorParallelSize=self.gpuNums,
         )
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:

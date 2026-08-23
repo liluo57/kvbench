@@ -1,7 +1,7 @@
 """Concrete KV optimization methods. One module per method.
 
-Each method takes the task's available GPUs (``gpu_ids``, equivalent to
-``CUDA_VISIBLE_DEVICES``) in its constructor:
+Each constructor declares the strict ``gpuNums`` requirement and a relative
+``perfWeight``.  The Engine binds concrete GPU ids inside a worker process.
 
 - :class:`CacheblendLmcache` — CacheBlend via vLLM 0.25 + LMCache in-process
   blending: ``Prepare`` stores per-chunk KV segments (token-level ``' # # '``

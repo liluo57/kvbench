@@ -5,6 +5,7 @@ venv/
 dist/
 build/
 *.egg-info/
+outputs/
 
 # benchmark data (populated via config.yaml DatasetPath)
 data/

@@ -24,8 +24,8 @@ batched. The fused *run* is one ``generate`` per case — the fork's check phase
 ``selected_token_indices[0]`` logits hack) is inherently single-sequence, so a
 batch of fused runs cannot be submitted together without rewriting the fork.
 
-The constructor takes the task's available GPUs (``gpu_ids``, equivalent to
-``CUDA_VISIBLE_DEVICES``), the recomputation ratio ``recompRatio`` (0.15 default;
+The constructor declares a strict GPU count, the relative scheduling weight,
+and the recomputation ratio ``recompRatio`` (0.15 default;
 >0 repairs cross-chunk attention in a chunk-isolated knowledge base), and
 ``fullPrefill`` — when True every query is a plain full prefill (no cache, no
 fusion), serving as the control group against the fused runs. The repo and model
@@ -39,8 +39,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence
 
 from core.Config import Get
 from core.Method import Method
@@ -62,7 +64,8 @@ class CacheblendRepo(Method):
 
     def __init__(
         self,
-        gpuIds: Union[str, List[int]] = "0",
+        gpuNums: int = 1,
+        perfWeight: float = 1.0,
         *,
         maxNewTokens: int = 64,
         maxModelLen: int = 32768,
@@ -72,8 +75,12 @@ class CacheblendRepo(Method):
         startTimeout: float = 1800.0,
         tag: Optional[str] = None,
     ):
-        super().__init__(tag=tag)
-        self.gpuIds = gpuIds
+        super().__init__(
+            gpuNums=gpuNums,
+            perfWeight=perfWeight,
+            maxGpuNums=1,
+            tag=tag,
+        )
         self.maxNewTokens = maxNewTokens
         self.maxModelLen = maxModelLen
         self.gpuMemoryUtilization = gpuMemoryUtilization
@@ -101,23 +108,30 @@ class CacheblendRepo(Method):
 
         self._proc: Optional[subprocess.Popen] = None
         self._drainThread = None
+        self._stderrTail = deque(maxlen=200)
         #: Per-case warm-up chunks from the last :meth:`Prepare` call
         #: (empty chunks filtered out; used only to detect reuse in Run).
         self._chunks: List[List[str]] = []
+
+    def Initialize(self, gpuIds: Sequence[int]) -> None:
+        super().Initialize(gpuIds)
         self._startWorker()
 
     # ------------------------------------------------------------- worker io
     def _drainStderr(self) -> None:
         """Forward the worker's stderr (vLLM logs) to our own stderr."""
-        assert self._proc is not None and self._proc.stderr is not None
+        proc = self._proc
+        assert proc is not None and proc.stderr is not None
         try:
-            for line in self._proc.stderr:
+            for line in proc.stderr:
+                self._stderrTail.append(line)
                 sys.stderr.write(f"[cacheblend-helper] {line}")
                 sys.stderr.flush()
         except Exception:  # noqa: BLE001 - pipe closed on shutdown
             pass
 
     def _startWorker(self) -> None:
+        self._stderrTail.clear()
         helperScript = Path(__file__).resolve().parent.parent / "helpers" / "CacheblendRepoHelper.py"
         env = dict(os.environ)
         # Keep the subprocess clean: the repo's venv must resolve its own vllm,
@@ -147,6 +161,7 @@ class CacheblendRepo(Method):
             env=env,
             bufsize=1,
         )
+        print(f"[cacheblend-method] helper pid={self._proc.pid}", flush=True)
         # The helper's vLLM logs a lot to stderr (progress bars, INFO). The pipe
         # must be drained or it fills (64KB) and the worker deadlocks on write.
         self._drainThread = threading.Thread(
@@ -160,7 +175,9 @@ class CacheblendRepo(Method):
             line = self._proc.stdout.readline()
             if not line:
                 if self._proc.poll() is not None:
-                    err = self._proc.stderr.read() or "(no stderr)"
+                    if self._drainThread is not None:
+                        self._drainThread.join(timeout=0.5)
+                    err = self._StderrTail() or "(no stderr)"
                     raise RuntimeError(f"cacheblend helper exited during startup: {err}")
                 continue
             line = line.strip()
@@ -178,12 +195,18 @@ class CacheblendRepo(Method):
         self._proc.stdin.flush()
         line = self._proc.stdout.readline()
         if not line:
-            err = (self._proc.stderr.read() or "")[-2000:]
+            if self._drainThread is not None:
+                self._drainThread.join(timeout=0.5)
+            err = self._StderrTail()[-2000:]
             raise RuntimeError(f"cacheblend helper closed stdout: {err}")
         resp = json.loads(line)
         if not resp.get("ok"):
             raise RuntimeError(f"cacheblend helper error: {resp.get('error')}")
         return resp
+
+    def _StderrTail(self) -> str:
+        """Return stderr already consumed by the sole pipe-drain thread."""
+        return "".join(self._stderrTail)
 
     # ---------------------------------------------------------------- Method
     def Prepare(self, data: List[List[str]]) -> None:
@@ -310,14 +333,29 @@ class CacheblendRepo(Method):
             self._restartWorker()
 
     def Close(self) -> None:
-        if self._proc is not None:
+        proc = self._proc
+        self._proc = None
+        if proc is not None:
             try:
-                self._proc.stdin.write(json.dumps({"op": "close"}) + "\n")
-                self._proc.stdin.flush()
-                self._proc.wait(timeout=30)
+                if proc.poll() is None and proc.stdin is not None:
+                    proc.stdin.write(json.dumps({"op": "close"}) + "\n")
+                    proc.stdin.flush()
+                proc.wait(timeout=30)
             except Exception:  # noqa: BLE001
-                self._proc.kill()
-            self._proc = None
+                with suppress(Exception):
+                    proc.kill()
+                with suppress(Exception):
+                    proc.wait(timeout=5)
+            finally:
+                for streamName in ("stdin", "stdout", "stderr"):
+                    stream = getattr(proc, streamName, None)
+                    if stream is not None:
+                        with suppress(BrokenPipeError, OSError, ValueError):
+                            stream.close()
+                        setattr(proc, streamName, None)
+                if self._drainThread is not None:
+                    self._drainThread.join(timeout=1)
+                self._drainThread = None
 
     def _restartWorker(self) -> None:
         self.Close()
