@@ -22,7 +22,7 @@ from core import Engine, ModelPath
 from metrics import ThroughputMetric, TTFTMetric
 
 from methods import (
-    CacheBlendMethod,
+    CacheblendLmcache,
     CacheblendRepo,
     FullPrefillVllm,
     FullPrefillTransformer,
@@ -58,7 +58,7 @@ def Main() -> None:
     #: Methods to run (edit to taste). Each loads its own copy of the model on
     #: its ``gpuIds``; adjust the GPU ids to match your GPU count / memory.
     #: Constructed *inside* ``Main()`` (never at module top level): the method
-    #: constructors load the models, and CacheBlendMethod spawns a vLLM
+    #: constructors load the models, and CacheblendLmcache spawns a vLLM
     #: EngineCore — starting a spawn'd process while the main module is still
     #: being imported raises multiprocessing's "bootstrapping phase" error.
     methods = [

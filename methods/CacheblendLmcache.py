@@ -83,8 +83,8 @@ if os.environ.get("LMCACHE_ENABLE_BLENDING") or os.environ.get(
     ApplyPatches()
 
 
-class CacheBlendMethod(Method):
-    name = "cacheblend"
+class CacheblendLmcache(Method):
+    name = "cacheblend_lmcache"
 
     #: Reuse rate is cacheblend's method metric: the share of the run stream the
     #: engine actually served from lmcache KV — ``num_cached_tokens`` reported by
@@ -241,7 +241,7 @@ class CacheBlendMethod(Method):
         if validCtx:
             self._GenerateBatch(validCtx, maxTokens=1)  # store all KV together
 
-    def Run(self, data: List[str]) -> List[Result]:
+    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         """Generate a batch of prompts, submitting all at once.
 
         Each case's token stream is assembled from its prepared state (the same
@@ -249,6 +249,9 @@ class CacheBlendMethod(Method):
         then submitted to :meth:`_GenerateBatch` in one call so the V1 engine
         generates them concurrently.
         """
+        # LMCache owns prefix-cache lifetime; generated-output retention is not
+        # currently exposed by the in-process connector.
+        _ = retainOutput
         tokenStreams: List[List[int]] = []
         metas: List[dict] = []
         for run_input, state in zip(data, self._states):
@@ -315,6 +318,7 @@ class CacheBlendMethod(Method):
                 )
             )
         return results
+
 
     def Reset(self) -> None:
         """Drop the per-case token state.

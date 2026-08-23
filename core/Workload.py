@@ -42,11 +42,14 @@ class Action:
         data: PREPARE → List[str] (warmup segments)
               RUN → str (complete prompt)
         tag: Optional step label, e.g. "agent_A", "agent_B"
+        retainOutput: For RUN actions, whether generated output may be reused
+            by later requests of the same case. This is a hint, not a guarantee.
     """
     kind: ActionKind
     case_id: int
     data: Any  # List[str] for PREPARE, str for RUN
     tag: str = ""
+    retainOutput: bool = False
 
 
 # ── ActionResult: result returned by Engine to Workload ─────────────────────

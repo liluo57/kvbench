@@ -159,7 +159,8 @@ class TransformersGenerator:
         pastKeyValues=None,
         *,
         maxNewTokens: Optional[int] = None,
-    ) -> Tuple[str, float, float, int]:
+        returnCache: bool = False,
+    ) -> Tuple[Any, ...]:
         """Greedy-decode ``inputIds``.
 
         Returns ``(text, ttft, totalTime, numOutputTokens)``.
@@ -183,14 +184,17 @@ class TransformersGenerator:
                 if ttft is None:
                     ttft = time.perf_counter() - t0
                 generated.append(nxt)
+                past = out.past_key_values
                 if nxt == self.eosId:
                     break
-                past = out.past_key_values
                 inputIds = [nxt]
 
         total = time.perf_counter() - t0
         text = self.tokenizer.decode(generated, skip_special_tokens=True)
-        return text, float(ttft or 0.0), total, len(generated)
+        result = (text, float(ttft or 0.0), total, len(generated))
+        if returnCache:
+            return (*result, past, generated)
+        return result
 
     def GenerateBatch(
         self,

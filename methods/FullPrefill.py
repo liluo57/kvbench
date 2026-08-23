@@ -58,7 +58,7 @@ class _FullPrefillBase(Method):
     def Prepare(self, data: List[List[str]]) -> None:
         pass  # FullPrefill recomputes everything; warm-up is irrelevant
 
-    def Run(self, data: List[str]) -> List[Result]:
+    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         raise NotImplementedError
 
     def _Result(self, text, ttft, total, nTokens, *, metadata) -> Result:
@@ -99,7 +99,7 @@ class FullPrefillTransformer(_FullPrefillBase):
             self.modelPath, gpuIds, maxNewTokens=maxNewTokens, dtype=dtype
         )
 
-    def Run(self, data: List[str]) -> List[Result]:
+    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         idsList = [self._gen.Encode(d) for d in data]
         batchOut = self._gen.GenerateBatch(idsList)
         return [
@@ -142,7 +142,7 @@ class FullPrefillVllm(_FullPrefillBase):
             tensorParallelSize=tensorParallelSize,
         )
 
-    def Run(self, data: List[str]) -> List[Result]:
+    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         batchOut = GenerateBatch(self.llm, data, self.maxNewTokens)
         results = []
         for (text, ttft, nTokens, total, numCached), prompt in zip(batchOut, data):

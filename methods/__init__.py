@@ -3,7 +3,7 @@
 Each method takes the task's available GPUs (``gpu_ids``, equivalent to
 ``CUDA_VISIBLE_DEVICES``) in its constructor:
 
-- :class:`CacheBlendMethod` — CacheBlend via vLLM 0.25 + LMCache in-process
+- :class:`CacheblendLmcache` — CacheBlend via vLLM 0.25 + LMCache in-process
   blending: ``Prepare`` stores per-chunk KV segments (token-level ``' # # '``
   sep separators), ``Run`` reuses them and blends the fresh query KV in, or
   generates the whole prompt when reuse is impossible. All runtime wiring lives
@@ -22,12 +22,13 @@ Each method takes the task's available GPUs (``gpu_ids``, equivalent to
   over transformers).
 """
 
-from .Cacheblend import CacheBlendMethod
+from .CacheblendLmcache import CacheblendLmcache, CacheBlendMethod
 from .CacheblendRepo import CacheblendRepo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Naive import NaiveTransformer
 
 __all__ = [
+    "CacheblendLmcache",
     "CacheBlendMethod",
     "CacheblendRepo",
     "FullPrefillTransformer",

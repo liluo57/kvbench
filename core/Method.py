@@ -51,10 +51,12 @@ class Method(ABC):
         """
 
     @abstractmethod
-    def Run(self, data: List[str]) -> List[Result]:
+    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         """Run inference on a batch of complete prompts.
 
-        ``data[i]`` is the complete prompt for case ``i``. Returns a list of
+        ``data[i]`` is the complete prompt for case ``i``. ``retainOutput[i]``
+        is a future-reuse/lifetime hint for that generated output; methods may
+        preserve backend-specific reusable state or ignore it. Returns a list of
         :class:`Result` objects in the same order as the input.
 
         The method is responsible for recording raw system timings into each

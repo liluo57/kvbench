@@ -14,7 +14,7 @@ before the EngineCore is spawned and break vLLM's process model).
 
 These are only active when the CacheBlend method turns blending on (the
 ``LMCACHE_ENABLE_BLENDING`` env var), so the rest of the framework's vLLM path
-is untouched. See ``methods/Cacheblend.py`` for how the env var also makes the
+is untouched. See ``methods/CacheblendLmcache.py`` for how the env var also makes the
 patches self-apply inside the spawned EngineCore child.
 """
 

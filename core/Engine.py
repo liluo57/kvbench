@@ -217,7 +217,10 @@ class Engine:
                     for a in step_actions
                 ]
             else:  # RUN
-                results = method.Run([a.data for a in step_actions])
+                results = method.Run(
+                    [a.data for a in step_actions],
+                    [a.retainOutput for a in step_actions],
+                )
                 step_results = [
                     ActionResult(
                         case_id=a.case_id,

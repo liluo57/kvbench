@@ -209,8 +209,13 @@ class CacheblendRepo(Method):
         if flat:
             self._Request({"op": "collect", "chunks": flat})
 
-    def Run(self, data: List[str]) -> List[Result]:
+    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         """Run a batch of prompts, fusing cached and fresh spans in prompt order."""
+        # The original patched worker exposes only prefill ``hack_kv`` capture;
+        # generated KV is not available after ``llm.generate``. Keep the
+        # framework hint for forward compatibility, but do not fake retention
+        # by issuing a second collect/prefill request.
+        _ = retainOutput
         results: List[Result] = []
 
         for prompt, chunks in zip(data, self._chunks):
