@@ -41,7 +41,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from core.Config import DatasetDir
 from core.Result import Result
 from core.Task import Case, Task
-from core.Workload import RAGInput, RAGWorkload
+from workload.RAGWorkload import RAGInput, RAGWorkload
 
 from ..TemplateHelper import AssistantSuffix, UserContext
 

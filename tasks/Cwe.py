@@ -42,7 +42,7 @@ from typing import Any, Dict, Iterator, List
 
 from core.Result import Result
 from core.Task import Case
-from core.Workload import RAGInput, RAGWorkload
+from workload.RAGWorkload import RAGInput, RAGWorkload
 
 from .TemplateHelper import AssistantSuffix, UserContext
 from .bases.RulerBase import RulerBase
