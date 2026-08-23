@@ -34,7 +34,7 @@ def CacheLayerPairs(cache):
 
 
 def FirstGpu(gpuIds: Any) -> Optional[int]:
-    """First GPU index from a ``gpu_ids`` str / int / list (None if unset)."""
+    """First GPU index from a ``gpuIds`` str / int / list (None if unset)."""
     if gpuIds is None:
         return None
     if isinstance(gpuIds, (list, tuple)):

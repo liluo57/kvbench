@@ -10,16 +10,21 @@ Each task's dataset is resolved by *name* against ``DatasetPath`` from
 - :class:`CWETask` / :class:`CWEShuffleTask` — RULER common-words extraction
   (:mod:`tasks.Cwe`), read from ``<DatasetPath>/ruler/cwe_len*.jsonl``.
 
-  Each RULER family ships a *shuffle* variant: the prompt's informative units
-  (needle segments / chain assignments / numbered-list blocks) are handed to
-  reuse methods in the original order as a chunk-isolated context
-  (``prepare_input``) while ``run_input`` is their non-identity permutation —
-  a method that detects the change recomputes, a naive one serves stale KV.
+  Each RULER family ships a *shuffle* variant. Its ``Case.input`` is an
+  :class:`workload.RAGWorkload.RAGInput`: ``prepare_input`` contains the
+  original-order informative units and ``run_input`` contains their
+  non-identity permutation. These are RAGInput fields, not Case fields. A
+  method that detects the change recomputes; a naive one serves stale KV.
 
 - :class:`MusiqueTask` / :class:`WikimQATask` / :class:`SamsumTask` — the
   knowledge-base workloads the original CacheBlend repo evaluates on
   (``<DatasetPath>/musique``, ``/wikimqa``, ``/samsum``; each in its own module
   sharing the machinery in :mod:`tasks.bases.KBBase`).
+- :class:`FreshGapTask` — a synthetic interleaved-reuse check where a short
+  fresh span appears between two reusable chunks.
+- :class:`KVCommMMLUTask` / :class:`KVCommGSM8KTask` /
+  :class:`KVCommHumanEvalTask` / :class:`KVCommCopyTask` — multi-agent
+  workloads whose sequential agent outputs can be retained and reused.
 """
 
 from .Cwe import CWEShuffleTask, CWETask

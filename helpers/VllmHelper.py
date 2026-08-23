@@ -29,7 +29,7 @@ _StripConfigKeys = ("dual_chunk_attention_config", "sparse_attention_config")
 
 # --------------------------------------------------------------------- probing
 def SetCudaVisibleDevices(gpuIds: Union[str, List[int]]) -> None:
-    """Set ``CUDA_VISIBLE_DEVICES`` from a constructor ``gpu_ids`` argument."""
+    """Set ``CUDA_VISIBLE_DEVICES`` from a ``gpuIds`` argument."""
     if gpuIds is None:
         return
     if isinstance(gpuIds, (list, tuple)):

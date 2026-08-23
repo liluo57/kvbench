@@ -24,8 +24,8 @@ class Method(ABC):
     #: ``cacheblend(0.15)``. Set via the constructor's ``tag`` argument.
     tag: Optional[str] = None
 
-    #: Metadata keys that are *method metrics*: per-case values the method
-    #: records in ``Result.metadata``, which the engine aggregates (with
+    #: Metadata keys that are *method metrics*: per-inference-RUN values the
+    #: method records in ``Result.metadata``, which the engine aggregates (with
     #: :func:`~core.Metrics.AggregateStats`) into the report's
     #: ``method_metrics`` section per (method, task) pair. Empty means the
     #: method has no method metrics and the report omits that section entirely.
@@ -86,22 +86,21 @@ class Method(ABC):
 
     @abstractmethod
     def Prepare(self, data: List[List[str]]) -> None:
-        """Build reusable state for a batch of cases.
+        """Build reusable state for a batch of PREPARE actions.
 
-        ``data`` is a list of per-case warm-up segments: ``data[i]`` is the
-        list of text segments for case ``i`` (KV prefill, index build, ...).
-        An empty inner list means there is nothing to warm up for that case.
-        Called once per batch, before :meth:`Run`.
+        ``data[i]`` is the list of text segments for PREPARE action ``i`` (KV
+        prefill, index build, ...). An empty inner list means there is nothing
+        to warm up for that action. Called once for each PREPARE action step.
         """
 
     @abstractmethod
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         """Run inference on a batch of complete prompts.
 
-        ``data[i]`` is the complete prompt for case ``i``. ``retainOutput[i]``
-        is a future-reuse/lifetime hint for that generated output; methods may
-        preserve backend-specific reusable state or ignore it. Returns a list of
-        :class:`Result` objects in the same order as the input.
+        ``data[i]`` is the complete prompt for RUN action ``i``.
+        ``retainOutput[i]`` is a future-reuse/lifetime hint for that generated
+        output; methods may preserve backend-specific reusable state or ignore
+        it. Returns a list of :class:`Result` objects in input order.
 
         The method is responsible for recording raw system timings into each
         ``Result.performance`` so system metrics can be computed, e.g.::

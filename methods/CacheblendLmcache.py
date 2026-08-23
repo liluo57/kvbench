@@ -1,7 +1,8 @@
 """CacheBlend method — vLLM 0.25 + LMCache in-process CacheBlend.
 
-Replaces the old worker subprocess (which ran the original authors' patched
-vLLM). This version drives vLLM 0.25.1's built-in LMCache connector
+This is the in-process alternative to :class:`methods.CacheblendRepo`, which
+continues to drive the original authors' patched vLLM in a helper subprocess.
+This version drives vLLM 0.25.1's built-in LMCache connector
 (``LMCacheConnectorV1``, ``kv_role="kv_both"``) with blending enabled, in the
 same interpreter — no external repo, no host-level ``sitecustomize.py``.
 
@@ -91,8 +92,9 @@ class CacheblendLmcache(Method):
     #: the scheduler for the request, over the input length (see :meth:`Run`).
     #: It is *not* the constructed context share, which stays ~1.0 even when the
     #: cache could not store anything (memory pressure) and zero tokens were hit.
-    #: Naive / FullPrefill leave this empty, so their report entries have no
-    #: ``method_metrics`` section.
+    #: Naive may record ``reuse_ratio`` as diagnostic metadata but does not
+    #: declare it; FullPrefill does neither. Their report entries therefore
+    #: have no ``method_metrics`` section.
     method_metrics = ("reuse_ratio",)
 
     def __init__(

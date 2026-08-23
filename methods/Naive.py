@@ -11,6 +11,10 @@ that CacheBlend's ``recomp_ratio > 0`` later repairs.
 
 Naive is the *control group* for CacheBlend's repair: it does *nothing* to fix
 the recombination, so its accuracy is exactly what KV stitching breaks.
+
+For a RUN whose ``retainOutput`` hint is true, Naive also keeps the generated
+tokens and their KV as another reusable segment. Later RUN steps of the same
+case can therefore reuse earlier agent output as well as prepared input.
 """
 
 import time
@@ -29,7 +33,8 @@ class NaiveTransformer(Method):
 
     Prepared chunks are cached independently in ``Prepare``. ``Run`` stitches
     those KVs in prompt order and prefills only the fresh spans between them.
-    No cached token is repaired or recomputed.
+    No cached token is repaired or recomputed. When ``retainOutput`` is true,
+    the generated output and its KV are registered for later RUN steps.
     """
 
     name = "naive"

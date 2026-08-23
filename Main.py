@@ -10,7 +10,8 @@ datasets resolve by name against ``DatasetPath``.
 
 Methods declare only ``gpuNums`` / ``perfWeight``.  Engine assigns concrete
 GPU ids and initializes every instance in its own spawned process:
-    cacheblend          CacheBlend via vLLM 0.25 + LMCache in-process blending
+    cacheblend_lmcache  CacheBlend via vLLM 0.25 + LMCache in-process blending
+    cacheblend_repo     CacheBlend via the original repo's patched vLLM worker
     full_prefill        FullPrefillTransformer (transformers, recompute all)
     full_prefill_vllm   FullPrefillVllm (system vLLM, recompute all)
     naive               NaiveTransformer (transformers, reuse context KV)
@@ -79,7 +80,7 @@ def Main() -> None:
     metrics = [TTFTMetric(), ThroughputMetric()]
 
     #: Cases per batch handed to each method (see Engine). Edit to taste;
-    #: 1 keeps the per-case behavior. No CLI args by design.
+    #: 1 keeps one Case per batch. No CLI args by design.
     batchSize = 4
 
     print(

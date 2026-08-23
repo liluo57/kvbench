@@ -58,7 +58,7 @@ class Metric(ABC):
 
     @abstractmethod
     def Update(self, result: Result) -> None:
-        """Consume one :class:`Result` (called once per case)."""
+        """Consume one :class:`Result` (called once per inference RUN)."""
 
     @abstractmethod
     def Summary(self) -> Dict[str, Any]:

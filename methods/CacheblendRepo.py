@@ -59,7 +59,8 @@ class CacheblendRepo(Method):
 
     #: The share of the input actually served from the cached context KV, as
     #: reported by the worker (0 for full-prefill runs). Mirrors the framework's
-    #: cacheblend method metric; Naive / FullPrefill leave this empty.
+    #: cacheblend method metric. Naive records the same metadata diagnostically
+    #: but does not declare it as a method metric; FullPrefill does not record it.
     method_metrics = ("reuse_ratio",)
 
     def __init__(
