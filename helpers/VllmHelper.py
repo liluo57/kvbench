@@ -162,13 +162,9 @@ def GenerateBatch(
     every request). Returns one ``(text, ttft, numTokens, totalTime,
     numCached)`` tuple per prompt, in the input order.
 
-    - ``ttft`` — per-request time to first decoded token (submission -> that
-      request's first output token), *amortized* over the batch
-      (``measured / batchSize``). The raw submission->first-token measurement
-      includes queueing behind the sibling requests in the batch (they share the
-      GPU), so it overstates the first-token latency by roughly ``batchSize``;
-      amortizing it gives the fair per-sample first-token time, consistent with
-      ``totalTime`` and with the transformers batch path.
+    - ``ttft`` — per-request wall time to its first decoded token. Latency is
+      never divided by batch size; doing that turns a real request latency into
+      an artificial service-time estimate.
     - ``totalTime`` — the batch's shared wall-clock (first submission -> last
       completion) *amortized* over the batch (``wallClock / batchSize``), so
       summing per-sample times equals the actual run wall-clock — what
@@ -213,7 +209,7 @@ def GenerateBatch(
     return [
         (
             texts.get(rid, ""),
-            float(ttfts.get(rid, 0.0)) / n,
+            float(ttfts.get(rid, 0.0)),
             tokenLens.get(rid, 0),
             amortized,
             numCached.get(rid, 0),

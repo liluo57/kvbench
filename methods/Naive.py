@@ -77,6 +77,8 @@ class NaiveTransformer(Method):
         # Naive processes the batch sequentially: every case builds a
         # differently-sized DynamicCache, so the past tensors cannot be packed
         # into one batched ``transformers`` call.
+        if len(self._states) != len(data):
+            self._states = [{"segments": [], "caches": [], "ids": []} for _ in data]
         results = []
 
         for i, runInput in enumerate(data):

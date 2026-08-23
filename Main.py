@@ -35,10 +35,15 @@ from tasks import (
     MusiqueTask,
     SamsumTask,
     WikimQATask,
+    KVCommMMLUTask,
+    KVCommGSM8KTask,
+    KVCommHumanEvalTask,
+    KVCommCopyTask,
 )
 from tasks.FreshGap import FreshGapTask
 
-MAX_SAMPLES=64
+MAX_SAMPLES=4
+MAX_NEW_TOKENS=64
 
 
 def Main() -> None:
@@ -46,13 +51,17 @@ def Main() -> None:
     #: ``<DatasetPath>/ruler/<name>_len*.jsonl``; ``maxSamples`` caps the count
     #: (omit for all samples).
     tasks = [
-        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        VTShuffleTask(maxSamples=MAX_SAMPLES),
-        MusiqueTask(maxSamples=MAX_SAMPLES),
-        SamsumTask(maxSamples=MAX_SAMPLES),
-        WikimQATask(maxSamples=MAX_SAMPLES),
-        FreshGapTask(nCases=MAX_SAMPLES),
+        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        # VTShuffleTask(maxSamples=MAX_SAMPLES),
+        # MusiqueTask(maxSamples=MAX_SAMPLES),
+        # SamsumTask(maxSamples=MAX_SAMPLES),
+        # WikimQATask(maxSamples=MAX_SAMPLES),
+        # FreshGapTask(nCases=MAX_SAMPLES),
+        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
     ]
 
     #: Methods to run (edit to taste). Each loads its own copy of the model on
@@ -62,17 +71,18 @@ def Main() -> None:
     #: EngineCore — starting a spawn'd process while the main module is still
     #: being imported raises multiprocessing's "bootstrapping phase" error.
     methods = [
-        CacheblendRepo(gpuIds="3", maxNewTokens=64),
-        # CacheblendRepo(gpuIds="4", maxNewTokens=64,fullPrefill=True,tag='full_prefill'),
-        # FullPrefillVllm(gpuIds="5", maxNewTokens=64),
-        # NaiveTransformer(gpuIds="2", maxNewTokens=64),
+        # COPY benchmark expects Method(maxNewTokens=512).
+        CacheblendRepo(gpuIds="4", maxNewTokens=MAX_NEW_TOKENS),
+        # CacheblendRepo(gpuIds="4", maxNewTokens=MAX_NEW_TOKENS,fullPrefill=True,tag='full_prefill'),
+        # FullPrefillVllm(gpuIds="5", maxNewTokens=MAX_NEW_TOKENS),
+        # NaiveTransformer(gpuIds="2", maxNewTokens=MAX_NEW_TOKENS),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
 
     #: Cases per batch handed to each method (see Engine). Edit to taste;
     #: 1 keeps the per-case behavior. No CLI args by design.
-    batchSize = 8
+    batchSize = 4
 
     print(
         f"[main] model={ModelPath()}\n"

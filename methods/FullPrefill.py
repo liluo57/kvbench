@@ -101,7 +101,11 @@ class FullPrefillTransformer(_FullPrefillBase):
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         idsList = [self._gen.Encode(d) for d in data]
-        batchOut = self._gen.GenerateBatch(idsList)
+        # The KVCOMM protocol is request-sequential (batch size 1). Generate()
+        # exposes the real first-token boundary; GenerateBatch() can only
+        # approximate TTFT from total generation time and must not be used for
+        # latency comparisons.
+        batchOut = [self._gen.Generate(ids) for ids in idsList]
         return [
             self._Result(
                 text, ttft, total, nTokens, metadata={"n_input": len(ids)}

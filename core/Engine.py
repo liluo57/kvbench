@@ -120,6 +120,9 @@ class Engine:
         methodScores: Dict[str, List[float]] = {
             name: [] for name in method.method_metrics
         }
+        methodWeights: Dict[str, List[float]] = {
+            name: [] for name in method.method_metrics
+        }
         nCases = 0
 
         batch: List[Case] = []
@@ -127,12 +130,14 @@ class Engine:
             batch.append(case)
             if len(batch) >= self.batchSize:
                 nCases += self._processBatch(
-                    task, method, metrics, batch, taskScores, methodScores
+                    task, method, metrics, batch, taskScores, methodScores,
+                    methodWeights,
                 )
                 batch = []
         if batch:
             nCases += self._processBatch(
-                task, method, metrics, batch, taskScores, methodScores
+                task, method, metrics, batch, taskScores, methodScores,
+                methodWeights,
             )
 
         report = {
@@ -143,10 +148,20 @@ class Engine:
             "system_metrics": {m.name: m.Summary() for m in metrics},
         }
         if method.method_metrics:
-            report["method_metrics"] = {
-                name: AggregateStats(values, name=name)
-                for name, values in methodScores.items()
-            }
+            report["method_metrics"] = {}
+            for name, values in methodScores.items():
+                stats = AggregateStats(values, name=name)
+                weights = methodWeights[name]
+                if values and weights and sum(weights) > 0:
+                    # Reuse is a token share, so the run-level value must be
+                    # sum(reused tokens) / sum(input tokens), not an unweighted
+                    # mean that gives a 20-token and a 2K-token prompt equal
+                    # influence. Percentiles remain per-request diagnostics.
+                    stats[f"{name}_mean"] = sum(
+                        value * weight for value, weight in zip(values, weights)
+                    ) / sum(weights)
+                    stats[f"{name}_weight_total"] = sum(weights)
+                report["method_metrics"][name] = stats
         return report
 
     def _processBatch(
@@ -157,6 +172,7 @@ class Engine:
         batch: List[Case],
         taskScores: Dict[str, List[float]],
         methodScores: Dict[str, List[float]],
+        methodWeights: Dict[str, List[float]],
     ) -> int:
         """Run one batch of cases through the Workload action loop.
 
@@ -232,6 +248,19 @@ class Engine:
                 # Record final RUN results
                 for sr in step_results:
                     final_results[sr.case_id] = sr.result
+                for result in step_results:
+                    for metric in metrics:
+                        metric.Update(result.result)
+                    for name in method.method_metrics:
+                        value = result.result.metadata.get(name)
+                        if value is not None:
+                            methodScores[name].append(float(value))
+                            weight = (
+                                result.result.metadata.get("n_input", 1.0)
+                                if name == "reuse_ratio"
+                                else 1.0
+                            )
+                            methodWeights[name].append(float(weight or 0.0))
 
             # 4. Dispatch results to workloads
             for wl, start, end in wl_slices:
@@ -247,12 +276,5 @@ class Engine:
                 task.Evaluate(result, case.metadata)
             ).items():
                 taskScores.setdefault(name, []).append(value)
-            for metric in metrics:
-                metric.Update(result)
-            for name in method.method_metrics:
-                value = result.metadata.get(name)
-                if value is not None:
-                    methodScores[name].append(float(value))
-
         method.Reset()
         return len(batch)

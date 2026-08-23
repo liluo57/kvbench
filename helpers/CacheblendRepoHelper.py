@@ -502,6 +502,7 @@ class CacheBlendWorker:
         overwrites those positions with freshly computed KV, so later layers
         do not consume cache captured before the inserted span.
         """
+        requestStart = time.perf_counter()
         if not parts:
             return {"ok": False, "error": "fuse: no prompt parts"}
 
@@ -622,9 +623,14 @@ class CacheBlendWorker:
         oldRatio = self.cfm.get("recomp_ratio", baseRatio)
         self.cfm["recomp_ratio"] = effectiveRatio
         try:
+            generationStart = time.perf_counter()
             resp = self._generateWithRetention(fullIds, retain_output=retain_output)
         finally:
             self.cfm["recomp_ratio"] = oldRatio
+
+        setupTime = generationStart - requestStart
+        resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
+        resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
 
         resp["reuse_ratio"] = self._reuseRatio(fullLen, reusedTokens)
         resp["cacheblend_debug"] = {
@@ -645,6 +651,7 @@ class CacheBlendWorker:
 
     def FuseSuffix(self, chunks: list, suffix: str, retain_output: bool = False):
         """Legacy contiguous-prefix + fresh-suffix fuse path."""
+        requestStart = time.perf_counter()
         if not chunks:
             return {"ok": False, "error": "fuse: no context chunks"}
 
@@ -695,20 +702,29 @@ class CacheBlendWorker:
         self.cfm["suffix_len"] = suffixLen
         self.engine.model.old_kvs = oldKvs
 
+        generationStart = time.perf_counter()
         resp = self._generateWithRetention(fullIds, retain_output=retain_output)
+        setupTime = generationStart - requestStart
+        resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
+        resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
         reusedTokens = max(0, len(fullIds) - suffixLen)
         resp["reuse_ratio"] = self._reuseRatio(len(fullIds), reusedTokens)
         return resp
 
     def Full(self, text: str, retain_output: bool = False):
         """Generate the whole prompt from scratch (no reuse of cached KVs)."""
+        requestStart = time.perf_counter()
         ids = self.tokenizer.encode(text, add_special_tokens=False)
         if not ids:
             return {"ok": False, "error": "empty prompt"}
         self.cfm["collect"] = False
         self.cfm["check"] = False
         self.engine.model.old_kvs = [[None, None]] * len(self.layers)
+        generationStart = time.perf_counter()
         resp = self._generateWithRetention(ids, retain_output=retain_output)
+        setupTime = generationStart - requestStart
+        resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
+        resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
         resp["reuse_ratio"] = 0.0
         return resp
 

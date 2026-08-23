@@ -22,15 +22,15 @@ Each method takes the task's available GPUs (``gpu_ids``, equivalent to
   over transformers).
 """
 
-from .CacheblendLmcache import CacheblendLmcache, CacheBlendMethod
-from .CacheblendRepo import CacheblendRepo
+from .CacheblendLmcache import CacheblendLmcache
+from .CacheblendRepo import CacheblendRepo, NaiveCacheblendRepo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Naive import NaiveTransformer
 
 __all__ = [
     "CacheblendLmcache",
-    "CacheBlendMethod",
     "CacheblendRepo",
+    "NaiveCacheblendRepo",
     "FullPrefillTransformer",
     "FullPrefillVllm",
     "NaiveTransformer",

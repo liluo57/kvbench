@@ -48,7 +48,7 @@ class Metric(ABC):
     """Aggregates system-level measurements across the results of one run.
 
     A metric instance is scoped to a single (method, task) pair: the engine
-    resets it before each run and calls :meth:`Update` once per case.
+    resets it before each run and calls :meth:`Update` once per inference RUN.
 
     Subclasses must implement :meth:`Update` and :meth:`Summary`.
     """

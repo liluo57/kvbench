@@ -28,6 +28,7 @@ from .Niah import NIAHShuffleTask, NIAHTask
 from .Samsum import SamsumTask
 from .Vt import VTShuffleTask, VTTask
 from .WikimQA import WikimQATask
+from .KVCommTasks import KVCommCopyTask, KVCommGSM8KTask, KVCommHumanEvalTask, KVCommMMLUTask
 
 __all__ = [
     "CWEShuffleTask",
@@ -39,4 +40,8 @@ __all__ = [
     "VTShuffleTask",
     "VTTask",
     "WikimQATask",
+    "KVCommMMLUTask",
+    "KVCommGSM8KTask",
+    "KVCommHumanEvalTask",
+    "KVCommCopyTask",
 ]

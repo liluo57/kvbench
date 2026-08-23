@@ -211,6 +211,8 @@ class CacheblendRepo(Method):
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         """Run a batch of prompts, fusing cached and fresh spans in prompt order."""
+        if len(self._chunks) != len(data):
+            self._chunks = [[] for _ in data]
         results: List[Result] = []
 
         for i, (prompt, chunks) in enumerate(zip(data, self._chunks)):
@@ -326,3 +328,20 @@ class CacheblendRepo(Method):
             self.Close()
         except Exception:  # noqa: BLE001
             pass
+
+
+class NaiveCacheblendRepo(CacheblendRepo):
+    """Naive KV stitching on the same patched-vLLM backend as CacheBlend.
+
+    A zero recomputation ratio disables CacheBlend's cached-token repair while
+    preserving the mandatory computation of genuinely fresh prompt spans.
+    This is the apples-to-apples naive baseline; ``NaiveTransformer`` remains
+    available for experiments specifically targeting the HF backend.
+    """
+
+    name = "naive_repo"
+
+    def __init__(self, *args, recompRatio: float = 0.0, **kwargs):
+        if recompRatio != 0.0:
+            raise ValueError("NaiveCacheblendRepo requires recompRatio=0")
+        super().__init__(*args, recompRatio=0.0, **kwargs)
