@@ -211,22 +211,24 @@ class CacheblendRepo(Method):
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         """Run a batch of prompts, fusing cached and fresh spans in prompt order."""
-        # The original patched worker exposes only prefill ``hack_kv`` capture;
-        # generated KV is not available after ``llm.generate``. Keep the
-        # framework hint for forward compatibility, but do not fake retention
-        # by issuing a second collect/prefill request.
-        _ = retainOutput
         results: List[Result] = []
 
-        for prompt, chunks in zip(data, self._chunks):
+        for i, (prompt, chunks) in enumerate(zip(data, self._chunks)):
+            retain = bool(retainOutput[i]) if retainOutput is not None and i < len(retainOutput) else False
             if self.fullPrefill:
-                results.append(self._runFull(prompt))
+                result = self._runFull(prompt, retain_output=retain)
+                results.append(result)
+                if retain and result.output and result.output not in chunks:
+                    chunks.append(result.output)
                 continue
 
             parts, reordered = self._splitForFuse(chunks, prompt)
 
             if parts is None:
-                results.append(self._runFull(prompt))
+                result = self._runFull(prompt, retain_output=retain)
+                results.append(result)
+                if retain and result.output and result.output not in chunks:
+                    chunks.append(result.output)
                 continue
 
             resp = self._Request(
@@ -236,16 +238,14 @@ class CacheblendRepo(Method):
                         [prepareIndex is not None, text]
                         for prepareIndex, text in parts
                     ],
+                    "retain_output": retain,
                 }
             )
 
-            results.append(
-                self._Result(
-                    resp,
-                    full=False,
-                    reordered=reordered,
-                )
-            )
+            result = self._Result(resp, full=False, reordered=reordered)
+            results.append(result)
+            if retain and result.output and result.output not in chunks:
+                chunks.append(result.output)
 
         return results
 
@@ -272,8 +272,8 @@ class CacheblendRepo(Method):
 
         return parts, reuseOrder != chunks
 
-    def _runFull(self, prompt: str) -> Result:
-        resp = self._Request({"op": "full", "text": prompt})
+    def _runFull(self, prompt: str, *, retain_output: bool = False) -> Result:
+        resp = self._Request({"op": "full", "text": prompt, "retain_output": retain_output})
         return self._Result(resp, full=True)
 
     def _Result(self, resp: Dict[str, Any], *, full: bool, reordered: bool = False) -> Result:
@@ -284,6 +284,8 @@ class CacheblendRepo(Method):
         }
         if "cacheblend_debug" in resp:
             metadata["cacheblend_debug"] = resp["cacheblend_debug"]
+        if "retained_tokens" in resp:
+            metadata["retained_tokens"] = resp["retained_tokens"]
         if full:
             metadata["full_prefill"] = True
         if reordered:

@@ -151,7 +151,92 @@ class CacheBlendWorker:
         self._chunkKv = {}
         #: Per-chunk token ids, keyed the same way.
         self._chunkIds = {}
+        self._retainCollector = None
+        self._retainWrappers = []
+        self._installRetainOutputCapture()
         print("[cacheblend-helper] ready", flush=True)
+
+    def _installRetainOutputCapture(self):
+        """Wrap the concrete attention classes, reusing their native hack_kv capture."""
+        for layer in self.layers:
+            attention = layer.self_attn
+            original = attention.forward
+            if getattr(attention, "_kvbench_retain_wrapped", False):
+                continue
+
+            def wrapped(*args, __original=original, __attention=attention, **kwargs):
+                cfm = self.cfm
+                status = kwargs.get("status")
+                if status is None and len(args) >= 5:
+                    status = args[4]
+                retaining = bool(getattr(self, "_retainCollector", None)) and status == -1
+                old_collect = cfm.get("collect", False)
+                if retaining:
+                    cfm["collect"] = True
+                try:
+                    result = __original(*args, **kwargs)
+                finally:
+                    if retaining:
+                        cfm["collect"] = old_collect
+                if retaining:
+                    captured = getattr(__attention, "hack_kv", None)
+                    if captured is not None:
+                        self._retainCollector.append(__attention, captured)
+                return result
+
+            attention.forward = wrapped
+            attention._kvbench_retain_wrapped = True
+            self._retainWrappers.append(attention)
+
+    def _beginRetainOutput(self):
+        class Collector:
+            def __init__(inner, layers):
+                inner.layers = layers
+                inner.indices = {id(layer.self_attn): i for i, layer in enumerate(layers)}
+                inner.items = [[] for _ in layers]
+            def append(inner, attention, captured):
+                idx = inner.indices.get(id(attention))
+                if idx is None:
+                    return
+                inner.items[idx].append(captured)
+            def finish(inner):
+                out = []
+                for seq in inner.items:
+                    if not seq:
+                        return None
+                    ks = [x[0] for x in seq]
+                    vs = [x[1] for x in seq]
+                    out.append([self._torch.cat(ks).detach().cpu(), self._torch.cat(vs).detach().cpu()])
+                return out
+        self._retainCollector = Collector(self.layers)
+
+    def _endRetainOutput(self):
+        collector = self._retainCollector
+        self._retainCollector = None
+        return collector.finish() if collector is not None else None
+
+    def _setRetainEager(self, enabled):
+        runner = getattr(self.llm.llm_engine, "model_executor", None)
+        runner = getattr(runner, "driver_worker", None)
+        runner = getattr(runner, "model_runner", None)
+        if runner is None:
+            return None
+        old = getattr(runner, "max_context_len_to_capture", None)
+        if enabled and old is not None:
+            runner.max_context_len_to_capture = 0
+        return (runner, old)
+
+    def _generateWithRetention(self, fullIds, retain_output=False):
+        if not retain_output:
+            return self._Generate(fullIds)
+        self._beginRetainOutput()
+        state = self._setRetainEager(True)
+        try:
+            return self._Generate(fullIds, retain_output=True)
+        finally:
+            self._retainCollector = None
+            if state is not None and state[1] is not None:
+                state[0].max_context_len_to_capture = state[1]
 
     def _installIndexedCheckMask(self) -> None:
         """Make sparse check queries attend at their real token positions.
@@ -357,23 +442,39 @@ class CacheBlendWorker:
         }
 
     # ---------------------------------------------------------------- fuse
-    def _Generate(self, fullIds: list):
+    def _Generate(self, fullIds: list, retain_output=False):
         """Decode ``fullIds``, returning the standard result dict."""
         t0 = time.perf_counter()
         out = self.llm.generate(
             prompt_token_ids=[fullIds],
             sampling_params=self.sampling_params(
-                temperature=0, max_tokens=self.args.max_new_tokens
+                temperature=0, max_tokens=self.args.max_new_tokens + (1 if retain_output else 0)
             ),
         )
         r = out[0]
         ttft = r.metrics.first_token_time - r.metrics.first_scheduled_time
         resp = r.outputs[0]
+        token_ids = list(resp.token_ids)
+        visible_ids = token_ids[:self.args.max_new_tokens]
+        retained = self._endRetainOutput() if retain_output else None
+        retained_tokens = 0
+        if retain_output and retained is not None:
+            n = min(len(visible_ids), retained[0][0].shape[0])
+            retained_tokens = n
+            if n:
+                text = self.tokenizer.decode(visible_ids, skip_special_tokens=True)
+                self._chunkIds[text] = visible_ids[:n]
+                self._chunkKv[text] = [[kv[0][:n], kv[1][:n]] for kv in retained]
+            else:
+                text = self.tokenizer.decode(visible_ids, skip_special_tokens=True)
+        else:
+            text = resp.text
         return {
             "ok": True,
-            "text": resp.text,
+            "text": text,
             "ttft": round(float(ttft), 6),
-            "num_tokens": len(resp.token_ids),  # vllm 0.4.1 attribute name
+            "num_tokens": len(visible_ids),
+            "retained_tokens": retained_tokens,
             "total_time": round(float(time.perf_counter() - t0), 6),
             "n_input": len(fullIds),
         }
@@ -381,7 +482,7 @@ class CacheBlendWorker:
     def _reuseRatio(self, fullLen: int, reusedTokens: int):
         return round(reusedTokens / fullLen, 6) if fullLen else 0.0
 
-    def Fuse(self, parts: list):
+    def Fuse(self, parts: list, retain_output: bool = False):
         """Fuse cached and fresh spans appearing anywhere in one prompt.
 
         ``parts`` has the form::
@@ -521,7 +622,7 @@ class CacheBlendWorker:
         oldRatio = self.cfm.get("recomp_ratio", baseRatio)
         self.cfm["recomp_ratio"] = effectiveRatio
         try:
-            resp = self._Generate(fullIds)
+            resp = self._generateWithRetention(fullIds, retain_output=retain_output)
         finally:
             self.cfm["recomp_ratio"] = oldRatio
 
@@ -542,7 +643,7 @@ class CacheBlendWorker:
             )
         return resp
 
-    def FuseSuffix(self, chunks: list, suffix: str):
+    def FuseSuffix(self, chunks: list, suffix: str, retain_output: bool = False):
         """Legacy contiguous-prefix + fresh-suffix fuse path."""
         if not chunks:
             return {"ok": False, "error": "fuse: no context chunks"}
@@ -594,12 +695,12 @@ class CacheBlendWorker:
         self.cfm["suffix_len"] = suffixLen
         self.engine.model.old_kvs = oldKvs
 
-        resp = self._Generate(fullIds)
+        resp = self._generateWithRetention(fullIds, retain_output=retain_output)
         reusedTokens = max(0, len(fullIds) - suffixLen)
         resp["reuse_ratio"] = self._reuseRatio(len(fullIds), reusedTokens)
         return resp
 
-    def Full(self, text: str):
+    def Full(self, text: str, retain_output: bool = False):
         """Generate the whole prompt from scratch (no reuse of cached KVs)."""
         ids = self.tokenizer.encode(text, add_special_tokens=False)
         if not ids:
@@ -607,7 +708,7 @@ class CacheBlendWorker:
         self.cfm["collect"] = False
         self.cfm["check"] = False
         self.engine.model.old_kvs = [[None, None]] * len(self.layers)
-        resp = self._Generate(ids)
+        resp = self._generateWithRetention(ids, retain_output=retain_output)
         resp["reuse_ratio"] = 0.0
         return resp
 
@@ -630,16 +731,17 @@ class CacheBlendWorker:
                     _stdout(self.Collect(req["chunks"]))
                 elif op == "fuse":
                     if "parts" in req:
-                        _stdout(self.Fuse(req["parts"]))
+                        _stdout(self.Fuse(req["parts"], bool(req.get("retain_output", False))))
                     else:
                         _stdout(
                             self.FuseSuffix(
                                 req["chunks"],
                                 req.get("suffix", ""),
+                                bool(req.get("retain_output", False)),
                             )
                         )
                 elif op == "full":
-                    _stdout(self.Full(req["text"]))
+                    _stdout(self.Full(req["text"], bool(req.get("retain_output", False))))
                 elif op == "reset":
                     _stdout(self.Reset())
                 elif op == "close":
