@@ -38,3 +38,33 @@ def test_stderr_tail_uses_already_drained_lines():
     method = CacheblendRepo()
     method._stderrTail.extend(["first\n", "CUDA out of memory\n"])
     assert method._StderrTail().endswith("CUDA out of memory\n")
+
+
+def test_run_reserves_gpu_assembly_buffer_before_fusing_batch():
+    method = CacheblendRepo()
+    method._chunks = [["A"], ["B"]]
+    requests = []
+
+    def request(payload):
+        requests.append(payload)
+        if payload["op"] == "reserve":
+            return {"ok": True, "capacity": 2}
+        return {
+            "ok": True,
+            "text": "answer",
+            "ttft": 0.1,
+            "num_tokens": 1,
+            "total_time": 0.2,
+            "n_input": 2,
+            "reuse_ratio": 0.5,
+        }
+
+    method._Request = request
+    results = method.Run(["A?", "B?"])
+
+    assert [item["op"] for item in requests] == ["reserve", "fuse", "fuse"]
+    assert requests[0]["parts_batch"] == [
+        [[True, "A"], [False, "?"]],
+        [[True, "B"], [False, "?"]],
+    ]
+    assert [result.output for result in results] == ["answer", "answer"]

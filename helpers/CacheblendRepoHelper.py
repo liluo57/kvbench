@@ -6,7 +6,11 @@ it over JSON-lines:
 
     {"op": "collect", "chunks": [...]}
         Cache every reusable chunk independently. Collection is batched and the
-        resulting per-chunk KV is kept on CPU between runs.
+        resulting per-chunk KV remains resident on the worker GPU.
+
+    {"op": "reserve", "parts_batch": [[[cached, text], ...], ...]}
+        Size the reusable GPU assembly buffers once for the largest fused
+        request in the upcoming batch.
 
     {"op": "fuse", "parts": [[cached, text], ...]}
         Generate an interleaved prompt. ``cached=True`` spans use previously
@@ -145,12 +149,17 @@ class CacheBlendWorker:
 
         #: Per-chunk cached KV, keyed by the chunk's exact text: chunk text ->
         #: per-layer ``[[k, v], ...]``. Collected once per batch in ``collect``,
-        #: consumed in ``fuse`` in whatever (run) order the method needs. Stored
-        #: on *CPU* so a whole batch's chunks do not exhaust GPU memory — only
-        #: one case's chunks move to GPU per fused run.
+        #: consumed in ``fuse`` in whatever (run) order the method needs. The
+        #: tensors stay on the worker GPU so serving never stages KV through
+        #: host memory.
         self._chunkKv = {}
         #: Per-chunk token ids, keyed the same way.
         self._chunkIds = {}
+        #: Per-layer dense K/V buffers used to assemble reordered/interleaved
+        #: prompts. They grow before a run batch, then are overwritten in-place
+        #: for every request. This avoids both H2D copies and allocator churn.
+        self._assembledKv = []
+        self._assembledCapacity = 0
         self._retainCollector = None
         self._retainWrappers = []
         self._installRetainOutputCapture()
@@ -206,14 +215,24 @@ class CacheBlendWorker:
                         return None
                     ks = [x[0] for x in seq]
                     vs = [x[1] for x in seq]
-                    out.append([self._torch.cat(ks).detach().cpu(), self._torch.cat(vs).detach().cpu()])
+                    out.append([
+                        self._torch.cat(ks).detach(),
+                        self._torch.cat(vs).detach(),
+                    ])
                 return out
         self._retainCollector = Collector(self.layers)
 
     def _endRetainOutput(self):
         collector = self._retainCollector
         self._retainCollector = None
-        return collector.finish() if collector is not None else None
+        retained = collector.finish() if collector is not None else None
+        self._ClearHackKv()
+        return retained
+
+    def _ClearHackKv(self) -> None:
+        """Drop attention capture aliases once owned copies/views exist."""
+        for layer in self.layers:
+            layer.self_attn.hack_kv = None
 
     def _setRetainEager(self, enabled):
         runner = getattr(self.llm.llm_engine, "model_executor", None)
@@ -370,10 +389,10 @@ class CacheBlendWorker:
             prompt_token_ids=idsList,
             sampling_params=self.sampling_params(temperature=0, max_tokens=1),
         )
-        kvBatch = [
-            [layer.self_attn.hack_kv[0].clone(), layer.self_attn.hack_kv[1].clone()]
-            for layer in self.layers
-        ]
+        # ``hack_kv`` is stable until the next generate. Slice-clone directly
+        # from it below; cloning the whole group first would temporarily double
+        # the GPU footprint during collection.
+        kvBatch = [layer.self_attn.hack_kv for layer in self.layers]
         if kvBatch[0][0].shape[0] != total:
             if len(idsList) == 1 or depth >= 3:
                 raise RuntimeError(
@@ -383,26 +402,30 @@ class CacheBlendWorker:
                     f"forward"
                 )
             mid = len(idsList) // 2
+            # Do not retain the oversized/partial capture while recursive
+            # collection allocates owned chunks for both halves.
+            del kvBatch
+            self._ClearHackKv()
             self._CollectGroup(texts[:mid], idsList[:mid], depth + 1)
             self._CollectGroup(texts[mid:], idsList[mid:], depth + 1)
             return
         off = 0
         for text, ids in zip(texts, idsList):
             n = len(ids)
-            # Store on CPU: the whole batch's chunks are collected here, and
-            # holding them all on GPU is what OOM'd the 32-case benchmark
-            # (~128KB/token for Mistral-7B). Only the current case's chunks
-            # move back to the device in ``Fuse``.
+            # Keep owned slices on GPU. The benchmark now uses batch=4; the
+            # previous CPU staging existed for the old batch=32 configuration
+            # and cost 60-230ms of H2D traffic per request on Qwen3-8B.
             kv = [
                 [
-                    kvBatch[j][0][off:off + n].clone().cpu(),
-                    kvBatch[j][1][off:off + n].clone().cpu(),
+                    kvBatch[j][0][off:off + n].clone(),
+                    kvBatch[j][1][off:off + n].clone(),
                 ]
                 for j in range(len(self.layers))
             ]
             self._chunkIds[text] = ids
             self._chunkKv[text] = kv
             off += n
+        self._ClearHackKv()
 
     def Collect(self, chunks: list):
         """Cache every chunk's KV in isolation, batched across the input list.
@@ -482,6 +505,88 @@ class CacheBlendWorker:
     def _reuseRatio(self, fullLen: int, reusedTokens: int):
         return round(reusedTokens / fullLen, 6) if fullLen else 0.0
 
+    def _ResolveSegments(self, parts: list):
+        """Resolve wire-format parts to token ids and resident GPU KV."""
+        if not parts:
+            raise ValueError("fuse: no prompt parts")
+
+        segments = []
+        fullIds = []
+        sampleKv = None
+        for part in parts:
+            if not isinstance(part, (list, tuple)) or len(part) != 2:
+                raise ValueError(f"fuse: invalid part {part!r}")
+
+            cached, text = bool(part[0]), part[1]
+            if cached:
+                if text not in self._chunkKv:
+                    raise ValueError(f"fuse: chunk not collected: {text[:60]!r}")
+                ids = self._chunkIds[text]
+                kv = self._chunkKv[text]
+                if sampleKv is None:
+                    sampleKv = kv
+            else:
+                ids = self.tokenizer.encode(text, add_special_tokens=False)
+                kv = None
+
+            if not ids:
+                continue
+            start = len(fullIds)
+            fullIds.extend(ids)
+            segments.append((cached, ids, kv, start, len(fullIds)))
+
+        if not segments:
+            raise ValueError("fuse: empty prompt")
+        if sampleKv is None:
+            raise ValueError("fuse: no cached span")
+        return segments, fullIds, sampleKv
+
+    def _EnsureAssembledCapacity(self, capacity: int, sampleKv: list) -> None:
+        """Allocate one reusable dense GPU K/V buffer per model layer."""
+        capacity = int(capacity)
+        if capacity <= self._assembledCapacity:
+            return
+        if capacity > self.args.max_model_len:
+            raise ValueError(
+                f"fuse input {capacity} exceeds max_model_len "
+                f"{self.args.max_model_len}"
+            )
+
+        # No request is in flight when reserve/growth runs. Remove the model's
+        # views before releasing old buffers, and return their cached blocks to
+        # the allocator so a larger contiguous allocation does not overlap it.
+        self.engine.model.old_kvs = [[None, None]] * len(self.layers)
+        self._assembledKv = []
+        self._assembledCapacity = 0
+        self._torch.cuda.empty_cache()
+
+        buffers = []
+        for layerIndex in range(len(self.layers)):
+            sampleK, sampleV = sampleKv[layerIndex]
+            buffers.append([
+                sampleK.new_empty((capacity, *sampleK.shape[1:])),
+                sampleV.new_empty((capacity, *sampleV.shape[1:])),
+            ])
+        self._assembledKv = buffers
+        self._assembledCapacity = capacity
+
+    def Reserve(self, partsBatch: list):
+        """Reserve assembly space for the largest request in a run batch."""
+        maximum = 0
+        sampleKv = None
+        for parts in partsBatch or []:
+            _, fullIds, resolvedSample = self._ResolveSegments(parts)
+            if len(fullIds) > maximum:
+                maximum = len(fullIds)
+                sampleKv = resolvedSample
+        if maximum and sampleKv is not None:
+            self._EnsureAssembledCapacity(maximum, sampleKv)
+        return {
+            "ok": True,
+            "capacity": self._assembledCapacity,
+            "requested": maximum,
+        }
+
     def Fuse(self, parts: list, retain_output: bool = False):
         """Fuse cached and fresh spans appearing anywhere in one prompt.
 
@@ -503,52 +608,10 @@ class CacheBlendWorker:
         do not consume cache captured before the inserted span.
         """
         requestStart = time.perf_counter()
-        if not parts:
-            return {"ok": False, "error": "fuse: no prompt parts"}
-
-        segments = []
-        fullIds = []
-        sampleKv = None
-
-        # Resolve every segment first. Cached KV stays on CPU here; the complete
-        # per-layer old_kvs tensor is moved to GPU only after concatenation.
-        for part in parts:
-            if not isinstance(part, (list, tuple)) or len(part) != 2:
-                return {
-                    "ok": False,
-                    "error": f"fuse: invalid part {part!r}",
-                }
-
-            cached, text = part
-            cached = bool(cached)
-
-            if cached:
-                if text not in self._chunkKv:
-                    return {
-                        "ok": False,
-                        "error": f"fuse: chunk not collected: {text[:60]!r}",
-                    }
-                ids = self._chunkIds[text]
-                kv = self._chunkKv[text]
-                if sampleKv is None:
-                    sampleKv = kv
-            else:
-                ids = self.tokenizer.encode(text, add_special_tokens=False)
-                kv = None
-
-            if not ids:
-                continue
-
-            start = len(fullIds)
-            fullIds.extend(ids)
-            end = len(fullIds)
-            segments.append((cached, ids, kv, start, end))
-
-        if not segments:
-            return {"ok": False, "error": "fuse: empty prompt"}
-
-        if sampleKv is None:
-            return {"ok": False, "error": "fuse: no cached span"}
+        try:
+            segments, fullIds, sampleKv = self._ResolveSegments(parts)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
 
         fullLen = len(fullIds)
 
@@ -567,25 +630,24 @@ class CacheBlendWorker:
 
         checkLayers = self.cfm.get("check_layers") or [1]
         checkLayer = checkLayers[0]
+        self._EnsureAssembledCapacity(fullLen, sampleKv)
+        # The previous check pass replaces each old-K view with a rotated K
+        # tensor. Drop those per-request tensors before overwriting the shared
+        # assembly buffers for this request.
+        self.engine.model.old_kvs = [[None, None]] * len(self.layers)
         oldKvs = []
 
         for layerIndex in range(len(self.layers)):
-            sampleK = sampleKv[layerIndex][0]
-            sampleV = sampleKv[layerIndex][1]
-            keyParts = []
-            valueParts = []
+            keyBuffer, valueBuffer = self._assembledKv[layerIndex]
 
             for cached, ids, kv, start, end in segments:
                 if cached:
-                    keyPart = kv[layerIndex][0]
-                    valuePart = kv[layerIndex][1]
-                    keyParts.append(keyPart)
-                    valueParts.append(valuePart)
+                    keyBuffer[start:end].copy_(kv[layerIndex][0])
+                    valueBuffer[start:end].copy_(kv[layerIndex][1])
                     continue
 
-                shape = (len(ids), *sampleK.shape[1:])
-                keyPart = sampleK.new_zeros(shape)
-                valuePart = sampleV.new_zeros(shape)
+                keyBuffer[start:end].zero_()
+                valueBuffer[start:end].zero_()
 
                 # At the first check layer the fork ranks tokens by the squared
                 # V difference. Infinity guarantees that every middle-fresh
@@ -595,17 +657,12 @@ class CacheBlendWorker:
                 if layerIndex == checkLayer:
                     forceEnd = min(end, prefixLen)
                     if forceEnd > start:
-                        valuePart[:forceEnd - start].fill_(float("inf"))
+                        valueBuffer[start:forceEnd].fill_(float("inf"))
 
-                keyParts.append(keyPart)
-                valueParts.append(valuePart)
-
-            oldKvs.append(
-                [
-                    self._torch.cat(keyParts).to(self.device),
-                    self._torch.cat(valueParts).to(self.device),
-                ]
-            )
+            oldKvs.append([
+                keyBuffer[:fullLen],
+                valueBuffer[:fullLen],
+            ])
 
         reusedTokens = sum(
             end - start
@@ -640,6 +697,8 @@ class CacheBlendWorker:
             "repair_tokens": topkCount,
             "forced_tokens": len(forcedPositions),
             "effective_recomp_ratio": effectiveRatio,
+            "kv_residency": "gpu",
+            "assembled_capacity": self._assembledCapacity,
         }
         selected = self.cfm.get("imp_indices")
         if selected is not None:
@@ -676,8 +735,8 @@ class CacheBlendWorker:
         fullIds = [i for ids in ctxIds for i in ids]
         ctxGpu = [
             [
-                self._torch.cat([kv[l][0] for kv in ctxKv]).to(self.device),
-                self._torch.cat([kv[l][1] for kv in ctxKv]).to(self.device),
+                self._torch.cat([kv[l][0] for kv in ctxKv]),
+                self._torch.cat([kv[l][1] for kv in ctxKv]),
             ]
             for l in range(nLayers)
         ]
@@ -732,6 +791,7 @@ class CacheBlendWorker:
         self.engine.model.old_kvs = [[None, None]] * len(self.layers)
         self._chunkKv = {}
         self._chunkIds = {}
+        self._ClearHackKv()
         return {"ok": True}
 
     # -------------------------------------------------------------- service
@@ -745,6 +805,8 @@ class CacheBlendWorker:
                 op = req.get("op")
                 if op == "collect":
                     _stdout(self.Collect(req["chunks"]))
+                elif op == "reserve":
+                    _stdout(self.Reserve(req.get("parts_batch", [])))
                 elif op == "fuse":
                     if "parts" in req:
                         _stdout(self.Fuse(req["parts"], bool(req.get("retain_output", False))))

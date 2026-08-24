@@ -239,6 +239,28 @@ class CacheblendRepo(Method):
             self._chunks = [[] for _ in data]
         results: List[Result] = []
 
+        # Resolve every prompt before serving the batch. The helper uses these
+        # plans to allocate one right-sized GPU assembly buffer up front, so a
+        # later longer request never grows the buffer inside its measured TTFT.
+        plans = []
+        reserveParts = []
+        if not self.fullPrefill:
+            for prompt, chunks in zip(data, self._chunks):
+                parts, reordered = self._splitForFuse(chunks, prompt)
+                wireParts = (
+                    [
+                        [prepareIndex is not None, text]
+                        for prepareIndex, text in parts
+                    ]
+                    if parts is not None
+                    else None
+                )
+                plans.append((wireParts, reordered))
+                if wireParts is not None:
+                    reserveParts.append(wireParts)
+            if reserveParts:
+                self._Request({"op": "reserve", "parts_batch": reserveParts})
+
         for i, (prompt, chunks) in enumerate(zip(data, self._chunks)):
             retain = bool(retainOutput[i]) if retainOutput is not None and i < len(retainOutput) else False
             if self.fullPrefill:
@@ -248,9 +270,9 @@ class CacheblendRepo(Method):
                     chunks.append(result.output)
                 continue
 
-            parts, reordered = self._splitForFuse(chunks, prompt)
+            wireParts, reordered = plans[i]
 
-            if parts is None:
+            if wireParts is None:
                 result = self._runFull(prompt, retain_output=retain)
                 results.append(result)
                 if retain and result.output and result.output not in chunks:
@@ -260,10 +282,7 @@ class CacheblendRepo(Method):
             resp = self._Request(
                 {
                     "op": "fuse",
-                    "parts": [
-                        [prepareIndex is not None, text]
-                        for prepareIndex, text in parts
-                    ],
+                    "parts": wireParts,
                     "retain_output": retain,
                 }
             )
