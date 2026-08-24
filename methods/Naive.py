@@ -39,6 +39,9 @@ class NaiveTransformer(Method):
 
     name = "naive"
     backend = "transformers"
+    # Each Case owns differently-shaped DynamicCache tensors and Run processes
+    # them sequentially, so a larger Case batch only extends their lifetime.
+    maxCaseBatchSize = 1
 
     def __init__(
         self,

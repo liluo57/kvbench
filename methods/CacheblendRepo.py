@@ -57,6 +57,11 @@ _ReadyLine = "[cacheblend-helper] ready"
 class CacheblendRepo(Method):
     name = "cacheblend_repo"
 
+    # The patched fork's fusion/check state is global to one sequence. Keeping
+    # several Cases in one Engine batch only retains all of their chunk KV on
+    # GPU while Run still serves them sequentially.
+    maxCaseBatchSize = 1
+
     #: The share of the input actually served from the cached context KV, as
     #: reported by the worker (0 for full-prefill runs). Mirrors the framework's
     #: cacheblend method metric. Naive records the same metadata diagnostically

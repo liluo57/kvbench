@@ -31,6 +31,12 @@ class Method(ABC):
     #: method has no method metrics and the report omits that section entirely.
     method_metrics: tuple[str, ...] = ()
 
+    #: Maximum number of Cases that may share one Method state lifecycle.
+    #: ``None`` accepts the Engine's requested batch size. Stateful backends
+    #: whose Run path is inherently request-sequential should set this to 1 so
+    #: the Engine can Reset their state after every Case.
+    maxCaseBatchSize: Optional[int] = None
+
     def __init__(
         self,
         *,
@@ -59,6 +65,15 @@ class Method(ABC):
         if float(perfWeight) <= 0:
             raise ValueError("perfWeight must be greater than 0")
 
+        maxCaseBatchSize = self.maxCaseBatchSize
+        if maxCaseBatchSize is not None:
+            if isinstance(maxCaseBatchSize, bool) or not isinstance(
+                maxCaseBatchSize, int
+            ):
+                raise TypeError("maxCaseBatchSize must be an integer or None")
+            if maxCaseBatchSize < 1:
+                raise ValueError("maxCaseBatchSize must be at least 1")
+
         self.tag = tag
         self.gpuNums = gpuNums
         self.perfWeight = float(perfWeight)
@@ -68,6 +83,16 @@ class Method(ABC):
     def Label(self) -> str:
         """Report name: :attr:`name`, or ``name(tag)`` when a tag is set."""
         return f"{self.name}({self.tag})" if self.tag else self.name
+
+    def EffectiveBatchSize(self, requested: int) -> int:
+        """Resolve the Case batch size allowed for this Method instance."""
+        if isinstance(requested, bool) or not isinstance(requested, int):
+            raise TypeError("requested batch size must be an integer")
+        if requested < 1:
+            raise ValueError("requested batch size must be at least 1")
+        if self.maxCaseBatchSize is None:
+            return requested
+        return min(requested, self.maxCaseBatchSize)
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
         """Bind the exact physical GPUs assigned by the Engine.

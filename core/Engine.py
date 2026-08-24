@@ -157,6 +157,9 @@ class Engine:
         tasks = list(tasks)
         methods = list(methods)
         metrics = list(metrics)
+        effectiveBatchSizes = [
+            method.EffectiveBatchSize(self.batchSize) for method in methods
+        ]
         gpuPool, gpuSnapshot = ResolveGpuIds(self.availableGpuIds)
         self.outputDir = self._CreateOutputDir()
         startedWall = time.time()
@@ -205,6 +208,14 @@ class Engine:
             "started_at": datetime.fromtimestamp(startedWall).astimezone().isoformat(),
             "output_dir": str(self.outputDir.resolve()),
             "batch_size": self.batchSize,
+            "effective_batch_sizes": [
+                {
+                    "method_index": index,
+                    "method": method.Label,
+                    "batch_size": effectiveBatchSizes[index],
+                }
+                for index, method in enumerate(methods)
+            ],
             "timeouts": {
                 "initialize": self.initializeTimeout,
                 "task": self.taskTimeout,
@@ -334,7 +345,8 @@ class Engine:
             process = context.Process(
                 target=WorkerMain,
                 name=f"kvbench-{workerId}",
-                args=(workerId, methodIndex, method, metrics, gpuIds, self.batchSize,
+                args=(workerId, methodIndex, method, metrics, gpuIds,
+                      effectiveBatchSizes[methodIndex],
                       childConnection, eventQueue, instanceLog),
             )
             process.start()

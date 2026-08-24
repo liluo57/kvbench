@@ -77,6 +77,7 @@ class Method:
     name = "method"
     tag = None
     method_metrics = ()
+    maxCaseBatchSize = None
 
     def __init__(
         self,
@@ -123,6 +124,12 @@ class Method:
 output as another reusable segment or ignore the hint. Method-specific numeric
 metadata is written to `Result.metadata`; only keys declared by
 `method_metrics` are aggregated into the method-metrics report.
+
+`maxCaseBatchSize` is a Method capability limit. `None` accepts the Engine's
+requested `batchSize`; a request-sequential, stateful method sets it to `1` so
+each Case completes and is reset before the next Case starts. The effective
+size is `min(Engine.batchSize, Method.maxCaseBatchSize)` and is recorded in the
+run manifest.
 
 A Method is responsible for:
 
@@ -352,10 +359,11 @@ report = engine.Evaluate(tasks, methods, metrics)
 ```
 
 Within one `(method, task)` pair, `Task.Cases()` is split into batches of at
-most `batchSize`. The simplified inner loop is:
+most that method's effective Case batch size. The simplified inner loop is:
 
 ```python
-for batch in batched(task.Cases(), batchSize):
+effectiveBatchSize = method.EffectiveBatchSize(batchSize)
+for batch in batched(task.Cases(), effectiveBatchSize):
     workloads = [case.workload for case in batch]
 
     while unfinished(workloads):

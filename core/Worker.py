@@ -253,6 +253,7 @@ def WorkerMain(
         method_index=methodIndex,
         method=method.Label,
         gpu_ids=gpuIds,
+        batch_size=batchSize,
         pid=os.getpid(),
         process_group=os.getpgrp(),
         log_path=instanceLog,

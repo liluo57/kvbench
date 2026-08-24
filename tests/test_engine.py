@@ -39,6 +39,22 @@ class FakeTask(Task):
         return {"accuracy": float(result.output == metadata["expected"])}
 
 
+class FakeMultiCaseTask(Task):
+    name = "multi-case"
+
+    def __init__(self, count=3):
+        self.count = count
+
+    def Cases(self):
+        for caseId in range(self.count):
+            prompt = f"case-{caseId}"
+            data = RAGInput(prepare_input=[], run_input=prompt)
+            yield Case(data, RAGWorkload(caseId, data), {"expected": prompt})
+
+    def Evaluate(self, result, metadata):
+        return {"accuracy": float(result.output == metadata["expected"])}
+
+
 class FakeMethod(Method):
     name = "fake"
 
@@ -82,6 +98,16 @@ class FakeMethod(Method):
         pass
 
 
+class FakeSingleCaseMethod(FakeMethod):
+    name = "fake_single_case"
+    maxCaseBatchSize = 1
+
+    def Run(self, data, retainOutput=None):
+        if len(data) != 1:
+            raise RuntimeError(f"single-case method received batch={len(data)}")
+        return super().Run(data, retainOutput)
+
+
 def _gpu(index):
     return GpuInfo(index, "fake", 100, 0, 0.0, 0)
 
@@ -107,6 +133,43 @@ def _run(tmp_path, tasks, methods, gpu_count=2, **kwargs):
             **engine_kwargs,
         )
         return engine, engine.Evaluate(tasks, methods, [])
+
+
+def test_method_case_batch_limit_is_applied_and_recorded(tmp_path):
+    engine, report = _run(
+        tmp_path,
+        [FakeMultiCaseTask(count=3)],
+        [FakeSingleCaseMethod()],
+        gpu_count=1,
+        batchSize=4,
+    )
+
+    assert report["status"] == "completed"
+    assert report["runs"][0]["cases"] == 3
+    manifest = json.loads((engine.outputDir / "manifest.json").read_text())
+    assert manifest["batch_size"] == 4
+    assert manifest["effective_batch_sizes"] == [
+        {
+            "method_index": 0,
+            "method": "fake_single_case",
+            "batch_size": 1,
+        }
+    ]
+    events = [
+        json.loads(line)
+        for line in (engine.outputDir / "events.jsonl").read_text().splitlines()
+    ]
+    initialized = next(
+        event for event in events if event["type"] == "initialize_started"
+    )
+    assert initialized["batch_size"] == 1
+
+
+def test_serial_stateful_methods_declare_single_case_batches():
+    assert CacheblendRepo.maxCaseBatchSize == 1
+    assert NaiveTransformer.maxCaseBatchSize == 1
+    assert CacheblendLmcache.maxCaseBatchSize is None
+    assert FullPrefillVllm.maxCaseBatchSize is None
 
 
 def test_pair_retries_in_same_worker_and_persists_logs(tmp_path):
