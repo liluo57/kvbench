@@ -195,7 +195,11 @@ def _ProcessBatch(
         )
 
     for case in batch:
-        result = finalResults[case.workload.case_id]
+        # Most workloads expose the last inference Result via ``finalResults``;
+        # workloads whose scoring signal is *not* an inference output (e.g.
+        # AgentBenchFlowWorkload, which exposes the rollout's ``result.json``)
+        # may override ``final_result`` to surface a different Result.
+        result = case.workload.final_result or finalResults[case.workload.case_id]
         scores = _NormalizeScores(task.Evaluate(result, case.metadata))
         for name, value in scores.items():
             taskScores.setdefault(name, []).append(float(value))

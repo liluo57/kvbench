@@ -7,14 +7,6 @@ lists below and run from the project root::
 
 The model path comes from ``config.yaml`` (``ModelPath``);
 datasets resolve by name against ``DatasetPath``.
-
-Methods declare only ``gpuNums`` / ``perfWeight``.  Engine assigns concrete
-GPU ids and initializes every instance in its own spawned process:
-    cacheblend_lmcache  CacheBlend via vLLM 0.25 + LMCache in-process blending
-    cacheblend_repo     CacheBlend via the original repo's patched vLLM worker
-    full_prefill        FullPrefillTransformer (transformers, recompute all)
-    full_prefill_vllm   FullPrefillVllm (system vLLM, recompute all)
-    naive               NaiveTransformer (transformers, reuse context KV)
 """
 
 import json
@@ -31,6 +23,7 @@ from methods import (
     NaiveTransformer,
 )
 from tasks import (
+    AgentBenchFlowTask,
     CWEShuffleTask,
     NIAHShuffleTask,
     VTShuffleTask,
@@ -44,14 +37,10 @@ from tasks import (
 )
 from tasks.FreshGap import FreshGapTask
 
-MAX_SAMPLES=64
+MAX_SAMPLES=1
 MAX_NEW_TOKENS=64
 
-
 def Main() -> None:
-    #: Tasks to evaluate (edit to taste). The RULER shuffle tasks read from
-    #: ``<DatasetPath>/ruler/<name>_len*.jsonl``; ``maxSamples`` caps the count
-    #: (omit for all samples).
     tasks = [
         NIAHShuffleTask(maxSamples=MAX_SAMPLES),
         CWEShuffleTask(maxSamples=MAX_SAMPLES),
@@ -64,23 +53,32 @@ def Main() -> None:
         KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
         KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
         KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+        # AgentBenchFlowTask(
+        #     image_override="docker://python:3.13-slim",
+        #     task_ids=["ada-bathroom-plan-repair"],
+        # ),
     ]
 
     #: Methods to run (edit to taste). Constructors are lightweight: concrete
     #: GPU ids are assigned later by Engine. perfWeight is relative expected
     #: per-task runtime and controls how additional instances are distributed.
     methods = [
-        # COPY benchmark expects Method(maxNewTokens=512).
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
-        FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
-        NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
+        # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
+        # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
+        FullPrefillVllm(
+            gpuNums=1, perfWeight=2, maxNewTokens=512,
+            gpuMemoryUtilization=0.95,
+            maxModelLen=32768,
+            # enforceEager=True,
+            # tag="agent",
+            # modelPath="/data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-32B"
+        ),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
 
-    #: Cases per batch handed to each method (see Engine). Edit to taste;
-    #: 1 keeps one Case per batch. No CLI args by design.
     batchSize = 4
 
     print(
@@ -92,7 +90,7 @@ def Main() -> None:
     sys.stdout.flush()
 
     engine = Engine(
-        availableGpuIds="auto",
+        availableGpuIds='auto',
         batchSize=batchSize,
         initializeTimeout=1800,
         taskTimeout=3600,

@@ -156,6 +156,7 @@ class FullPrefillVllm(_FullPrefillBase):
         maxNewTokens: int = 64,
         gpuMemoryUtilization: float = 0.7,
         maxModelLen: int = 40960,
+        enforceEager: bool = False,
         tag: Optional[str] = None,
     ):
         super().__init__(
@@ -169,6 +170,7 @@ class FullPrefillVllm(_FullPrefillBase):
         )
         self.gpuMemoryUtilization = gpuMemoryUtilization
         self.maxModelLen = maxModelLen
+        self.enforceEager = enforceEager
         self.llm = None
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
@@ -179,6 +181,7 @@ class FullPrefillVllm(_FullPrefillBase):
             gpuMemoryUtilization=self.gpuMemoryUtilization,
             maxModelLen=self.maxModelLen,
             tensorParallelSize=self.gpuNums,
+            enforceEager=self.enforceEager,
         )
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:

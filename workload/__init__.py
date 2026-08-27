@@ -1,14 +1,17 @@
 """Workload implementations."""
 
-from .RAGWorkload import RAGInput, RAGWorkload
+from .AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
 from .MultiAgentFullConnectionWorkload import (
     AgentSpec, MultiAgentFullConnectionInput, MultiAgentFullConnectionWorkload,
 )
+from .RAGWorkload import RAGInput, RAGWorkload
 
 __all__ = [
-    "RAGInput",
-    "RAGWorkload",
+    "AgentBenchFlowInput",
+    "AgentBenchFlowWorkload",
     "AgentSpec",
     "MultiAgentFullConnectionInput",
     "MultiAgentFullConnectionWorkload",
+    "RAGInput",
+    "RAGWorkload",
 ]

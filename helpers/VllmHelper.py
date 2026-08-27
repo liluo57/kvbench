@@ -110,6 +110,7 @@ def CreateLlm(
     maxModelLen: int = 40960,
     tensorParallelSize: int = 1,
     dtype: str = "bfloat16",
+    enforceEager: bool = False,
 ):
     """Build the system vLLM ``LLM`` for ``modelPath`` on ``gpuIds``.
 
@@ -117,6 +118,11 @@ def CreateLlm(
     sanitized model dir when the model declares the dual-chunk config (see
     :func:`SanitizedModelDir`). No ``LD_PRELOAD``: the venv is a consistent
     vLLM/torch/CUDA install.
+
+    ``enforceEager=True`` disables CUDA-graph capture during warmup, which
+    trades throughput for a much smaller startup memory peak. Useful when
+    the model + KV cache almost fit and the cuda-graph allocation step
+    is the one that fails with ``CUDA out of memory``.
     """
     SetCudaVisibleDevices(gpuIds)
     path = SanitizedModelDir(modelPath)
@@ -128,6 +134,7 @@ def CreateLlm(
         gpu_memory_utilization=gpuMemoryUtilization,
         max_model_len=maxModelLen,
         tensor_parallel_size=tensorParallelSize,
+        enforce_eager=enforceEager,
     )
 
 

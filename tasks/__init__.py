@@ -27,6 +27,7 @@ Each task's dataset is resolved by *name* against ``DatasetPath`` from
   workloads whose sequential agent outputs can be retained and reused.
 """
 
+from .AgentBenchFlowTask import AgentBenchFlowTask
 from .Cwe import CWEShuffleTask, CWETask
 from .Musique import MusiqueTask
 from .Niah import NIAHShuffleTask, NIAHTask
@@ -36,6 +37,7 @@ from .WikimQA import WikimQATask
 from .KVCommTasks import KVCommCopyTask, KVCommGSM8KTask, KVCommHumanEvalTask, KVCommMMLUTask
 
 __all__ = [
+    "AgentBenchFlowTask",
     "CWEShuffleTask",
     "CWETask",
     "MusiqueTask",

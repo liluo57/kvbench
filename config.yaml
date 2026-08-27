@@ -32,13 +32,62 @@ Cacheblend:
   Repo:
     # The original CacheBlend repo clone (holds vllm_blend + .venv).
     RepoPath: /data/lyh/cache-blend/CacheBlend
-    # Mistral-7B-Instruct-v0.2. The HF cache here has only config/tokenizer
-    # files (no weights), so the complete modelscope copy is used.
-    # The worker self-resolves the model: pointing ModelPath at a Qwen3
-    # loads it additively via helpers/Qwen3ForCacheBlendRepo.py, without
-    # touching the official repo.
     ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B
 
-# The system vLLM is installed in the conda base env
-# (vllm==0.25.1+cu129 + torch==2.11.0+cu129, a consistent CUDA stack). No
-# LD_PRELOAD is needed; see pyproject.toml for how to reproduce the install.
+
+# SkillsBench + mini-SWE integration for AgentBenchFlowTask.
+AgentBenchFlow:
+  # Root of the cloned SkillsBench repo (must contain tasks/<id>/task.md).
+  # Cloned from https://github.com/benchflow-ai/skillsbench.
+  SkillsBenchRepo: /data/lyh/skillsbench
+
+  # Where the agent and verifier run. Options:
+  #   "docker" (default): builds the task's environment/Dockerfile and runs
+  #     both in containers. Production path when Docker daemon is available.
+  #   "apptainer": rootless — no Docker daemon, no sudo. Pulls the task's
+  #     base image (the FROM line of environment/Dockerfile) as a SIF and
+  #     runs agent + verifier with bind mounts. The Dockerfile's RUN/COPY
+  #     steps are NOT applied (apptainer build needs newuidmap/fuse-overlayfs
+  #     which we don't have); the task's per-image deps must already be in
+  #     the base image, or staged via /host_tools (the Helper bind-mounts
+  #     the host's mini-swe-agent into the container automatically).
+  #   "local": runs everything on the host without isolation; only for
+  #     dev / smoke testing the HTTP plumbing.
+  SandboxType: apptainer
+
+  # CLI binary invoked inside the sandbox. mini-swe-agent is the 100-line
+  # Python agent from SWE-agent/mini-swe-agent (Princeton/Stanford SWE-bench
+  # team); it talks to any OpenAI-compatible endpoint via litellm, so we
+  # point it at our kvbench-backed HTTP server with OPENAI_API_BASE.
+  AgentCommand: mini-swe-agent
+
+  # Sandbox image override (apptainer only). When the apptainer sandbox can't
+  # apply the task's Dockerfile RUN/COPY steps (rootless install without
+  # newuidmap/fakeroot), set one of these to skip the Dockerfile entirely
+  # and pull a pre-built image instead.
+  #
+  # ImageOverride:    single URI used for every task.
+  # ImageOverrides:   per-task dict; overrides ImageOverride if the task id
+  #                   is present. Useful when only some SkillsBench tasks
+  #                   need a custom base (e.g. python:3.11-slim for
+  #                   citation-check, while others might be fine on the
+  #                   default FROM line of their Dockerfile).
+  #
+  # Default (null): apptainer parses the FROM line of the task's Dockerfile.
+  # ImageOverride: null
+  # ImageOverrides: {}
+
+  # Where each case writes its per-rollout output files (agent log, verifier
+  # log, synthetic result.json, agent + verifier workspaces, trajectory).
+  # Each SkillsBench task gets its own subdir under this tree. Set to null
+  # for a fresh tempdir per case.
+  OutputDir: /data/lyh/kvbench/outputs/benchflow
+
+  # Seconds to wait for the agent + verifier to finish inside the sandbox.
+  # Engine.taskTimeout is the outer bound.
+  ResultJsonTimeoutSec: 3600
+
+  # Extra flags appended to the agent CLI invocation. Use for anything
+  # mini-swe-agent's CLI accepts beyond --task / --model / --yolo /
+  # --exit-immediately / --cost-limit (which the Helper sets).
+  AgentExtraArgs: []

@@ -45,6 +45,10 @@ class _TwoRunWorkload(Workload):
     def finished(self):
         return self.step >= 3
 
+    @property
+    def final_result(self):
+        return self.observed[-1].result if self.observed else None
+
 
 class _BatchTask(Task):
     name = "batch"
