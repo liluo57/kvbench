@@ -111,6 +111,7 @@ def CreateLlm(
     tensorParallelSize: int = 1,
     dtype: str = "bfloat16",
     enforceEager: bool = False,
+    chatTemplate: Optional[str] = None,
 ):
     """Build the system vLLM ``LLM`` for ``modelPath`` on ``gpuIds``.
 
@@ -123,12 +124,24 @@ def CreateLlm(
     trades throughput for a much smaller startup memory peak. Useful when
     the model + KV cache almost fit and the cuda-graph allocation step
     is the one that fails with ``CUDA out of memory``.
+
+    ``chatTemplate`` is forwarded to ``vllm.LLM(chat_template=...)``. When
+    ``None`` (default), the function auto-detects ``<modelPath>/chat_template.jinja``
+    so the model's own ATEM / Qwen ChatML / etc. template is used by the
+    tokenizer's ``apply_chat_template`` rather than a hand-rolled renderer
+    in KVBench. Pass an explicit string to override (e.g. a path to a
+    custom template file, or the literal template content).
     """
     SetCudaVisibleDevices(gpuIds)
     path = SanitizedModelDir(modelPath)
     from vllm import LLM
 
-    return LLM(
+    if chatTemplate is None:
+        candidate = Path(path) / "chat_template.jinja"
+        if candidate.is_file():
+            chatTemplate = str(candidate)
+
+    llm_kwargs: Dict[str, Any] = dict(
         model=str(path),
         dtype=dtype,
         gpu_memory_utilization=gpuMemoryUtilization,
@@ -136,6 +149,9 @@ def CreateLlm(
         tensor_parallel_size=tensorParallelSize,
         enforce_eager=enforceEager,
     )
+    if chatTemplate is not None:
+        llm_kwargs["chat_template"] = chatTemplate
+    return LLM(**llm_kwargs)
 
 
 def Generate(

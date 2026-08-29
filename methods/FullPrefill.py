@@ -157,6 +157,7 @@ class FullPrefillVllm(_FullPrefillBase):
         gpuMemoryUtilization: float = 0.7,
         maxModelLen: int = 40960,
         enforceEager: bool = False,
+        chatTemplate: Optional[str] = None,
         tag: Optional[str] = None,
     ):
         super().__init__(
@@ -171,6 +172,8 @@ class FullPrefillVllm(_FullPrefillBase):
         self.gpuMemoryUtilization = gpuMemoryUtilization
         self.maxModelLen = maxModelLen
         self.enforceEager = enforceEager
+        # None -> CreateLlm auto-detects ``<model>/chat_template.jinja``.
+        self.chatTemplate = chatTemplate
         self.llm = None
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
@@ -182,6 +185,7 @@ class FullPrefillVllm(_FullPrefillBase):
             maxModelLen=self.maxModelLen,
             tensorParallelSize=self.gpuNums,
             enforceEager=self.enforceEager,
+            chatTemplate=self.chatTemplate,
         )
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:

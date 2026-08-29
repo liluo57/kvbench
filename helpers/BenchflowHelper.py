@@ -96,6 +96,32 @@ _ArchOverride: Optional[str] = None
 # import lazy makes the helper's standalone usage in tests easier to set up.
 from helpers.SkillInjector import BuildSkillsBlock  # noqa: E402
 
+#: vLLM-native tool-call and reasoning parsers. vLLM 0.28.0 ships both
+#: ``muse_glimmer`` (for Muse Glimmer's ATEM protocol) and ``qwen3_xml`` /
+#: ``qwen3`` (for Qwen3-Instruct's ChatML) — invoking them as libraries
+#: here replaces the previous hand-rolled ``<tool_call>`` regex parser,
+#: which silently dropped structured calls when the model emitted a
+#: different framing (e.g. the model hallucinated ``<|im_start|>`` because
+#: KVBench had hand-rolled the prompt instead of using the model's
+#: native chat template).
+from vllm.tool_parsers import ToolParserManager  # noqa: E402
+from vllm.reasoning import ReasoningParserManager  # noqa: E402
+from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E402
+    ChatCompletionRequest,
+)
+
+#: Per-arch parser mapping. ``None`` means "fall back to the legacy regex
+#: parser" (kept for the few archs that lack a vLLM-native parser). Add
+#: new archs here rather than sprinkling ``if "foo" in model_path: ...``
+#: through the code.
+_ARCH_PARSERS: Dict[str, Tuple[Optional[str], Optional[str]]] = {
+    # arch               tool_parser       reasoning_parser
+    "muse_glimmer":      ("muse_glimmer",   "muse_glimmer"),
+    "qwen3":             ("qwen3_xml",      "qwen3"),
+    # Anything not listed falls through to the legacy regex parser.
+    "other":             (None,             None),
+}
+
 # mini-SWE-agent sends this schema in every request.  vLLM's offline LLM API
 # only receives a rendered prompt, so the schema has to be rendered into the
 # Qwen prompt as well; merely returning it in the HTTP response is too late.
@@ -188,6 +214,11 @@ def _DetectArch() -> str:
     - ``"muse_glimmer"`` if any architecture is in :data:`_MuseGlimmerArchs`
     - ``"qwen3"`` if any is in :data:`_Qwen3Archs`
     - ``"other"`` otherwise (plain Qwen-style header, no thinking handling)
+
+    ``ModelPath`` is read from the static ``config.yaml`` default via
+    :func:`core.Config.ModelPath`. The Engine / Worker / Method chain
+    does not thread an override; if a per-method path is needed, the
+    caller should update ``config.yaml`` before launching KVBench.
 
     Any I/O failure (missing model dir / malformed config) falls back to
     ``"other"``. Honors :data:`_ArchOverride` for tests; the cache is cleared
@@ -338,17 +369,30 @@ def _RenderChatPrompt(
     system_prefix: str = "",
     *,
     thinking: Optional[bool] = True,
+    force_native: bool = True,
 ) -> str:
     """Render OpenAI messages for the configured model.
 
-    Dispatches on :func:`_DetectArch`:
+    When ``force_native`` is true (default) and the model's tokenizer
+    exposes a ``chat_template`` (Qwen3, Muse Glimmer, …), the prompt is
+    rendered through :func:`_ApplyNativeChatTemplate` so the model sees
+    the exact format it was trained on. This is what fixes the ATEM /
+    Qwen ChatML mismatch that caused ``assistant to=bash`` and
+    ``<|im_start|>`` to leak into Muse Glimmer's output.
 
-    - ``"muse_glimmer"`` → :func:`_RenderGlimmerChatPrompt` (Meta-style
-      envelope). CoT for Glimmer is controlled upstream by appending a
-      ``Reasoning strength: high|low`` line to ``system_prefix``; the
-      ``thinking`` arg is accepted for symmetry and ignored.
-    - otherwise → Qwen3 path (this function body). CoT is gated by the
-      assistant-header suffix: ``thinking=False`` injects
+    If the native render fails (no template, exception, etc.) the
+    function falls back to the hand-rolled dispatcher that selects
+    between :func:`_RenderGlimmerChatPrompt` (Meta-style) and the Qwen3
+    path. The ``force_native=False`` escape hatch is for unit tests that
+    assert on the legacy renderers.
+
+    The hand-rolled path's CoT semantics are:
+
+    - ``"muse_glimmer"`` → Meta-style envelope. CoT for Glimmer is
+      controlled upstream by appending a ``Reasoning strength: high|low``
+      line to ``system_prefix``; the ``thinking`` arg is accepted for
+      symmetry and ignored.
+    - otherwise → Qwen3 path. ``thinking=False`` injects
       :data:`_NonThinkingBlock` to suppress Qwen3-Instruct's default
       thinking mode; ``None`` and ``True`` keep the header bare so the
       model emits a ``<think>…</think>`` trace.
@@ -366,6 +410,12 @@ def _RenderChatPrompt(
     curated SkillsBench skills directly to the LLM, skipping the discovery
     step that mini-swe-agent has no native support for.
     """
+    if force_native:
+        native = _ApplyNativeChatTemplate(
+            list(messages), list(tools or []), system_prefix, thinking
+        )
+        if native:
+            return native
     if _DetectArch() == "muse_glimmer":
         return _RenderGlimmerChatPrompt(messages, tools, system_prefix, thinking)
     normalizedTools = list(tools or (_DefaultBashTool,))
@@ -443,6 +493,125 @@ _CodeBlock = re.compile(
 )
 
 
+@lru_cache(maxsize=1)
+def _LoadTokenizer():
+    """Lazy-load a ``transformers`` tokenizer for the configured model.
+
+    vLLM's offline LLM keeps its own tokenizer, but loading it here (one
+    tokenizer instance, shared across all BenchflowHelper instances via
+    lru_cache) lets the HTTP handler render prompts with the model's
+    native ``chat_template.jinja`` without holding a back-reference to
+    the Method. Tokenizer files are small (<100MB), the load is ~2s.
+
+    The path is read from the static ``config.yaml`` default via
+    :func:`core.Config.ModelPath`. To use a different model for a run,
+    update ``config.yaml`` before launching KVBench.
+    """
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(_ModelPath())
+
+
+def _ApplyNativeChatTemplate(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    system_prefix: str,
+    thinking: Optional[bool],
+) -> str:
+    """Render the prompt via the model's native ``chat_template.jinja``.
+
+    Returns the empty string if the tokenizer has no template (caller
+    falls back to the hand-rolled renderer). The ``system_prefix`` (skills
+    block + Reasoning-strength line) is folded into the first system
+    message so the template's existing system role keeps its place.
+
+    For Muse Glimmer the ``reasoning_strength`` kwarg is forwarded via
+    ``chat_template_kwargs`` — the ATEM template's ``render_reasoning``
+    macro reads that variable. For Qwen3 the template ignores the kwarg
+    (Qwen3 CoT is gated by the empty pre-closed ``<think></think>``
+    block the caller still appends when ``thinking=False``).
+
+    OpenAI tool calls carry ``function.arguments`` as a JSON **string**, but
+    the vLLM-distributed Muse Glimmer ATEM chat template's
+    ``render_atem`` macro requires it as a ``mapping`` (it raises
+    ``TemplateError`` otherwise). The fix: in past assistant messages,
+    JSON-decode the ``arguments`` string back to a dict before handing
+    the messages to the tokenizer. ``tools`` are passed through as-is
+    (their ``parameters`` schema is already a dict in OpenAI format).
+    """
+    tok = _LoadTokenizer()
+    if tok.chat_template is None:
+        return ""
+    msgs: List[Dict[str, Any]] = []
+    systemPrepended = False
+    for m in messages:
+        role = str(m.get("role", "user"))
+        if role == "system" and not systemPrepended and system_prefix:
+            baseContent = _MessageContent(m)
+            if baseContent:
+                content = f"{system_prefix.rstrip()}\n\n{baseContent}"
+            else:
+                content = system_prefix
+            msgs.append({"role": "system", "content": content})
+            systemPrepended = True
+        elif role == "assistant" and m.get("tool_calls"):
+            # Re-emit the assistant turn with ``function.arguments`` as a
+            # dict so the ATEM template can pass it to ``render_atem``.
+            tcs: List[Dict[str, Any]] = []
+            for tc in m.get("tool_calls") or []:
+                if not isinstance(tc, Mapping):
+                    continue
+                fn = tc.get("function") if isinstance(tc, Mapping) else None
+                if not isinstance(fn, Mapping):
+                    continue
+                fn_d = vars(fn) if hasattr(fn, "__dict__") else dict(fn)
+                args = fn_d.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"_raw": args}
+                tc_d = vars(tc) if hasattr(tc, "__dict__") else dict(tc)
+                tcs.append({
+                    "id": tc_d.get("id", f"call_{time.time_ns()}_{len(tcs)}"),
+                    "type": tc_d.get("type", "function"),
+                    "function": {
+                        "name": fn_d.get("name"),
+                        "arguments": args,
+                    },
+                })
+            msgs.append({
+                "role": "assistant",
+                "content": m.get("content") or "",
+                "tool_calls": tcs,
+            })
+        else:
+            msgs.append(m)
+    if not systemPrepended and system_prefix:
+        msgs.insert(0, {"role": "system", "content": system_prefix})
+        systemPrepended = True
+    templateKwargs: Dict[str, Any] = {}
+    if thinking is not None:
+        templateKwargs["reasoning_strength"] = "high" if thinking is not False else "low"
+    try:
+        return tok.apply_chat_template(
+            msgs,
+            tools=tools or None,
+            tokenize=False,
+            add_generation_prompt=True,
+            chat_template_kwargs=templateKwargs or None,
+        )
+    except Exception as exc:  # noqa: BLE001 - log and fall back
+        print(
+            f"[benchflow] native apply_chat_template failed ({type(exc).__name__}: {exc}); "
+            "falling back to hand-rolled renderer",
+            file=sys.stderr,
+        )
+        return ""
+
+
+
+
 def _ParseToolCalls(output: str) -> Tuple[str, List[Dict[str, Any]]]:
     """Extract Qwen XML tool calls, with a compatibility fallback for code."""
     calls: List[Dict[str, Any]] = []
@@ -498,12 +667,91 @@ def _ParseToolCalls(output: str) -> Tuple[str, List[Dict[str, Any]]]:
     return content.strip(), calls
 
 
+def _ParseLLMResponse(
+    output: str,
+    payload: Mapping[str, Any],
+    tool_parser: Any = None,
+    reasoning_parser: Any = None,
+) -> Tuple[str, Optional[str], List[Dict[str, Any]]]:
+    """Parse a vLLM ``generate`` output into OpenAI chat-completion fields.
+
+    The vLLM parsers (``tool_parser`` + ``reasoning_parser``) are called
+    directly via their public Python API:
+
+    1. ``reasoning_parser.extract_reasoning(output, request)`` returns
+       ``(reasoning_text, content_without_reasoning)``. ``reasoning_text``
+       is forwarded back to the client via ``message.reasoning_content``.
+    2. ``tool_parser.extract_tool_calls(content, request)`` returns an
+       :class:`ExtractedToolCallInformation` whose ``tool_calls`` are
+       pydantic ``ToolCall`` instances. They are reshaped to the OpenAI
+       ``{id, type, function: {name, arguments}}`` shape below so the
+       JSON response is OpenAI-spec-clean (the pydantic ``FunctionCall``
+       carries a stray ``id=None`` that breaks strict OpenAI clients).
+
+    The two parsers are designed as a pair: the reasoning parser strips
+    the reasoning channel and forwards the remainder to the tool parser
+    so that ``<atem:invoke>`` echoed inside chain-of-thought is never
+    misparsed as a real call.
+
+    Falls back to the legacy regex parser for archs without a registered
+    native pair.
+    """
+    if tool_parser is None and reasoning_parser is None:
+        content, calls = _ParseToolCalls(output)
+        return content, None, calls
+    if bool(tool_parser is None) != bool(reasoning_parser is None):
+        raise ValueError(
+            "_ParseLLMResponse: tool_parser and reasoning_parser must be "
+            "provided together (got one without the other)"
+        )
+    request = ChatCompletionRequest.model_validate(dict(payload))
+    reasoning, content = reasoning_parser.extract_reasoning(output, request)
+    extracted = tool_parser.extract_tool_calls(content or output, request)
+    raw_calls = list(extracted.tool_calls) if extracted.tool_calls else []
+
+    # The vLLM parser returns ``ToolCall`` / ``FunctionCall`` *Pydantic*
+    # models (vllm.entrypoints.openai.engine.protocol.ToolCall extends
+    # ``OpenAIBaseModel`` = pydantic ``BaseModel``). They have neither
+    # ``.get`` nor ``__getitem__``; the only reliable accessor is
+    # ``vars(tc)`` which returns a plain ``dict`` mirroring the pydantic
+    # ``__dict__``. The OpenAI ChatCompletion spec puts ``id`` at the
+    # top-level ``tool_calls[i].id`` and *not* inside ``function``; the
+    # Pydantic ``FunctionCall`` defaults ``id=None``, so we drop it to
+    # keep the response OpenAI-spec-clean (litellm / mini-swe-agent
+    # accept the response).
+    clean_calls: List[Dict[str, Any]] = []
+    for tc in raw_calls:
+        tc_d = vars(tc) if hasattr(tc, "__dict__") else dict(tc)
+        fn_obj = tc_d.get("function")
+        fn_d = vars(fn_obj) if hasattr(fn_obj, "__dict__") else dict(fn_obj)
+        call_id = tc_d.get("id") or f"call_{time.time_ns()}_{len(clean_calls)}"
+        call_type = tc_d.get("type") or "function"
+        name = fn_d.get("name")
+        arguments = fn_d.get("arguments")
+        if isinstance(arguments, Mapping):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        elif arguments is None:
+            arguments = "{}"
+        if not name:
+            continue
+        clean_calls.append({
+            "id": call_id,
+            "type": call_type,
+            "function": {"name": name, "arguments": arguments},
+        })
+
+    return (
+        extracted.content or "",
+        reasoning,
+        clean_calls,
+    )
+
+
 def _FindFreePort(host: str) -> int:
     """Bind ``host:0`` and return the OS-assigned port number."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return int(sock.getsockname()[1])
-
 
 def _ResolveHostSitePackages() -> Optional[Path]:
     """Locate the host's site-packages dir (so we can mount it into the SIF).
@@ -596,7 +844,21 @@ class _HelperHTTPHandler(BaseHTTPRequestHandler):
             self._WriteJSON(500, {"error": f"generation failed: {exc}"})
             return
 
-        content, toolCalls = _ParseToolCalls(output)
+        try:
+            content, reasoning, toolCalls = _ParseLLMResponse(
+                output,
+                payload,
+                tool_parser=helper._GetToolParser(),
+                reasoning_parser=helper._GetReasoningParser(),
+            )
+        except Exception as exc:
+            import traceback
+            print(f"[benchflow] _ParseLLMResponse FAILED: {type(exc).__name__}: {exc}", flush=True)
+            traceback.print_exc()
+            # Fall back to the legacy regex path so the agent at least sees
+            # the raw text (better than a 500).
+            content, toolCalls = _ParseToolCalls(output)
+            reasoning = None
         message: Dict[str, Any] = {
             "role": "assistant",
             "content": content,
@@ -607,6 +869,11 @@ class _HelperHTTPHandler(BaseHTTPRequestHandler):
         # the protocol field the client actually consumes.
         if toolCalls:
             message["tool_calls"] = toolCalls
+        if reasoning:
+            # Some clients (litellm-based agents, etc.) read this field
+            # separately and will not double-count it as content.  Only emit
+            # it when the parser actually extracted something.
+            message["reasoning_content"] = reasoning
 
         response = {
             "id": f"chatcmpl-{int(time.time() * 1000)}",
@@ -621,6 +888,12 @@ class _HelperHTTPHandler(BaseHTTPRequestHandler):
                 }
             ],
         }
+        import sys
+        print(f"[benchflow] HTTP response: tool_calls={len(toolCalls)} content_len={len(content)} reasoning_len={len(reasoning or '')}", file=sys.stderr, flush=True)
+        if toolCalls:
+            print(f"[benchflow]   first tool_call: {toolCalls[0]}", file=sys.stderr, flush=True)
+        else:
+            print(f"[benchflow]   content (head 200): {content[:200]!r}", file=sys.stderr, flush=True)
         self._WriteJSON(200, response)
 
 
@@ -1630,6 +1903,55 @@ class BenchflowHelper:
     def respond(self, future: concurrent.futures.Future[str], output_text: str) -> None:
         if not future.done():
             future.set_result(output_text)
+
+    # ------------------------------------------------------- tool/reasoning parsers
+    def _InstantiateParsers(self) -> None:
+        """Lazy-instantiate the vLLM-native tool + reasoning parsers for the
+        arch returned by :func:`_DetectArch`. Stores ``None`` for archs
+        without a registered parser pair (the helper then falls back to the
+        legacy ``_ParseToolCalls`` regex path).
+
+        The arch → parser mapping lives in :data:`_ARCH_PARSERS` so adding
+        a new arch needs exactly one row there — no per-model ``if`` in
+        this file.
+        """
+        if getattr(self, "_parsers_ready", False):
+            return
+        tool_name, reasoning_name = _ARCH_PARSERS.get(
+            _DetectArch(), (None, None)
+        )
+        if tool_name is None or reasoning_name is None:
+            self._tool_parser = None
+            self._reasoning_parser = None
+        else:
+            try:
+                tok = _LoadTokenizer()
+                tool_cls = ToolParserManager.get_tool_parser(tool_name)
+                reasoning_cls = ReasoningParserManager.get_reasoning_parser(
+                    reasoning_name
+                )
+                self._tool_parser = tool_cls(tok)
+                self._reasoning_parser = reasoning_cls(tok)
+            except Exception as exc:  # noqa: BLE001 - parser not registered, etc.
+                print(
+                    f"[benchflow] failed to instantiate parsers "
+                    f"(tool={tool_name}, reasoning={reasoning_name}): "
+                    f"{type(exc).__name__}: {exc}; falling back to legacy parser",
+                    file=sys.stderr,
+                )
+                self._tool_parser = None
+                self._reasoning_parser = None
+        self._parsers_ready = True
+
+    def _GetToolParser(self) -> Any:
+        if not getattr(self, "_parsers_ready", False):
+            self._InstantiateParsers()
+        return getattr(self, "_tool_parser", None)
+
+    def _GetReasoningParser(self) -> Any:
+        if not getattr(self, "_parsers_ready", False):
+            self._InstantiateParsers()
+        return getattr(self, "_reasoning_parser", None)
 
     def final_result(self) -> Optional[Dict[str, Any]]:
         return self._finalResult

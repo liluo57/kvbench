@@ -164,7 +164,7 @@ def test_qwen_prompt_exposes_tools_and_preserves_tool_history():
             "tool_call_id": "call-1",
             "content": "{\"returncode\": 0}",
         },
-    ], thinking=False)
+    ], thinking=False, force_native=False)
     assert "<tools>" in prompt
     assert '"name": "bash"' in prompt
     assert "<tool_call>" in prompt
@@ -326,7 +326,7 @@ def test_render_prompt_with_system_prefix_appends_to_first_system():
         {"role": "user", "content": "Inspect the files."},
     ]
     prefix = "# Skills\n\n## foo\ndoes foo\n"
-    prompt = _RenderChatPrompt(messages, system_prefix=prefix)
+    prompt = _RenderChatPrompt(messages, system_prefix=prefix, force_native=False)
     # The prefix appears inside the first system region, before the user's
     # original system content.
     assert prompt.index(prefix.rstrip()) < prompt.index("You are an agent.")
@@ -342,7 +342,7 @@ def test_render_prompt_without_system_prefix_unchanged():
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "hi"},
     ]
-    prompt = _RenderChatPrompt(messages)
+    prompt = _RenderChatPrompt(messages, force_native=False)
     assert "You are an agent." in prompt
     assert "# Skills" not in prompt
 
@@ -354,7 +354,7 @@ def test_render_prompt_skills_block_does_not_leak_to_user_turn():
         {"role": "system", "content": "first system"},
         {"role": "system", "content": "second system"},
     ]
-    prompt = _RenderChatPrompt(messages, system_prefix=prefix)
+    prompt = _RenderChatPrompt(messages, system_prefix=prefix, force_native=False)
     # The prefix appears exactly once.
     assert prompt.count(prefix.rstrip()) == 1
     # The second system message becomes a user-role turn (not a second system).
@@ -536,7 +536,7 @@ def _TwoTurnMessages():
 def test_qwen3_thinking_true_default_emits_no_non_thinking_block(arch):
     """Default Qwen3 + ``thinking=True`` (also covers ``None``) — let CoT."""
     arch("qwen3")
-    prompt = _RenderChatPrompt(_TwoTurnMessages(), thinking=True)
+    prompt = _RenderChatPrompt(_TwoTurnMessages(), thinking=True, force_native=False)
     assert prompt.endswith("<|im_start|>assistant\n")
     assert "<think>" not in prompt
 
@@ -544,7 +544,7 @@ def test_qwen3_thinking_true_default_emits_no_non_thinking_block(arch):
 def test_qwen3_thinking_false_injects_non_thinking_block(arch):
     """``thinking=False`` on Qwen3 suppresses CoT — legacy behaviour."""
     arch("qwen3")
-    prompt = _RenderChatPrompt(_TwoTurnMessages(), thinking=False)
+    prompt = _RenderChatPrompt(_TwoTurnMessages(), thinking=False, force_native=False)
     assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
 
 
@@ -559,8 +559,7 @@ def test_glimmer_thinking_true_uses_high_reasoning(arch):
     arch("muse_glimmer")
     system_prefix = "# Skills\n\nReasoning strength: high.\n"
     prompt = _RenderChatPrompt(
-        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True,
-    )
+        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True, force_native=False)
     assert "Reasoning strength: high." in prompt
     assert "Reasoning strength: low." not in prompt
     assert prompt.endswith("<|start|>assistant<|message|>")
@@ -575,8 +574,7 @@ def test_glimmer_thinking_false_uses_low_reasoning(arch):
     arch("muse_glimmer")
     system_prefix = "# Skills\n\nReasoning strength: low.\n"
     prompt = _RenderChatPrompt(
-        _TwoTurnMessages(), system_prefix=system_prefix, thinking=False,
-    )
+        _TwoTurnMessages(), system_prefix=system_prefix, thinking=False, force_native=False)
     assert "Reasoning strength: low." in prompt
     assert "Reasoning strength: high." not in prompt
     assert prompt.endswith("<|start|>assistant<|message|>")
@@ -605,7 +603,7 @@ def test_glimmer_assistant_and_tool_turns_use_meta_envelope(arch):
             "tool_call_id": "call-1",
             "content": "{\"returncode\": 0}",
         },
-    ], thinking=False)
+    ], thinking=False, force_native=False)
     # Assistant envelope uses Meta tokens, not Qwen tokens.
     assert "<|start|>assistant<|message|>" in prompt
     assert "<|im_start|>" not in prompt
@@ -637,8 +635,7 @@ def test_glimmer_user_supplied_reasoning_strength_overrides_helper(arch):
     arch("muse_glimmer")
     system_prefix = "# Skills\n\nReasoning strength: medium.\n"
     prompt = _RenderChatPrompt(
-        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True,
-    )
+        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True, force_native=False)
     assert prompt.count("Reasoning strength: medium.") == 1
     assert "Reasoning strength: high." not in prompt
     assert "Reasoning strength: low." not in prompt
