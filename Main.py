@@ -42,21 +42,30 @@ MAX_NEW_TOKENS=64
 
 def Main() -> None:
     tasks = [
-        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        VTShuffleTask(maxSamples=MAX_SAMPLES),
-        MusiqueTask(maxSamples=MAX_SAMPLES),
-        SamsumTask(maxSamples=MAX_SAMPLES),
-        WikimQATask(maxSamples=MAX_SAMPLES),
-        FreshGapTask(nCases=MAX_SAMPLES),
-        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
-        # AgentBenchFlowTask(
-        #     image_override="docker://python:3.13-slim",
-        #     task_ids=["ada-bathroom-plan-repair"],
-        # ),
+        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        # VTShuffleTask(maxSamples=MAX_SAMPLES),
+        # MusiqueTask(maxSamples=MAX_SAMPLES),
+        # SamsumTask(maxSamples=MAX_SAMPLES),
+        # WikimQATask(maxSamples=MAX_SAMPLES),
+        # FreshGapTask(nCases=MAX_SAMPLES),
+        # KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        # KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+        AgentBenchFlowTask(
+            image_override="docker://python:3.13-slim",
+            task_ids=[
+                "azure-bgp-oscillation-route-leak",
+                "adaptive-cruise-control",
+                "citation-check",
+                "bike-rebalance",
+            ],
+            # thinking=True (default): let the model CoT. Flip to False to
+            # suppress. Qwen3 omits the empty pre-closed <think></think>
+            # block; Muse Glimmer sets Reasoning strength: high|low in the
+            # system prompt.
+        ),
     ]
 
     #: Methods to run (edit to taste). Constructors are lightweight: concrete
@@ -68,12 +77,10 @@ def Main() -> None:
         # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
         # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
         FullPrefillVllm(
-            gpuNums=1, perfWeight=2, maxNewTokens=512,
-            gpuMemoryUtilization=0.95,
+            gpuNums=2, perfWeight=2, maxNewTokens=512,
+            gpuMemoryUtilization=0.88,
             maxModelLen=32768,
-            # enforceEager=True,
-            # tag="agent",
-            # modelPath="/data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-32B"
+            modelPath="/data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-32B",
         ),
     ]
 

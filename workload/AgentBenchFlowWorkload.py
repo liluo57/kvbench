@@ -51,6 +51,12 @@ class AgentBenchFlowInput:
     # ── Agent settings ─────────────────────────────────────────────────────
     agent_command: str = "mini-swe-agent"
     agent_extra_args: Sequence[str] = field(default_factory=tuple)
+    # ── CoT toggle (Qwen3 + Muse Glimmer) ──────────────────────────────────
+    # ``True`` lets the model reason (Qwen3 omits the empty pre-closed
+    # ``<think></think>`` block; Muse Glimmer sets
+    # ``Reasoning strength: high.``). ``False`` suppresses CoT. ``None``
+    # collapses to ``True``.
+    thinking: Optional[bool] = True
     # ── Network ────────────────────────────────────────────────────────────
     host: str = "0.0.0.0"
     port: Optional[int] = None
@@ -87,6 +93,7 @@ class AgentBenchFlowWorkload(Workload):
                 port=self._data.port,
                 output_dir=self._data.output_dir,
                 result_json_timeout=self._data.result_json_timeout,
+                thinking=self._data.thinking,
             )
             self._data.endpoint_url = self._helper.endpointUrl
 

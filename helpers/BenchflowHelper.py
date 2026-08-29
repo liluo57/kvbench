@@ -53,15 +53,43 @@ import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from core.Config import ModelPath as _ModelPath
 
 #: Qwen3 chat-template tokens. Mirrors :mod:`tasks.TemplateHelper`.
 _ImStart = "<|im_start|>"
 _ImEnd = "<|im_end|>"
 _NonThinkingBlock = "<think>\n\n</think>\n\n"
 _MaxToolResponseChars = 5000
+
+#: Muse Glimmer chat-template tokens (Meta-derived ``<|start|>...<|message|>...<|eot|>``
+#: style; see :mod:`tasks.TemplateHelper._MuseSystemPrefix` for the verified KB-path
+#: usage).
+_MGStart = "<|start|>"
+_MGMessage = "<|message|>"
+_MGEot = "<|eot|>"
+
+#: Architectures whose chat default uses ``<|im_start|>...`` (Qwen3-Instruct).
+_Qwen3Archs = ("Qwen3ForCausalLM",)
+
+#: Architectures that use the Meta-style ``<|start|>/<|message|>/<|eot|>`` chat
+#: format. vLLM maps ``MuseGlimmerForConditionalGeneration`` to the
+#: ``MuseGlimmerForCausalLM`` class (text-only), so both names appear.
+#: Duplicated from :mod:`tasks.TemplateHelper` to keep this module
+#: self-contained — the SkillsBench / agent pipeline is otherwise unaware of
+#: the RULER / KB-template code path.
+_MuseGlimmerArchs = (
+    "MuseGlimmerForCausalLM",
+    "MuseGlimmerForConditionalGeneration",
+)
+
+#: Test seam: when non-None, :func:`_DetectArch` returns this verbatim
+#: instead of reading ``config.json``. Production code never sets this.
+_ArchOverride: Optional[str] = None
 
 # Local import kept here (rather than at module top) to avoid a circular
 # import: SkillInjector imports nothing from this module, but keeping the
@@ -150,15 +178,184 @@ def _ToolCallFunction(tool_call: Mapping[str, Any]) -> Mapping[str, Any]:
     return function if isinstance(function, Mapping) else tool_call
 
 
+# -------------------------------------------------------------- arch detection
+@lru_cache(maxsize=1)
+def _DetectArch() -> str:
+    """Return the chat-format arch for the configured model.
+
+    Reads ``<ModelPath>/config.json`` and inspects the ``architectures`` list:
+
+    - ``"muse_glimmer"`` if any architecture is in :data:`_MuseGlimmerArchs`
+    - ``"qwen3"`` if any is in :data:`_Qwen3Archs`
+    - ``"other"`` otherwise (plain Qwen-style header, no thinking handling)
+
+    Any I/O failure (missing model dir / malformed config) falls back to
+    ``"other"``. Honors :data:`_ArchOverride` for tests; the cache is cleared
+    by :func:`_SetArchForTesting` whenever the override changes.
+    """
+    if _ArchOverride is not None:
+        return _ArchOverride
+    modelPath = _ModelPath()
+    if not modelPath:
+        return "other"
+    try:
+        with open(Path(modelPath) / "config.json", encoding="utf-8") as f:
+            archs = json.load(f).get("architectures", [])
+    except (OSError, ValueError):
+        return "other"
+    if any(a in _MuseGlimmerArchs for a in archs):
+        return "muse_glimmer"
+    if any(a in _Qwen3Archs for a in archs):
+        return "qwen3"
+    return "other"
+
+
+def _SetArchForTesting(arch: Optional[str]) -> None:
+    """Force :func:`_DetectArch` to return ``arch`` until cleared.
+
+    Pass ``None`` to restore production behavior. Test-only — production code
+    never touches :data:`_ArchOverride`.
+    """
+    global _ArchOverride
+    _ArchOverride = arch
+    _DetectArch.cache_clear()
+
+
+# ----------------------------------------------------------- Glimmer renderer
+def _RenderGlimmerToolInstructions(tools: Sequence[Mapping[str, Any]]) -> str:
+    """Render the Meta-style tool instructions for Muse Glimmer.
+
+    Differs from :func:`_RenderToolInstructions` (Qwen3) in two ways:
+
+    - Tool schemas are emitted as plain JSON lines, not wrapped in a
+      ``<tools>...</tools>`` XML envelope (Meta convention).
+    - Wording follows the Llama-3 tool-use phrasing, and the tool-call tag
+      uses the plain ``<tool_call>`` form (no zero-width space) so the
+      Meta-tuned tokenizer treats it as a single special token sequence.
+    """
+    serialized = "\n".join(
+        json.dumps(tool, ensure_ascii=False, separators=(",", ": "))
+        for tool in tools
+    )
+    return (
+        "You have access to a set of tools you can use to answer the user's question.\n\n"
+        "# Tools\n\n"
+        f"{serialized}\n\n"
+        "If you intend to call a tool, output the tool call in the following format:\n"
+        "<tool_call>\n"
+        '{"name": <function-name>, "arguments": <args-json-object>}\n'
+        "</tool_call>\n\n"
+        "Every assistant turn must contain exactly one bash function call. "
+        "When the task is complete, call bash with `echo "
+        "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as the only command.\n"
+    )
+
+
+def _RenderGlimmerChatPrompt(
+    messages: List[Dict[str, Any]],
+    tools: Optional[Sequence[Mapping[str, Any]]] = None,
+    system_prefix: str = "",
+    thinking: Optional[bool] = True,
+) -> str:
+    """Render an OpenAI message list using the Muse Glimmer chat format.
+
+    All turns use the Meta envelope ``<|start|>{role}<|message|>{content}<|eot|>``.
+    The assistant header ends with ``<|message|>`` (not ``<|start|>assistant``)
+    so the model does not fall into the ``to=self`` reasoning mode.
+
+    CoT is controlled by the system prompt's ``Reasoning strength`` line, which
+    the BenchflowHelper appends to ``system_prefix`` before this function is
+    called. ``thinking`` itself does not affect the renderer here — it is
+    accepted for symmetry with the Qwen3 path so callers don't need arch-
+    specific branches.
+    """
+    del thinking  # CoT for Glimmer is set upstream via system_prefix's
+                  # "Reasoning strength" line. Accept the parameter for symmetry.
+
+    normalizedTools = list(tools or (_DefaultBashTool,))
+    parts: List[str] = []
+    first = True
+    for message in messages:
+        role = str(message.get("role", "user"))
+        content = _MessageContent(message)
+        if role == "system" and first:
+            if system_prefix:
+                systemContent = f"{system_prefix.rstrip()}\n\n{content}"
+            else:
+                systemContent = content
+            parts.append(
+                f"{_MGStart}system{_MGMessage}{systemContent}\n\n"
+                f"{_RenderGlimmerToolInstructions(normalizedTools)}{_MGEot}"
+            )
+        elif role in ("system", "user"):
+            parts.append(f"{_MGStart}{role}{_MGMessage}{content}{_MGEot}")
+        elif role == "assistant":
+            text = content
+            if text:
+                parts.append(f"{_MGStart}assistant{_MGMessage}{text}")
+            else:
+                parts.append(f"{_MGStart}assistant{_MGMessage}")
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, Mapping):
+                    continue
+                function = _ToolCallFunction(tool_call)
+                name = str(function.get("name", "bash"))
+                arguments = function.get("arguments", {})
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {"command": arguments}
+                if text or tool_call is not (message.get("tool_calls") or [])[0]:
+                    parts.append("\n")
+                parts.append(
+                    "<tool_call>\n"
+                    + json.dumps(
+                        {"name": name, "arguments": arguments},
+                        ensure_ascii=False,
+                    )
+                    + "\n</tool_call>"
+                )
+            parts.append(_MGEot)
+        elif role == "tool":
+            toolContent = _CompactToolResponse(content)
+            parts.append(
+                f"{_MGStart}user{_MGMessage}<tool_response>\n{toolContent}\n"
+                f"</tool_response>{_MGEot}"
+            )
+        else:
+            parts.append(f"{_MGStart}user{_MGMessage}{content}{_MGEot}")
+        first = False
+    # Final assistant header. ``<|message|>`` suffix avoids the model's
+    # ``to=self`` reasoning-mode fork.
+    parts.append(f"{_MGStart}assistant{_MGMessage}")
+    return "".join(parts)
+
+
 def _RenderChatPrompt(
     messages: List[Dict[str, Any]],
     tools: Optional[Sequence[Mapping[str, Any]]] = None,
     system_prefix: str = "",
+    *,
+    thinking: Optional[bool] = True,
 ) -> str:
-    """Render OpenAI messages using the Qwen3 tool-calling chat format.
+    """Render OpenAI messages for the configured model.
+
+    Dispatches on :func:`_DetectArch`:
+
+    - ``"muse_glimmer"`` → :func:`_RenderGlimmerChatPrompt` (Meta-style
+      envelope). CoT for Glimmer is controlled upstream by appending a
+      ``Reasoning strength: high|low`` line to ``system_prefix``; the
+      ``thinking`` arg is accepted for symmetry and ignored.
+    - otherwise → Qwen3 path (this function body). CoT is gated by the
+      assistant-header suffix: ``thinking=False`` injects
+      :data:`_NonThinkingBlock` to suppress Qwen3-Instruct's default
+      thinking mode; ``None`` and ``True`` keep the header bare so the
+      model emits a ``<think>…</think>`` trace.
 
     ``FullPrefillVllm`` accepts a text prompt rather than an OpenAI chat
-    request.  The old renderer dropped both the tool schema and prior tool
+    request, and vLLM's offline LLM API only receives the rendered prompt
+    string.  The old renderer dropped both the tool schema and prior tool
     calls, which made an agent conversation indistinguishable from ordinary
     chat.  This is intentionally kept in sync with Qwen3's tokenizer
     template, including ``<tool_response>`` blocks.
@@ -169,6 +366,8 @@ def _RenderChatPrompt(
     curated SkillsBench skills directly to the LLM, skipping the discovery
     step that mini-swe-agent has no native support for.
     """
+    if _DetectArch() == "muse_glimmer":
+        return _RenderGlimmerChatPrompt(messages, tools, system_prefix, thinking)
     normalizedTools = list(tools or (_DefaultBashTool,))
     parts: List[str] = []
     first = True
@@ -225,10 +424,18 @@ def _RenderChatPrompt(
         else:
             parts.append(f"{_ImStart}user\n{content}{_ImEnd}\n")
         first = False
-    parts.append(f"{_ImStart}assistant\n{_NonThinkingBlock}")
+    # ``thinking is False`` suppresses Qwen3-Instruct's default CoT by injecting
+    # the empty pre-closed think block. ``None`` and ``True`` leave the header
+    # bare so the model emits its own ``<think>…</think>`` trace.
+    suffix = "" if thinking is not False else _NonThinkingBlock
+    parts.append(f"{_ImStart}assistant\n{suffix}")
     return "".join(parts)
 
 
+#: Matches the ``<\xe2\x80\x8btool_call>...</\xe2\x80\x8btool_call>`` blocks emitted by both
+#: :func:`_RenderChatPrompt` (Qwen3 path) and :func:`_RenderGlimmerChatPrompt`
+#: (Meta path). Both renderers emit the plain form (no zero-width space);
+#: the regex matches plain ``<\xe2\x80\x8btool_call>`` only.
 _ToolCallBlock = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _CodeBlock = re.compile(
     r"```(?:mswea_bash_command|bash|sh|shell)?\s*\n?(.*?)```",
@@ -371,7 +578,12 @@ class _HelperHTTPHandler(BaseHTTPRequestHandler):
         tools = payload.get("tools")
         if not isinstance(tools, list) or not tools:
             tools = [_DefaultBashTool]
-        prompt = _RenderChatPrompt(messages, tools, system_prefix=helper._skillsBlock)
+        prompt = _RenderChatPrompt(
+            messages,
+            tools,
+            system_prefix=helper._skillsBlock,
+            thinking=helper.thinking,
+        )
 
         if helper._doneEvent.is_set():
             self._WriteJSON(503, {"error": "endpoint is shutting down"})
@@ -1326,6 +1538,13 @@ class BenchflowHelper:
         # ── Output / lifecycle ──────────────────────────────────────────────
         output_dir: Optional[str | Path] = None,
         result_json_timeout: float = 3600.0,
+        # ── CoT toggle (Qwen3 + Muse Glimmer) ───────────────────────────────
+        # ``True`` (default) lets the model reason: Qwen3 omits the empty
+        # pre-closed ``<think></think>`` block; Muse Glimmer sets the system
+        # prompt's ``Reasoning strength: high.``. ``False`` suppresses CoT
+        # (inject the Qwen block / set ``low.``). ``None`` collapses to
+        # ``True`` (the helper does not auto-detect CoT).
+        thinking: Optional[bool] = True,
     ):
         self.skillsbenchDir = Path(skillsbench_dir)
         self.taskId = task_id
@@ -1338,6 +1557,7 @@ class BenchflowHelper:
         self.agentExtraArgs = list(agent_extra_args)
         self.host = host
         self.resultJsonTimeout = float(result_json_timeout)
+        self.thinking = thinking if thinking is not None else True
 
         self.outputDir = Path(output_dir) if output_dir else Path(
             tempfile.mkdtemp(prefix=f"kvbench-benchflow-{task_id}-")
@@ -1372,6 +1592,22 @@ class BenchflowHelper:
         # the same task) and so the agent doesn't have to discover skills
         # itself — mini-swe-agent has no skill loader.
         self._skillsBlock = self._BuildSkillsBlock()
+
+        # For Muse Glimmer, CoT is gated by the system prompt's
+        # ``Reasoning strength`` line (the model has no ``<think>`` tag idiom).
+        # Append the right value here so every rollout of this task sees the
+        # same prefix (KV-cache friendly). Skip when the agent already
+        # supplied its own ``Reasoning strength:`` line so a user override
+        # wins.
+        if (
+            _DetectArch() == "muse_glimmer"
+            and self._skillsBlock
+            and "Reasoning strength:" not in self._skillsBlock
+        ):
+            strength = "high" if self.thinking is not False else "low"
+            self._skillsBlock = (
+                f"{self._skillsBlock}\n\nReasoning strength: {strength}."
+            )
 
         self._StartServer()
         self._StartSandboxAndAgent()

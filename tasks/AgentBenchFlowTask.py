@@ -79,6 +79,7 @@ class AgentBenchFlowTask(Task):
         output_dir: Optional[Union[str, Path]] = None,
         agent_extra_args: Optional[Sequence[str]] = None,
         result_json_timeout: Optional[float] = None,
+        thinking: Optional[bool] = True,
     ):
         cfg = AgentBenchFlowDefaults()
         self.skillsbenchDir = Path(
@@ -106,6 +107,11 @@ class AgentBenchFlowTask(Task):
             if result_json_timeout is not None
             else float(cfg.get("ResultJsonTimeoutSec", 3600))
         )
+        # CoT toggle for the agent pipeline. ``True`` (default) lets the
+        # model reason: Qwen3 omits the empty pre-closed ``<think></think>``
+        # block, Muse Glimmer sets ``Reasoning strength: high.``. ``False``
+        # suppresses CoT. ``None`` collapses to ``True``.
+        self.thinking = thinking if thinking is not None else True
         self._resolvedTaskIds = self._ResolveTaskIds(task_ids)
 
     def _ResolveImageOverride(self, task_id: str) -> Optional[str]:
@@ -162,6 +168,7 @@ class AgentBenchFlowTask(Task):
                 agent_extra_args=self.agentExtraArgs,
                 output_dir=str(caseOutputDir) if caseOutputDir is not None else None,
                 result_json_timeout=self.resultJsonTimeout,
+                thinking=self.thinking,
             )
             yield Case(
                 input=data,

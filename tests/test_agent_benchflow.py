@@ -16,6 +16,7 @@ from helpers.BenchflowHelper import (
     ApptainerSandbox,
     _ParseToolCalls,
     _RenderChatPrompt,
+    _SetArchForTesting,
 )
 from helpers.SkillInjector import BuildSkillsBlock, ParseSkillFrontmatter
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
@@ -140,6 +141,9 @@ def test_agent_command_default_is_mini_swe_agent(fakeSkillsbench):
 
 
 def test_qwen_prompt_exposes_tools_and_preserves_tool_history():
+    # Default behaviour (thinking=True) lets Qwen3 reason — the assistant
+    # header is bare. Pass ``thinking=False`` to verify the legacy
+    # non-thinking-block behaviour.
     prompt = _RenderChatPrompt([
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "Inspect the files."},
@@ -160,7 +164,7 @@ def test_qwen_prompt_exposes_tools_and_preserves_tool_history():
             "tool_call_id": "call-1",
             "content": "{\"returncode\": 0}",
         },
-    ])
+    ], thinking=False)
     assert "<tools>" in prompt
     assert '"name": "bash"' in prompt
     assert "<tool_call>" in prompt
@@ -503,3 +507,138 @@ def test_final_result_falls_back_to_last_inference_when_no_synthesis():
 def test_final_result_is_none_before_any_observation():
     wl = _Workload()
     assert wl.final_result is None
+
+
+# ----------------------------------------------------- thinking toggle (Qwen3 + Glimmer)
+
+
+@pytest.fixture
+def arch():
+    """Force ``_DetectArch`` to return a specific value, restoring after.
+
+    The setter clears the lru_cache automatically, so each test sees a fresh
+    arch without cross-test pollution.
+    """
+    def set_(value):
+        _SetArchForTesting(value)
+    set_("qwen3")
+    yield set_
+    set_(None)
+
+
+def _TwoTurnMessages():
+    return [
+        {"role": "system", "content": "You are an agent."},
+        {"role": "user", "content": "Inspect the files."},
+    ]
+
+
+def test_qwen3_thinking_true_default_emits_no_non_thinking_block(arch):
+    """Default Qwen3 + ``thinking=True`` (also covers ``None``) — let CoT."""
+    arch("qwen3")
+    prompt = _RenderChatPrompt(_TwoTurnMessages(), thinking=True)
+    assert prompt.endswith("<|im_start|>assistant\n")
+    assert "<think>" not in prompt
+
+
+def test_qwen3_thinking_false_injects_non_thinking_block(arch):
+    """``thinking=False`` on Qwen3 suppresses CoT — legacy behaviour."""
+    arch("qwen3")
+    prompt = _RenderChatPrompt(_TwoTurnMessages(), thinking=False)
+    assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+
+
+def test_glimmer_thinking_true_uses_high_reasoning(arch):
+    """``thinking=True`` on Glimmer → ``Reasoning strength: high.``.
+
+    The renderer itself does not inject the ``Reasoning strength:`` line —
+    that is the BenchflowHelper's job (in ``__init__``), where it appends
+    to the cached skills block. The test simulates that path by passing
+    the line via ``system_prefix``.
+    """
+    arch("muse_glimmer")
+    system_prefix = "# Skills\n\nReasoning strength: high.\n"
+    prompt = _RenderChatPrompt(
+        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True,
+    )
+    assert "Reasoning strength: high." in prompt
+    assert "Reasoning strength: low." not in prompt
+    assert prompt.endswith("<|start|>assistant<|message|>")
+
+
+def test_glimmer_thinking_false_uses_low_reasoning(arch):
+    """``thinking=False`` on Glimmer → ``Reasoning strength: low.``.
+
+    Same as the True test — simulate the helper's injection via
+    ``system_prefix``.
+    """
+    arch("muse_glimmer")
+    system_prefix = "# Skills\n\nReasoning strength: low.\n"
+    prompt = _RenderChatPrompt(
+        _TwoTurnMessages(), system_prefix=system_prefix, thinking=False,
+    )
+    assert "Reasoning strength: low." in prompt
+    assert "Reasoning strength: high." not in prompt
+    assert prompt.endswith("<|start|>assistant<|message|>")
+
+
+def test_glimmer_assistant_and_tool_turns_use_meta_envelope(arch):
+    """Glimmer uses ``<|start|>role<|message|>`` and plain ``<tool_call>``."""
+    arch("muse_glimmer")
+    prompt = _RenderChatPrompt([
+        {"role": "system", "content": "You are an agent."},
+        {"role": "user", "content": "Inspect the files."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": '{"command":"ls"}',
+                },
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "{\"returncode\": 0}",
+        },
+    ], thinking=False)
+    # Assistant envelope uses Meta tokens, not Qwen tokens.
+    assert "<|start|>assistant<|message|>" in prompt
+    assert "<|im_start|>" not in prompt
+    # Tool response wrapped in user-role Meta envelope.
+    assert "<|start|>user<|message|><tool_response>" in prompt
+    assert "</tool_response><|eot|>" in prompt
+    # Tool-call tag is plain ``<tool_call>`` (no ZWSP).
+    assert "<tool_call>" in prompt
+    # The existing parser regex still picks up the Glimmer-style call.
+    content, calls = _ParseToolCalls(
+        "<tool_call>\n"
+        '{"name":"bash","arguments":{"command":"ls -la"}}\n'
+        "</tool_call>"
+    )
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "bash"
+    assert '"command": "ls -la"' in calls[0]["function"]["arguments"]
+
+
+def test_glimmer_user_supplied_reasoning_strength_overrides_helper(arch):
+    """A user-supplied ``Reasoning strength:`` line is not duplicated.
+
+    The Glimmer renderer itself does not inject the line — the helper does
+    that in ``__init__`` (only when missing). So a user-supplied line
+    survives the renderer unchanged. This test exercises the renderer path
+    by passing the line via ``system_prefix`` (the same slot the helper
+    uses) and verifying the prompt contains it and not a duplicate.
+    """
+    arch("muse_glimmer")
+    system_prefix = "# Skills\n\nReasoning strength: medium.\n"
+    prompt = _RenderChatPrompt(
+        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True,
+    )
+    assert prompt.count("Reasoning strength: medium.") == 1
+    assert "Reasoning strength: high." not in prompt
+    assert "Reasoning strength: low." not in prompt
