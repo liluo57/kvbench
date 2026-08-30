@@ -1,7 +1,8 @@
 """One SkillsBench rollout, driven by mini-swe-agent (or another CLI agent).
 
 The Workload is the kvbench-facing side of the bridge; the HTTP server, the
-agent subprocess, and the verifier live in :class:`helpers.BenchflowHelper`.
+agent subprocess, and the verifier live in
+:class:`helpers.benchflow.BenchflowHelper`.
 The Workload's contract is the usual :class:`core.Workload.Workload`:
 
 - :meth:`next` blocks until the agent's next LLM call arrives, then emits a
@@ -24,10 +25,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from core.Config import ModelPath
 from core.Result import Result
 from core.Workload import Action, ActionKind, ActionResult, Workload
 
-from helpers.BenchflowHelper import BenchflowHelper
+from helpers.benchflow import BenchflowHelper
 
 
 @dataclass
@@ -84,6 +86,7 @@ class AgentBenchFlowWorkload(Workload):
             self._helper = BenchflowHelper(
                 skillsbench_dir=self._data.skillsbench_dir,
                 task_id=self._data.task_id,
+                model_path=ModelPath(),
                 sandbox_type=self._data.sandbox_type,
                 image_override=self._data.image_override,
                 agent_command=self._data.agent_command,

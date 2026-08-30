@@ -26,6 +26,7 @@ serves the stale stitched KV fails.
 
 from typing import Any, Dict, Iterator, List, Tuple
 
+from core.Config import ModelPath
 from core.Result import Result
 from core.Task import Case
 from workload.RAGWorkload import RAGInput, RAGWorkload
@@ -116,7 +117,8 @@ class NIAHShuffleTask(NIAHTask):
         if questionStart < 0:
             raise RuntimeError(f"NIAH question not found in input: {sample['file']}")
 
-        prefix = user_turn_prefix() + body[:instructionEnd]
+        modelPath = ModelPath()
+        prefix = user_turn_prefix(modelPath) + body[:instructionEnd]
         essay = body[instructionEnd:questionStart]
         value = str(sample["outputs"][0])
         vpos = essay.find(value)
@@ -135,7 +137,7 @@ class NIAHShuffleTask(NIAHTask):
         nBefore = max(1, self._NEssays // 2)
         nAfter = max(1, self._NEssays - nBefore)
         essays = self._SplitInto(before, nBefore) + self._SplitInto(after, nAfter)
-        suffix = body[questionStart:] + assistant_turn_suffix() + answerPrefix
+        suffix = body[questionStart:] + assistant_turn_suffix(modelPath) + answerPrefix
 
         parts = [prefix, *essays, needle, suffix]
         return parts, "".join(parts)

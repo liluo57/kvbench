@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from core.Config import ModelPath as _ModelPath
 from core.Result import Result
 from core.Workload import ActionKind, ActionResult
 from helpers import ModelAdapter
@@ -27,6 +28,16 @@ from workload import (
     RAGInput,
     RAGWorkload,
 )
+
+
+@pytest.fixture
+def modelPath():
+    """The model path used by ``render_chat`` / ``_thinking_kwargs`` tests.
+
+    Mirrors :class:`core.Config.ModelPath` so tests use the real configured
+    tokenizer (Qwen3 in this environment).
+    """
+    return _ModelPath()
 
 
 def test_rag_workload_prepare_run_and_final_result():
@@ -209,18 +220,17 @@ def test_ruler_loader_rejects_missing_or_blank_outputs(tmp_path, outputs):
         _RulerTask(dataDir=str(tmp_path))._LoadSamples()
 
 
-def test_model_adapter_arch_family_reads_config_json(tmp_path, monkeypatch):
-    """``arch_family`` inspects ``<ModelPath>/config.json`` ``architectures``."""
+def test_model_adapter_arch_family_reads_config_json(tmp_path):
+    """``arch_family`` inspects ``<modelPath>/config.json`` ``architectures``."""
     modelDir = tmp_path / "model"
     modelDir.mkdir()
     (modelDir / "config.json").write_text(
         json.dumps({"architectures": ["Qwen3ForCausalLM"]}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(ModelAdapter, "_ModelPath", lambda: str(modelDir))
     ModelAdapter.arch_family.cache_clear()
     try:
-        assert ModelAdapter.arch_family() == "qwen3"
+        assert ModelAdapter.arch_family(str(modelDir)) == "qwen3"
     finally:
         ModelAdapter.arch_family.cache_clear()
 
@@ -230,7 +240,7 @@ def test_model_adapter_arch_family_reads_config_json(tmp_path, monkeypatch):
     )
     ModelAdapter.arch_family.cache_clear()
     try:
-        assert ModelAdapter.arch_family() == "muse_glimmer"
+        assert ModelAdapter.arch_family(str(modelDir)) == "muse_glimmer"
     finally:
         ModelAdapter.arch_family.cache_clear()
 
@@ -238,27 +248,27 @@ def test_model_adapter_arch_family_reads_config_json(tmp_path, monkeypatch):
 def test_model_adapter_thinking_kwargs_translate_per_arch():
     """The CoT toggle is translated to the kwarg name the model's jinja reads."""
     ModelAdapter.set_arch_for_testing("qwen3")
-    assert ModelAdapter._thinking_kwargs(False) == {"enable_thinking": False}
-    assert ModelAdapter._thinking_kwargs(True) == {"enable_thinking": True}
-    assert ModelAdapter._thinking_kwargs(None) == {}
+    assert ModelAdapter._thinking_kwargs(False, "") == {"enable_thinking": False}
+    assert ModelAdapter._thinking_kwargs(True, "") == {"enable_thinking": True}
+    assert ModelAdapter._thinking_kwargs(None, "") == {}
 
     ModelAdapter.set_arch_for_testing("muse_glimmer")
-    assert ModelAdapter._thinking_kwargs(False) == {"reasoning_strength": "low"}
-    assert ModelAdapter._thinking_kwargs(True) == {"reasoning_strength": "high"}
-    assert ModelAdapter._thinking_kwargs(None) == {}
+    assert ModelAdapter._thinking_kwargs(False, "") == {"reasoning_strength": "low"}
+    assert ModelAdapter._thinking_kwargs(True, "") == {"reasoning_strength": "high"}
+    assert ModelAdapter._thinking_kwargs(None, "") == {}
 
     # Unknown archs ignore the kwarg entirely.
     ModelAdapter.set_arch_for_testing("other")
-    assert ModelAdapter._thinking_kwargs(False) == {}
-    assert ModelAdapter._thinking_kwargs(True) == {}
+    assert ModelAdapter._thinking_kwargs(False, "") == {}
+    assert ModelAdapter._thinking_kwargs(True, "") == {}
 
     ModelAdapter.set_arch_for_testing(None)
 
 
-def test_model_adapter_render_chat_includes_assistant_generation_prompt():
+def test_model_adapter_render_chat_includes_assistant_generation_prompt(modelPath):
     """render_chat appends the assistant generation prompt regardless of body."""
     ModelAdapter.set_arch_for_testing("qwen3")
-    out = ModelAdapter.render_chat([{"role": "user", "content": "hi"}])
+    out = ModelAdapter.render_chat([{"role": "user", "content": "hi"}], modelPath=modelPath)
     assert out.startswith("<|im_start|>user\n")
     assert out.endswith("<|im_start|>assistant\n")
     ModelAdapter.set_arch_for_testing(None)

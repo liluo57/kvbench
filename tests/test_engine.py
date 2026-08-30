@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from core.Engine import (
+from core.engine import (
     BenchmarkInitializationError,
     BenchmarkResourceReleaseError,
     Engine,
 )
-from helpers.Gpu import GpuInfo
+from core.engine.Gpu import GpuInfo
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Task import Case, Task
@@ -122,9 +122,9 @@ def _run(tmp_path, tasks, methods, gpu_count=2, **kwargs):
         **kwargs,
     }
     with patch(
-        "core.Engine.ResolveGpuIds",
+        "core.engine.Engine.ResolveGpuIds",
         return_value=(list(range(gpu_count)), snapshot),
-    ), patch("core.Engine.QueryGpus", return_value=snapshot):
+    ), patch("core.engine.GpuGovernor.QueryGpus", return_value=snapshot):
         engine = Engine(
             availableGpuIds="auto",
             outputRoot=tmp_path,
@@ -208,8 +208,8 @@ def test_second_pair_failure_isolated_and_worker_continues(tmp_path):
 
 def test_initialization_failure_aborts_benchmark(tmp_path):
     snapshot = [_gpu(0)]
-    with patch("core.Engine.ResolveGpuIds", return_value=([0], snapshot)), patch(
-        "core.Engine.QueryGpus", return_value=snapshot
+    with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], snapshot)), patch(
+        "core.engine.GpuGovernor.QueryGpus", return_value=snapshot
     ):
         engine = Engine(
             outputRoot=tmp_path,
@@ -231,8 +231,8 @@ def test_initialization_failure_aborts_benchmark(tmp_path):
 
 def test_initialization_timeout_aborts_benchmark(tmp_path):
     snapshot = [_gpu(0)]
-    with patch("core.Engine.ResolveGpuIds", return_value=([0], snapshot)), patch(
-        "core.Engine.QueryGpus", return_value=snapshot
+    with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], snapshot)), patch(
+        "core.engine.GpuGovernor.QueryGpus", return_value=snapshot
     ):
         engine = Engine(
             outputRoot=tmp_path,
@@ -357,10 +357,10 @@ def test_tui_gpu_snapshot_is_refreshed_from_nvml(tmp_path):
     def query():
         return next(queried, baseline)
 
-    with patch("core.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
-        "core.Engine.QueryGpus", side_effect=query
-    ), patch("core.Engine.BenchmarkTui", return_value=dashboard), patch(
-        "core.Engine._GPU_SNAPSHOT_INTERVAL", 0
+    with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
+        "core.engine.GpuGovernor.QueryGpus", side_effect=query
+    ), patch("core.engine.Engine.BenchmarkTui", return_value=dashboard), patch(
+        "core.engine.GpuGovernor._GPU_SNAPSHOT_INTERVAL", 0
     ):
         engine = Engine(
             outputRoot=tmp_path,
@@ -392,8 +392,8 @@ def test_gpu_is_not_rescheduled_until_nvml_reports_release(tmp_path):
         polls += 1
         return next(snapshots, baseline)
 
-    with patch("core.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
-        "core.Engine.QueryGpus", side_effect=query
+    with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
+        "core.engine.GpuGovernor.QueryGpus", side_effect=query
     ):
         engine = Engine(
             outputRoot=tmp_path,
@@ -430,8 +430,8 @@ def test_gpu_is_not_rescheduled_until_nvml_reports_release(tmp_path):
 def test_gpu_release_timeout_is_a_distinct_fatal_error(tmp_path):
     baseline = [_gpu(0)]
     busy = [GpuInfo(0, "fake", 100, 50, 0.5, 0)]
-    with patch("core.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
-        "core.Engine.QueryGpus", return_value=busy
+    with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
+        "core.engine.GpuGovernor.QueryGpus", return_value=busy
     ):
         engine = Engine(
             outputRoot=tmp_path,
@@ -463,8 +463,8 @@ def test_new_compute_pid_blocks_gpu_release_even_at_baseline_memory(tmp_path):
     def query():
         return next(snapshots, contended)
 
-    with patch("core.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
-        "core.Engine.QueryGpus", side_effect=query
+    with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
+        "core.engine.GpuGovernor.QueryGpus", side_effect=query
     ):
         engine = Engine(
             outputRoot=tmp_path,
@@ -487,8 +487,8 @@ def test_new_compute_pid_blocks_gpu_release_even_at_baseline_memory(tmp_path):
 
 def test_gpu_must_remain_clean_for_stability_window(tmp_path):
     baseline = [_gpu(0)]
-    with patch("core.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
-        "core.Engine.QueryGpus", return_value=baseline
+    with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
+        "core.engine.GpuGovernor.QueryGpus", return_value=baseline
     ):
         engine = Engine(
             outputRoot=tmp_path,

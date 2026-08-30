@@ -13,7 +13,7 @@ import pytest
 from core.Result import Result
 from core.Task import Case
 from helpers import ModelAdapter
-from helpers.BenchflowHelper import ApptainerSandbox
+from helpers.benchflow import ApptainerSandbox
 from helpers.SkillInjector import BuildSkillsBlock, ParseSkillFrontmatter
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
 from workload.AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
@@ -139,7 +139,7 @@ def test_agent_command_default_is_mini_swe_agent(fakeSkillsbench):
     assert task.agentCommand == "mini-swe-agent"
 
 
-def test_qwen_prompt_exposes_tools_and_preserves_tool_history(arch):
+def test_qwen_prompt_exposes_tools_and_preserves_tool_history(arch, modelPath):
     """Multi-turn trace: tools, prior tool_call, tool_response all rendered."""
     arch("qwen3")
     tools = [{
@@ -174,7 +174,7 @@ def test_qwen_prompt_exposes_tools_and_preserves_tool_history(arch):
             "tool_call_id": "call-1",
             "content": "{\"returncode\": 0}",
         },
-    ], tools=tools, thinking=False)
+    ], modelPath=modelPath, tools=tools, thinking=False)
     assert "<tools>" in prompt
     assert '"name": "bash"' in prompt
     assert "<tool_call>" in prompt
@@ -309,14 +309,14 @@ def test_build_skills_block_handles_quoted_description(tmp_path):
 # ----------------------------------------------- ModelAdapter.render_chat with prefix
 
 
-def test_render_prompt_with_system_prefix_appends_to_first_system():
+def test_render_prompt_with_system_prefix_appends_to_first_system(modelPath):
     """``system_prefix`` is folded into the first system message's content."""
     messages = [
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "Inspect the files."},
     ]
     prefix = "# Skills\n\n## foo\ndoes foo\n"
-    prompt = ModelAdapter.render_chat(messages, system_prefix=prefix)
+    prompt = ModelAdapter.render_chat(messages, modelPath=modelPath, system_prefix=prefix)
     # The prefix appears in the rendered prompt, before the user's original
     # system content (which is folded into the same system turn by the jinja).
     assert prompt.index(prefix.rstrip()) < prompt.index("You are an agent.")
@@ -326,25 +326,25 @@ def test_render_prompt_with_system_prefix_appends_to_first_system():
     assert prompt[sysIdx:userIdx].count(prefix.rstrip()) == 1
 
 
-def test_render_prompt_without_system_prefix_unchanged():
+def test_render_prompt_without_system_prefix_unchanged(modelPath):
     """No prefix → the first system message's content renders as-is."""
     messages = [
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "hi"},
     ]
-    prompt = ModelAdapter.render_chat(messages)
+    prompt = ModelAdapter.render_chat(messages, modelPath=modelPath)
     assert "You are an agent." in prompt
     assert "# Skills" not in prompt
 
 
-def test_render_prompt_skills_block_does_not_leak_to_user_turn():
+def test_render_prompt_skills_block_does_not_leak_to_user_turn(modelPath):
     """``system_prefix`` only folds into the first system message — never twice."""
     prefix = "# Skills\n\n## foo\ndoes foo\n"
     messages = [
         {"role": "system", "content": "first system"},
         {"role": "system", "content": "second system"},
     ]
-    prompt = ModelAdapter.render_chat(messages, system_prefix=prefix)
+    prompt = ModelAdapter.render_chat(messages, modelPath=modelPath, system_prefix=prefix)
     # The prefix appears exactly once.
     assert prompt.count(prefix.rstrip()) == 1
     # The second system message's content is preserved (rendered as its own turn).
@@ -516,6 +516,19 @@ def arch():
     set_(None)
 
 
+@pytest.fixture
+def modelPath():
+    """The model path used by ``render_chat`` / ``_thinking_kwargs`` tests.
+
+    The Qwen3 tokenizer (the only one available in this test environment)
+    lives at the configured ``ModelPath``. Tests that override ``arch_family``
+    via :func:`arch` still load this real tokenizer when they call
+    ``render_chat`` — the test environment only ships one tokenizer on disk.
+    """
+    from core.Config import ModelPath as _ModelPath
+    return _ModelPath()
+
+
 def _TwoTurnMessages():
     return [
         {"role": "system", "content": "You are an agent."},
@@ -523,37 +536,37 @@ def _TwoTurnMessages():
     ]
 
 
-def test_qwen3_thinking_true_default_emits_no_non_thinking_block(arch):
+def test_qwen3_thinking_true_default_emits_no_non_thinking_block(arch, modelPath):
     """Qwen3 + ``thinking=True`` (or ``None``) — let CoT, header is bare."""
     arch("qwen3")
-    prompt_true = ModelAdapter.render_chat(_TwoTurnMessages(), thinking=True)
+    prompt_true = ModelAdapter.render_chat(_TwoTurnMessages(), modelPath=modelPath, thinking=True)
     assert prompt_true.endswith("<|im_start|>assistant\n")
     assert "<think>" not in prompt_true
-    prompt_none = ModelAdapter.render_chat(_TwoTurnMessages(), thinking=None)
+    prompt_none = ModelAdapter.render_chat(_TwoTurnMessages(), modelPath=modelPath, thinking=None)
     assert prompt_none.endswith("<|im_start|>assistant\n")
     assert "<think>" not in prompt_none
 
 
-def test_qwen3_thinking_false_injects_non_thinking_block(arch):
+def test_qwen3_thinking_false_injects_non_thinking_block(arch, modelPath):
     """``thinking=False`` on Qwen3 emits the empty pre-closed think block."""
     arch("qwen3")
-    prompt = ModelAdapter.render_chat(_TwoTurnMessages(), thinking=False)
+    prompt = ModelAdapter.render_chat(_TwoTurnMessages(), modelPath=modelPath, thinking=False)
     assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
 
 
-def test_glimmer_thinking_true_translates_to_high_reasoning_kwarg(arch):
+def test_glimmer_thinking_true_translates_to_high_reasoning_kwarg(arch, modelPath):
     """Glimmer + ``thinking=True`` → ``chat_template_kwargs={"reasoning_strength": "high"}``."""
     arch("muse_glimmer")
-    assert ModelAdapter._thinking_kwargs(True) == {"reasoning_strength": "high"}
+    assert ModelAdapter._thinking_kwargs(True, modelPath) == {"reasoning_strength": "high"}
 
 
-def test_glimmer_thinking_false_translates_to_low_reasoning_kwarg(arch):
+def test_glimmer_thinking_false_translates_to_low_reasoning_kwarg(arch, modelPath):
     """Glimmer + ``thinking=False`` → ``chat_template_kwargs={"reasoning_strength": "low"}``."""
     arch("muse_glimmer")
-    assert ModelAdapter._thinking_kwargs(False) == {"reasoning_strength": "low"}
+    assert ModelAdapter._thinking_kwargs(False, modelPath) == {"reasoning_strength": "low"}
 
 
-def test_glimmer_user_supplied_reasoning_strength_not_duplicated(arch):
+def test_glimmer_user_supplied_reasoning_strength_not_duplicated(arch, modelPath):
     """A user-supplied ``Reasoning strength:`` line in the system prompt is preserved exactly once.
 
     The jinja's ``render_reasoning`` macro checks for existing
@@ -564,13 +577,13 @@ def test_glimmer_user_supplied_reasoning_strength_not_duplicated(arch):
     arch("muse_glimmer")
     system_prefix = "# Skills\n\nReasoning strength: medium.\n"
     prompt = ModelAdapter.render_chat(
-        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True)
+        _TwoTurnMessages(), modelPath=modelPath, system_prefix=system_prefix, thinking=True)
     assert prompt.count("Reasoning strength: medium.") == 1
     assert "Reasoning strength: high." not in prompt
     assert "Reasoning strength: low." not in prompt
 
 
-def test_render_chat_renders_tool_calls_and_tool_response(arch):
+def test_render_chat_renders_tool_calls_and_tool_response(arch, modelPath):
     """Multi-turn trace: tool envelope, tool_call history, tool_response all rendered.
 
     Tests the Qwen3 jinja's tool rendering (the only tokenizer available in
@@ -610,7 +623,7 @@ def test_render_chat_renders_tool_calls_and_tool_response(arch):
             "tool_call_id": "call-1",
             "content": "{\"returncode\": 0}",
         },
-    ], tools=tools, thinking=False)
+    ], modelPath=modelPath, tools=tools, thinking=False)
     assert "<tools>" in prompt
     assert '"name": "bash"' in prompt
     assert "<tool_call>" in prompt

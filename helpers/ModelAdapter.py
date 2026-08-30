@@ -1,8 +1,8 @@
 """Single thin adapter that owns every per-arch chat-rendering decision.
 
 Tasks call into here. They never read ``config.json``, never branch on
-``Qwen3`` vs ``MuseGlimmer``, never concatenate ``<|im_start|>`` /
-``<|im_end|>`` by hand. The adapter resolves the configured model's
+``Qwen3`` vs ``MuseGlimmer``, never concatenate ```` /
+```` by hand. The adapter resolves the configured model's
 architecture, then routes through:
 
 - the model's own ``chat_template`` (via ``tokenizer.apply_chat_template``)
@@ -18,6 +18,10 @@ adapter also exposes :func:`user_turn_prefix` and
 :func:`assistant_turn_suffix` — literal boundary strings derived from
 the same jinja, so chunk boundaries stay byte-identical to what
 ``render_chat`` would emit if the whole prompt were rendered at once.
+
+``modelPath`` is passed explicitly by every caller — the adapter does NOT
+read ``core.Config`` itself, so :mod:`helpers` stays one-way (no upward
+dependency from helpers into core).
 """
 
 from __future__ import annotations
@@ -26,8 +30,6 @@ import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
-
-from core.Config import ModelPath as _ModelPath
 
 
 # ---------------------------------------------------------------------------
@@ -51,29 +53,38 @@ _MuseGlimmerArchs: Tuple[str, ...] = (
 _ArchOverrideForTesting: Optional[str] = None
 
 
-@lru_cache(maxsize=1)
-def arch_family() -> Literal["qwen3", "muse_glimmer", "other"]:
+def _read_arch_from_config_json(modelPath: str) -> Optional[Literal["qwen3", "muse_glimmer"]]:
+    """Read ``<modelPath>/config.json`` and map ``architectures`` to a family name.
+
+    Returns ``None`` when the file is missing or malformed, when the modelPath
+    is empty, or when no supported arch appears in the list. The caller
+    (typically :func:`arch_family`) decides what ``None`` means.
+    """
+    if not modelPath:
+        return None
+    try:
+        with open(Path(modelPath) / "config.json", encoding="utf-8") as f:
+            archs = json.load(f).get("architectures", [])
+    except (OSError, ValueError):
+        return None
+    if any(a in _MuseGlimmerArchs for a in archs):
+        return "muse_glimmer"
+    if any(a in _Qwen3Archs for a in archs):
+        return "qwen3"
+    return None
+
+
+@lru_cache(maxsize=8)
+def arch_family(modelPath: str = "") -> Literal["qwen3", "muse_glimmer", "other"]:
     """Return the chat-format arch for the configured model.
 
-    Reads ``<ModelPath>/config.json`` and inspects the ``architectures`` list.
+    Reads ``<modelPath>/config.json`` and inspects the ``architectures`` list.
     Any I/O failure (missing model dir / malformed config) falls back to
     ``"other"``. Honors :data:`_ArchOverrideForTesting` for tests.
     """
     if _ArchOverrideForTesting is not None:
         return _ArchOverrideForTesting
-    modelPath = _ModelPath()
-    if not modelPath:
-        return "other"
-    try:
-        with open(Path(modelPath) / "config.json", encoding="utf-8") as f:
-            archs = json.load(f).get("architectures", [])
-    except (OSError, ValueError):
-        return "other"
-    if any(a in _MuseGlimmerArchs for a in archs):
-        return "muse_glimmer"
-    if any(a in _Qwen3Archs for a in archs):
-        return "qwen3"
-    return "other"
+    return _read_arch_from_config_json(modelPath) or "other"
 
 
 def set_arch_for_testing(arch: Optional[str]) -> None:
@@ -92,18 +103,17 @@ def set_arch_for_testing(arch: Optional[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=1)
-def _tokenizer():
+def _tokenizer(modelPath: str):
     """Lazy-load a ``transformers`` tokenizer for the configured model.
 
     The Method (vLLM / transformers backend) keeps its own tokenizer; loading
     one here lets the adapter render prompts and instantiate parsers without
     holding a back-reference to the Method. Tokenizer files are small
-    (<100MB), the load is ~2s and happens once per process.
+    (<100MB), the load is ~2s and happens once per (modelPath).
     """
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(_ModelPath())
+    return AutoTokenizer.from_pretrained(modelPath)
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +124,8 @@ def _tokenizer():
 #: Per-arch (template kwarg name) -> True/False/None value mapping. ``None``
 #: means "let the jinja decide" — the kwarg is omitted entirely so the
 #: template's own default takes effect. ``True``/``False`` set the kwarg.
-def _thinking_kwargs(thinking: Optional[bool]) -> Dict[str, Any]:
-    arch = arch_family()
+def _thinking_kwargs(thinking: Optional[bool], modelPath: str) -> Dict[str, Any]:
+    arch = arch_family(modelPath)
     if thinking is None:
         return {}
     if arch == "qwen3":
@@ -184,6 +194,7 @@ def _normalise_messages(
 def render_chat(
     messages: List[Dict[str, Any]],
     *,
+    modelPath: str,
     tools: Optional[Sequence[Mapping[str, Any]]] = None,
     system_prefix: str = "",
     thinking: Optional[bool] = None,
@@ -207,14 +218,14 @@ def render_chat(
     the model's existing system role keeps its place. ``tools`` are passed
     through to the tokenizer as-is.
     """
-    tok = _tokenizer()
+    tok = _tokenizer(modelPath)
     msgs = _normalise_messages(list(messages), system_prefix)
     return tok.apply_chat_template(
         msgs,
         tools=list(tools) if tools else None,
         tokenize=False,
         add_generation_prompt=True,
-        **_thinking_kwargs(thinking),
+        **_thinking_kwargs(thinking, modelPath),
     )
 
 
@@ -223,19 +234,19 @@ def render_chat(
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=1)
-def user_turn_prefix() -> str:
+@lru_cache(maxsize=8)
+def user_turn_prefix(modelPath: str) -> str:
     """The literal prefix that opens a user turn in the configured model.
 
     Derived by rendering an empty user message: the jinja emits the user
-    opener (``<|im_start|>user\\n`` for Qwen), then the empty body, then the
-    user-turn closer (``<|im_end|>\\n``). We return everything up to but
+    opener (``user\\n`` for Qwen), then the empty body, then the
+    user-turn closer (``\\n``). We return everything up to but
     not including the closer. Tasks that build chunked prompts use this
-    instead of literal ``<|im_start|>user\\n`` — the boundary stays correct
+    instead of literal ``user\\n`` — the boundary stays correct
     for every supported chat format without per-arch code.
     """
-    rendered = render_chat([{"role": "user", "content": ""}])
-    for closer in ("<|im_end|>", "<|eot|>"):
+    rendered = render_chat([{"role": "user", "content": ""}], modelPath=modelPath)
+    for closer in ("", "<|eot|>"):
         idx = rendered.find(closer)
         if idx >= 0:
             return rendered[:idx]
@@ -244,19 +255,19 @@ def user_turn_prefix() -> str:
     )
 
 
-@lru_cache(maxsize=1)
-def assistant_turn_suffix() -> str:
+@lru_cache(maxsize=8)
+def assistant_turn_suffix(modelPath: str) -> str:
     """The literal suffix that closes the user turn and opens the assistant
     turn.
 
     Pairs with :func:`user_turn_prefix` for tasks that compose prompts by
     string concatenation rather than full-template rendering (RULER's
     shuffled variants, KBBase's prepare chunks, FreshGap). For Qwen3 this
-    is ``<|im_end|>\\n<|im_start|>assistant\\n``; for Glimmer it is
+    is ``\\nassistant\\n``; for Glimmer it is
     ``<|eot|>\\n<|start|>assistant<|message|>``.
     """
-    rendered = render_chat([{"role": "user", "content": ""}])
-    for closer in ("<|im_end|>", "<|eot|>"):
+    rendered = render_chat([{"role": "user", "content": ""}], modelPath=modelPath)
+    for closer in ("", "<|eot|>"):
         idx = rendered.find(closer)
         if idx >= 0:
             return rendered[idx:]
@@ -285,6 +296,8 @@ _ARCH_PARSERS: Dict[str, Tuple[Optional[str], Optional[str]]] = {
 def parse_tool_calls(
     output: str,
     payload: Mapping[str, Any],
+    *,
+    modelPath: str,
 ) -> Tuple[str, Optional[str], List[Dict[str, Any]]]:
     """Parse a vLLM ``generate`` output into OpenAI chat-completion fields.
 
@@ -299,15 +312,16 @@ def parse_tool_calls(
     from vllm.reasoning import ReasoningParserManager  # type: ignore[import-not-found]
     from vllm.tool_parsers import ToolParserManager  # type: ignore[import-not-found]
 
-    tool_name, reasoning_name = _ARCH_PARSERS.get(arch_family(), (None, None))
+    arch = arch_family(modelPath)
+    tool_name, reasoning_name = _ARCH_PARSERS.get(arch, (None, None))
     if tool_name is None or reasoning_name is None:
         raise ValueError(
             f"no vLLM-native parser pair registered for arch "
-            f"{arch_family()!r}; add a row to ModelAdapter._ARCH_PARSERS "
+            f"{arch!r}; add a row to ModelAdapter._ARCH_PARSERS "
             f"or extend the supported arch list"
         )
 
-    tok = _tokenizer()
+    tok = _tokenizer(modelPath)
     tool_cls = ToolParserManager.get_tool_parser(tool_name)
     reasoning_cls = ReasoningParserManager.get_reasoning_parser(reasoning_name)
     tool_parser = tool_cls(tok)

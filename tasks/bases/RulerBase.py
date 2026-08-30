@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from core.Config import DatasetDir
+from core.Config import DatasetDir, ModelPath
 from core.Result import Result
 from core.Task import Case, Task
 
@@ -176,7 +176,8 @@ class RulerBase(Task):
 
     def _FullChat(self, body: str, answerPrefix: str) -> str:
         """The complete chat prompt for ``input = body`` (arch-aware via ModelAdapter)."""
-        return user_turn_prefix() + body + assistant_turn_suffix() + answerPrefix
+        modelPath = ModelPath()
+        return user_turn_prefix(modelPath) + body + assistant_turn_suffix(modelPath) + answerPrefix
 
     def _Needle(self, sample: Dict[str, Any], body: str) -> str:
         """The needle sentence of ``body``.
@@ -211,9 +212,10 @@ class RulerBase(Task):
 
         needle = self._Needle(sample, body)
         pos = body.find(needle)
-        a = user_turn_prefix() + body[:pos]
+        modelPath = ModelPath()
+        a = user_turn_prefix(modelPath) + body[:pos]
         b = needle
-        c = body[pos + len(needle):] + assistant_turn_suffix() + answerPrefix
+        c = body[pos + len(needle):] + assistant_turn_suffix(modelPath) + answerPrefix
         return [a, b, c], a + b + c
 
     # -------------------------------------------------------------- shuffle

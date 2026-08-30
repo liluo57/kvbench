@@ -39,6 +39,7 @@ prompt stays a coherent, answerable prompt; only the assignments reorder.
 import re
 from typing import Any, Dict, Iterator, List
 
+from core.Config import ModelPath
 from core.Result import Result
 from core.Task import Case
 from workload.RAGWorkload import RAGInput, RAGWorkload
@@ -112,13 +113,14 @@ class VTShuffleTask(VTTask):
         if not starts:
             raise RuntimeError(f"no VAR assignments after the test instruction: {sample['file']}")
 
-        head = user_turn_prefix() + body[:starts[0]]
+        modelPath = ModelPath()
+        head = user_turn_prefix(modelPath) + body[:starts[0]]
         chain = [
             body[starts[k]:starts[k + 1]] if k + 1 < len(starts)
             else body[starts[k]:qpos]
             for k in range(len(starts))
         ]
-        tail = body[qpos:] + assistant_turn_suffix() + answerPrefix
+        tail = body[qpos:] + assistant_turn_suffix(modelPath) + answerPrefix
         return [head, *chain, tail]
 
     def Cases(self) -> Iterator[Case]:

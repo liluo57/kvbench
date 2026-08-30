@@ -38,7 +38,7 @@ import string
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from core.Config import DatasetDir
+from core.Config import DatasetDir, ModelPath
 from core.Result import Result
 from core.Task import Case, Task
 from workload.RAGWorkload import RAGInput, RAGWorkload
@@ -189,6 +189,7 @@ class KBBase(Task):
 
     # ---------------------------------------------------------------- cases
     def Cases(self) -> Iterator[Case]:
+        modelPath = ModelPath()
         for i, s in enumerate(self._LoadSamples()):
             chunks, suffix = self._Build(s)
             if not chunks or not suffix:
@@ -196,8 +197,8 @@ class KBBase(Task):
             # The whole prompt is one user turn + assistant header (chat format):
             # the user-turn opener goes at the start of the cached context and
             # the assistant opener is fused with the fresh query.
-            chunks = [user_turn_prefix() + chunks[0]] + chunks[1:]
-            suffix = assistant_turn_suffix() + suffix
+            chunks = [user_turn_prefix(modelPath) + chunks[0]] + chunks[1:]
+            suffix = assistant_turn_suffix(modelPath) + suffix
             fullPrompt = "".join(chunks) + suffix
             yield Case(
                 input=RAGInput(prepare_input=chunks, run_input=fullPrompt),

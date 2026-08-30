@@ -40,6 +40,7 @@ item numbers are labels, not part of the answer).
 import re
 from typing import Any, Dict, Iterator, List
 
+from core.Config import ModelPath
 from core.Result import Result
 from core.Task import Case
 from workload.RAGWorkload import RAGInput, RAGWorkload
@@ -123,9 +124,10 @@ class CWEShuffleTask(CWETask):
         bounds = [0] + [
             itemStarts[k * len(itemStarts) // nChunks] for k in range(1, nChunks)
         ] + [len(listText)]
-        head = user_turn_prefix() + body[:hdrEnd]
+        modelPath = ModelPath()
+        head = user_turn_prefix(modelPath) + body[:hdrEnd]
         chunks = [listText[bounds[k]:bounds[k + 1]] for k in range(nChunks)]
-        tail = body[qpos:] + assistant_turn_suffix() + answerPrefix
+        tail = body[qpos:] + assistant_turn_suffix(modelPath) + answerPrefix
         return [head, *chunks, tail]
 
     def Cases(self) -> Iterator[Case]:

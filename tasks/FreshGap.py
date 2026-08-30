@@ -27,6 +27,7 @@ by the accuracy metric.
 
 from typing import Any, Dict, Iterator
 
+from core.Config import ModelPath
 from core.Result import Result
 from core.Task import Case, Task
 from workload.RAGWorkload import RAGInput, RAGWorkload
@@ -44,10 +45,11 @@ class FreshGapTask(Task):
     ):
         self.nCases = nCases
         self.linesPerChunk = linesPerChunk
+        modelPath = ModelPath()
 
         # Keep A / C identical across cases. Only the tiny fresh B changes.
         # This makes the performance comparison less noisy.
-        self._a = user_turn_prefix() + (
+        self._a = user_turn_prefix(modelPath) + (
             "Read the following context and answer the final question. "
             "Return only the requested numeric code.\n\n"
             + self._Filler("A")
@@ -55,7 +57,7 @@ class FreshGapTask(Task):
 
         self._c = (
             self._Filler("C")
-            + assistant_turn_suffix()
+            + assistant_turn_suffix(modelPath)
             + "\nWhat is the transient code? "
             "Answer with the numeric code only.\n"
         )
