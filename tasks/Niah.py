@@ -32,7 +32,7 @@ from core.Task import Case
 from workload.RAGWorkload import RAGInput, RAGWorkload
 
 from .bases.RulerBase import RulerBase
-from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
+from helpers.backends.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 
 class NIAHTask(RulerBase):

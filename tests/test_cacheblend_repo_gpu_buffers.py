@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
-from helpers.CacheblendRepoHelper import CacheBlendWorker
+from helpers.cacheblend_repo.CacheblendRepoHelper import CacheBlendWorker
 
 
 class _Tokenizer:

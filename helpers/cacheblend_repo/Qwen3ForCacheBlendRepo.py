@@ -29,6 +29,26 @@ The only structural differences between a dense Qwen3 model and Llama/Mistral:
 Qwen3-8B / Qwen3-32B are both dense (no sliding window), bf16, ``silu``, GQA,
 ``tie_word_embeddings=false``, vocab 151936; their tokenizer is the plain
 ``Qwen2Tokenizer`` already known to transformers 4.44.2.
+
+──────────────────────────────────────────────────────────────────────────────
+Import / registration contract — READ BEFORE REMOVING "DEAD" CODE
+──────────────────────────────────────────────────────────────────────────────
+This module has zero static importers in the repo (in-degree = 0). It is NOT
+registered on import — registration is **explicit**:
+
+  • Importer (the only one): :func:`helpers.CacheblendRepoHelper
+    .CacheblendRepoHelper._registerOutOfTreeModel`
+  • Trigger: only when the loaded model's ``config.json`` lists
+    ``Qwen3ForCausalLM`` in its ``architectures`` field.
+  • Action: a single call to :func:`register_qwen3` after a dynamic
+    ``import Qwen3ForCacheBlendRepo`` (see CacheblendRepoHelper.py:342-343).
+  • Why explicit and not side-effect: Mistral is the fork's native model and
+    must reach its patched ``LlamaForCausalLM`` untouched — registering Qwen3
+    unconditionally would pollute the registry for non-Qwen3 runs.
+
+If you delete this file because it looks unused: you will break the only path
+that runs Qwen3 through the upstream CacheBlend repo. The 8B model regression
+suite (``fuse == full == stock``) will start failing immediately.
 """
 
 import torch

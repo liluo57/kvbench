@@ -12,7 +12,8 @@ datasets resolve by name against ``DatasetPath``.
 import json
 import sys
 
-from core import Engine, ModelPath
+from core import ModelPath
+from core.engine import Engine
 from metrics import ThroughputMetric, TTFTMetric
 
 from methods import (

@@ -9,6 +9,7 @@ side effect to :class:`Reporter` (event log + JSON reports) or
 from __future__ import annotations
 
 import os
+import queue
 import signal
 import time
 from pathlib import Path
@@ -82,7 +83,7 @@ class Scheduler:
                 workerId,
                 methodIndex,
                 method,
-                self.engine._metrics,
+                self.engine.metrics(),
                 gpuIds,
                 self.ctx.effectiveBatchSizes[methodIndex],
                 childConnection,
@@ -331,6 +332,158 @@ class Scheduler:
                 "method": worker.methodLabel, "task": "", "attempt": "",
                 "duration": event.get("duration", 0.0),
             })
+
+    # ------------------------------------------------------- main-loop steps
+    # These four methods are the per-iteration steps of the Engine main
+    # loop. They live on the Scheduler because they own the worker / pair /
+    # event state machine; splitting them keeps the Engine loop a flat
+    # sequence of collaborator calls (≤ 15 lines of intent).
+
+    def drainEvents(self, ctx: "RunContext") -> None:
+        """Pull every event currently queued and route it through :meth:`handleEvent`.
+
+        Blocks up to 100ms when the queue is empty so a quiet run doesn't
+        spin; drains the rest of the queue non-blockingly once the first
+        event arrives so a burst of events doesn't starve other loop work.
+        """
+        try:
+            event = ctx.eventQueue.get(timeout=0.1)
+        except queue.Empty:
+            return
+        self.handleEvent(event)
+        while True:
+            try:
+                self.handleEvent(ctx.eventQueue.get_nowait())
+            except queue.Empty:
+                return
+
+    def reapDeadWorkers(self, ctx: "RunContext", now: float) -> None:
+        """Walk every worker once: apply deadlines, then reap exited processes.
+
+        Three deadline branches map 1:1 to ``_WorkerState.state`` — the
+        worker that overshot its initialize / task / shutdown deadline gets
+        the matching failure handling and transitions to ``failed`` (or
+        stays ``stopping`` with a fresh deadline). After the deadline check,
+        any worker whose ``process.is_alive()`` is ``False`` is handed to
+        ``recoverCurrentPair`` (for ``busy``/``failed``) or sets the fatal
+        error directly (for ``initializing``), then ``releaseWorker`` reaps
+        it and starts GPU cooling for its assigned GPUs.
+        """
+        for workerId, worker in list(ctx.workers.items()):
+            if worker.deadline is not None and now >= worker.deadline:
+                if worker.state == "initializing":
+                    ctx.fatalError = (
+                        f"{worker.methodLabel} initialization timed out "
+                        f"after {self.engine.initializeTimeout}s on GPUs "
+                        f"{worker.gpuIds}"
+                    )
+                    ctx.fatalStatus = "initialization_failed"
+                    self.terminateWorker(worker)
+                    worker.state = "failed"
+                elif worker.state == "busy":
+                    reason = (
+                        f"task timed out after {self.engine.taskTimeout}s: "
+                        f"{worker.methodLabel}/{worker.taskName} "
+                        f"attempt {worker.attempt}"
+                    )
+                    self.reporter.recordEvent({
+                        "type": "task_timeout", "time": time.time(),
+                        "worker_id": worker.workerId,
+                        "method": worker.methodLabel,
+                        "task": worker.taskName, "attempt": worker.attempt,
+                        "error": reason, "log_path": worker.logPath,
+                    })
+                    self.recoverCurrentPair(worker, reason, "task_timeout")
+                    self.terminateWorker(worker)
+                    worker.state = "failed"
+                elif worker.state == "stopping":
+                    self.terminateWorker(worker)
+                    worker.deadline = now + min(5.0, self.engine.shutdownGracePeriod)
+
+            if worker.process.is_alive():
+                continue
+            exitCode = worker.process.exitcode
+            if worker.state == "initializing":
+                ctx.fatalError = (
+                    f"{worker.methodLabel} initialization process exited "
+                    f"with code {exitCode}; log: {worker.instanceLog}"
+                )
+            elif worker.state in ("busy", "failed"):
+                self.recoverCurrentPair(
+                    worker, f"worker exited with code {exitCode}", "worker_exit"
+                )
+                self.terminateWorker(worker, force=True)
+            self.releaseWorker(workerId)
+
+    def checkShutdown(self, ctx: "RunContext") -> bool:
+        """Translate a TUI cancel / fatal error into ``ctx.cancelled`` /
+        ``ctx.status`` and ask every worker to stop.
+
+        Returns ``True`` iff the main loop should break (a cancel was
+        requested, a fatal error surfaced, or all pairs reached a terminal
+        status and no worker / cooling GPU is left). The terminal break is
+        handled separately by :meth:`finalizeTerminal` — this method only
+        reacts to the cancel / fatal paths.
+        """
+        if self.engine.isTuiEnabled() and self.engine._tui.cancelRequested:
+            ctx.cancelled = True
+            ctx.status = "cancelled"
+        if ctx.fatalError:
+            ctx.status = ctx.fatalStatus or "failed"
+        if not (ctx.fatalError or ctx.cancelled):
+            return False
+        for worker in ctx.workers.values():
+            self.stopWorker(worker)
+        return True
+
+    def dispatchPending(self, ctx: "RunContext", now: float) -> None:
+        """Drain the work backlog: dispatch every idle worker, then keep
+        spawning new workers until no method has both free GPUs and pending
+        pairs.
+
+        Splits into two phases because they have different preconditions:
+
+        1. Existing idle workers already hold their GPUs, so they can be
+           dispatched without touching the GPU pool.
+        2. Spawning a new worker needs free GPUs, so ``validateFreeGpus``
+           is called between each ``chooseMethod`` and the matching
+           ``spawnWorker``. ``chooseMethod`` is called twice around the
+           validation because the validation can move GPUs into cooling,
+           which changes the answer.
+        """
+        for worker in list(ctx.workers.values()):
+            if worker.state == "idle":
+                self.dispatch(worker)
+
+        while True:
+            methodIndex = self.chooseMethod()
+            if methodIndex is None:
+                break
+            self.engine.gpuGovernor.validateFreeGpus(now)
+            methodIndex = self.chooseMethod()
+            if methodIndex is None:
+                break
+            self.spawnWorker(methodIndex)
+
+    def finalizeTerminal(self, ctx: "RunContext") -> bool:
+        """Stop the remaining idle workers when every (method, task) pair is
+        terminal, and break the loop once no worker / cooling GPU is left.
+
+        Returns ``True`` iff the main loop should break. Stops idle workers
+        first so they don't immediately re-dispatch into nothing; only
+        returns ``True`` when there is genuinely nothing left to wait for
+        (no live worker AND no GPU still cooling down).
+        """
+        terminal = all(
+            value in ("done", "failed", "unschedulable")
+            for value in ctx.pairStatus.values()
+        )
+        if not terminal:
+            return False
+        for worker in ctx.workers.values():
+            if worker.state == "idle":
+                self.stopWorker(worker)
+        return not ctx.workers and not ctx.coolingGpus
 
 
 # Local import to break the circular dependency: ``State`` defines

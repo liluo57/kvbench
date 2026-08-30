@@ -27,8 +27,8 @@ from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
-from helpers.TransformersHelper import TransformersGenerator
-from helpers.VllmHelper import CreateLlm, EncodeIds, GenerateBatch
+from helpers.backends.TransformersHelper import TransformersGenerator
+from helpers.backends.VllmHelper import CreateLlm, EncodeIds, GenerateBatch
 
 
 class _FullPrefillBase(Method):

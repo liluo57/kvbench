@@ -31,7 +31,7 @@ from core.Config import DatasetDir, ModelPath
 from core.Result import Result
 from core.Task import Case, Task
 
-from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
+from helpers.backends.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 
 def _References(refs) -> List[Any]:

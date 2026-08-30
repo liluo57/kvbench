@@ -15,7 +15,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any, Dict
 
-from helpers.ModelAdapter import parse_tool_calls, render_chat
+from helpers.backends.ModelAdapter import parse_tool_calls, render_chat
 
 if TYPE_CHECKING:
     from .helper import BenchflowHelper

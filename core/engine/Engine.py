@@ -83,7 +83,17 @@ class Engine:
         self.outputRoot = Path(outputRoot)
         self.tuiEnabled = tui
         self.verbose = verbose
+        # All Evaluate-time state is declared here as None so static analysis
+        # can see the full attribute surface of an Engine instance. They are
+        # populated at the top of Evaluate. ``_gpuPool`` / ``_gpuSnapshot``
+        # used to live here too; they were moved to ``RunContext`` so the
+        # collaborators no longer need to reach through ``self.engine._gpuX``.
         self.outputDir: Optional[Path] = None
+        self._metrics: Optional[List[Metric]] = None
+        self._tui: Optional[BenchmarkTui] = None
+        self.reporter: Optional[Reporter] = None
+        self.gpuGovernor: Optional[GpuGovernor] = None
+        self.scheduler: Optional[Scheduler] = None
 
     def Evaluate(
         self,
@@ -98,7 +108,7 @@ class Engine:
         effectiveBatchSizes = [
             method.EffectiveBatchSize(self.batchSize) for method in methods
         ]
-        self._gpuPool, self._gpuSnapshot = ResolveGpuIds(self.availableGpuIds)
+        gpuPool, gpuSnapshot = ResolveGpuIds(self.availableGpuIds)
         self.outputDir = self._CreateOutputDir()
         maxAttempts = self.pairRetries + 1
 
@@ -106,8 +116,8 @@ class Engine:
             methods=methods,
             tasks=tasks,
             effectiveBatchSizes=effectiveBatchSizes,
-            gpuPool=self._gpuPool,
-            gpuSnapshot=self._gpuSnapshot,
+            gpuPool=gpuPool,
+            gpuSnapshot=gpuSnapshot,
             outputDir=self.outputDir,
             maxAttempts=maxAttempts,
         )
@@ -142,8 +152,8 @@ class Engine:
                 self.gpuReleaseMemoryTolerance // (1024 * 1024)
             ),
             "pair_retries": self.pairRetries,
-            "gpu_pool": self._gpuPool,
-            "gpu_snapshot": [gpu.AsDict() for gpu in self._gpuSnapshot],
+            "gpu_pool": ctx.gpuPool,
+            "gpu_snapshot": [gpu.AsDict() for gpu in ctx.gpuSnapshot],
             "methods": [
                 {
                     "index": index,
@@ -167,7 +177,7 @@ class Engine:
 
         self.reporter.writeReports()
         for methodIndex, method in enumerate(methods):
-            if method.gpuNums <= len(self._gpuPool):
+            if method.gpuNums <= len(ctx.gpuPool):
                 continue
             ctx.pending[methodIndex].clear()
             for taskIndex in range(len(tasks)):
@@ -175,7 +185,7 @@ class Engine:
                     methodIndex, taskIndex,
                     error=(
                         f"requires {method.gpuNums} GPU(s), but the Engine "
-                        f"pool contains {len(self._gpuPool)}: {self._gpuPool}"
+                        f"pool contains {len(ctx.gpuPool)}: {ctx.gpuPool}"
                     ),
                     kind="unschedulable",
                 )
@@ -184,97 +194,15 @@ class Engine:
         lastTuiUpdate = 0.0
         try:
             while True:
-                try:
-                    event = ctx.eventQueue.get(timeout=0.1)
-                    self.scheduler.handleEvent(event)
-                    while True:
-                        self.scheduler.handleEvent(ctx.eventQueue.get_nowait())
-                except queue.Empty:
-                    pass
-
+                self.scheduler.drainEvents(ctx)
                 now = time.monotonic()
                 self.gpuGovernor.refreshCoolingGpus(now)
-                for workerId, worker in list(ctx.workers.items()):
-                    if worker.deadline is not None and now >= worker.deadline:
-                        if worker.state == "initializing":
-                            ctx.fatalError = (
-                                f"{worker.methodLabel} initialization timed out "
-                                f"after {self.initializeTimeout}s on GPUs "
-                                f"{worker.gpuIds}"
-                            )
-                            ctx.fatalStatus = "initialization_failed"
-                            self.scheduler.terminateWorker(worker)
-                            worker.state = "failed"
-                        elif worker.state == "busy":
-                            reason = (
-                                f"task timed out after {self.taskTimeout}s: "
-                                f"{worker.methodLabel}/{worker.taskName} "
-                                f"attempt {worker.attempt}"
-                            )
-                            self.reporter.recordEvent({
-                                "type": "task_timeout", "time": time.time(),
-                                "worker_id": worker.workerId,
-                                "method": worker.methodLabel,
-                                "task": worker.taskName, "attempt": worker.attempt,
-                                "error": reason, "log_path": worker.logPath,
-                            })
-                            self.scheduler.recoverCurrentPair(worker, reason, "task_timeout")
-                            self.scheduler.terminateWorker(worker)
-                            worker.state = "failed"
-                        elif worker.state == "stopping":
-                            self.scheduler.terminateWorker(worker)
-                            worker.deadline = now + min(5.0, self.shutdownGracePeriod)
-
-                    if worker.process.is_alive():
-                        continue
-                    exitCode = worker.process.exitcode
-                    if worker.state == "initializing":
-                        ctx.fatalError = (
-                            f"{worker.methodLabel} initialization process exited "
-                            f"with code {exitCode}; log: {worker.instanceLog}"
-                        )
-                    elif worker.state in ("busy", "failed"):
-                        self.scheduler.recoverCurrentPair(
-                            worker, f"worker exited with code {exitCode}", "worker_exit"
-                        )
-                        self.scheduler.terminateWorker(worker, force=True)
-                    self.scheduler.releaseWorker(workerId)
-
-                if self._tui.cancelRequested:
-                    ctx.cancelled = True
-                    ctx.status = "cancelled"
-                if ctx.fatalError:
-                    ctx.status = ctx.fatalStatus or "failed"
-                if ctx.fatalError or ctx.cancelled:
-                    for worker in ctx.workers.values():
-                        self.scheduler.stopWorker(worker)
+                self.scheduler.reapDeadWorkers(ctx, now)
+                if self.scheduler.checkShutdown(ctx):
                     break
-
-                for worker in list(ctx.workers.values()):
-                    if worker.state == "idle":
-                        self.scheduler.dispatch(worker)
-
-                while True:
-                    methodIndex = self.scheduler.chooseMethod()
-                    if methodIndex is None:
-                        break
-                    self.gpuGovernor.validateFreeGpus(now)
-                    methodIndex = self.scheduler.chooseMethod()
-                    if methodIndex is None:
-                        break
-                    self.scheduler.spawnWorker(methodIndex)
-
-                terminal = all(
-                    value in ("done", "failed", "unschedulable")
-                    for value in ctx.pairStatus.values()
-                )
-                if terminal:
-                    for worker in ctx.workers.values():
-                        if worker.state == "idle":
-                            self.scheduler.stopWorker(worker)
-                    if not ctx.workers and not ctx.coolingGpus:
-                        break
-
+                self.scheduler.dispatchPending(ctx, now)
+                if self.scheduler.finalizeTerminal(ctx):
+                    break
                 self.gpuGovernor.refreshGpuSnapshot(now)
                 if now - lastTuiUpdate >= 0.2:
                     self._tui.Update(self.reporter.snapshot())
@@ -381,3 +309,26 @@ class Engine:
             serial += 1
         candidate.mkdir(parents=True)
         return candidate
+
+    # --------------------------------------------------------------- accessors
+    # Collaborators (Scheduler / GpuGovernor) read these via the Engine rather
+    # than reaching through private attributes, so the Engine's mutable
+    # surface is documented as a method set instead of an attribute bag.
+    def isTuiEnabled(self) -> bool:
+        """True iff a live ``BenchmarkTui`` is driving the dashboard.
+
+        Returns ``False`` when no ``Evaluate`` has run yet (``self._tui is
+        None``) so the coordinator can ask this at any point in the
+        lifecycle without an explicit pre-check.
+        """
+        return self._tui is not None and self._tui.enabled
+
+    def metrics(self) -> List[Metric]:
+        """The metric list passed to the most recent ``Evaluate`` call.
+
+        Returns the empty list when ``Evaluate`` has not run, so callers can
+        safely iterate without a None guard. The list is treated as
+        immutable by collaborators; the Engine never mutates it after
+        ``Evaluate`` stores it.
+        """
+        return self._metrics if self._metrics is not None else []

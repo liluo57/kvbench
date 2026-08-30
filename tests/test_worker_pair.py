@@ -4,7 +4,13 @@ from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Task import Case, Task
 from core.Workload import Action, ActionKind, Workload
-from core.Worker import EvaluatePair
+from core.Worker import (
+    EvaluatePair,
+    _Initialize,
+    _RunCommandLoop,
+    _RunOneAttempt,
+    _Shutdown,
+)
 from metrics import TTFTMetric, ThroughputMetric
 
 
@@ -265,3 +271,221 @@ class _EmptyActionTask(_StalledTask):
 def test_evaluate_pair_rejects_an_empty_action_step():
     with pytest.raises(RuntimeError, match="empty Action list"):
         EvaluatePair(_EmptyActionTask(), _RecordingMethod(), [], batchSize=1)
+
+
+# ---------------------------------------------------------------------------
+# WorkerMain lifecycle helpers — each one event-emitter pure so it can be
+# tested without spawning a real worker process.
+# ---------------------------------------------------------------------------
+
+
+class _CapturingQueue:
+    """Minimal queue stand-in that records every event for assertions."""
+
+    def __init__(self):
+        self.events = []
+
+    def put(self, event):
+        self.events.append(event)
+
+
+class _RecordingWorkerMethod(_RecordingMethod):
+    """A Method whose lifecycle methods record their arguments."""
+
+    def __init__(self):
+        super().__init__()
+        self.initializeCalls = []
+        self.closeCalls = 0
+
+    def Initialize(self, gpuIds):
+        self.initializeCalls.append(list(gpuIds))
+
+
+    def Close(self):
+        self.closeCalls += 1
+
+
+class _FailingInitializeMethod(_RecordingMethod):
+    def Initialize(self, gpuIds):
+        raise RuntimeError("backend down")
+
+
+class _FailingRunMethod(_RecordingMethod):
+    def Run(self, data, retainOutput=None):
+        raise RuntimeError("decode crashed")
+
+
+class _IdempotentCloseMethod(_RecordingWorkerMethod):
+    def Close(self):
+        self.closeCalls += 1
+
+
+def test_initialize_emits_started_and_done_on_success(tmp_path):
+    method = _RecordingWorkerMethod()
+    queue = _CapturingQueue()
+
+    ok = _Initialize(
+        method, [0, 1], queue, "w0", methodIndex=2, batchSize=4,
+        instanceLog=str(tmp_path / "log.txt"),
+    )
+
+    assert ok is True
+    kinds = [event["type"] for event in queue.events]
+    assert kinds == ["initialize_started", "initialize_done"]
+    assert method.initializeCalls == [[0, 1]]
+    started = queue.events[0]
+    assert started["method_index"] == 2
+    assert started["gpu_ids"] == [0, 1]
+    assert started["batch_size"] == 4
+    assert "duration" in queue.events[1]
+
+
+def test_initialize_emits_failed_on_exception(tmp_path):
+    method = _FailingInitializeMethod()
+    queue = _CapturingQueue()
+
+    ok = _Initialize(
+        method, [0], queue, "w0", methodIndex=0, batchSize=1,
+        instanceLog=str(tmp_path / "log.txt"),
+    )
+
+    assert ok is False
+    kinds = [event["type"] for event in queue.events]
+    assert kinds == ["initialize_started", "initialize_failed"]
+    failed = queue.events[1]
+    assert "RuntimeError" in failed["error"]
+    assert "backend down" in failed["error"]
+    assert "Traceback" in failed["traceback"]
+
+
+def test_shutdown_closes_method_and_emits_worker_closed(tmp_path):
+    method = _IdempotentCloseMethod()
+    queue = _CapturingQueue()
+
+    class _Connection:
+        def close(self_inner):
+            self_inner.closed = True
+
+    connection = _Connection()
+    connection.closed = False
+
+    _Shutdown(method, connection, queue, "w0")
+
+    assert method.closeCalls == 1
+    assert connection.closed is True
+    assert queue.events[-1]["type"] == "worker_closed"
+    assert queue.events[-1]["error"] is None
+
+
+def test_shutdown_swallows_method_close_errors(tmp_path):
+    method = _RecordingWorkerMethod()
+
+    def _bad_close():
+        raise OSError("cuda gone")
+    method.Close = _bad_close  # type: ignore[method-assign]
+
+    queue = _CapturingQueue()
+
+    class _Connection:
+        def close(self_inner):
+            pass
+
+    _Shutdown(method, _Connection(), queue, "w0")
+
+    closed = queue.events[-1]
+    assert closed["type"] == "worker_closed"
+    assert "OSError" in closed["error"]
+    assert "cuda gone" in closed["error"]
+
+
+def test_run_one_attempt_emits_done_when_evaluate_pair_succeeds(tmp_path):
+    task = _BatchTask(count=1)
+    method = _RecordingWorkerMethod()
+    queue = _CapturingQueue()
+    logPath = str(tmp_path / "attempt.log")
+
+    completed = _RunOneAttempt(
+        method, task, 0, 0, 1, 2, logPath, [], 1,
+        queue, "w0",
+    )
+
+    assert completed is True
+    kinds = [event["type"] for event in queue.events]
+    assert kinds == ["task_started", "task_done"]
+    done = queue.events[-1]
+    assert "report" in done
+    assert done["attempt"] == 1
+    assert done["task"] == "batch"
+
+
+def test_run_one_attempt_emits_task_failed_when_attempts_exhausted(tmp_path):
+    task = _BatchTask(count=1)
+    method = _FailingRunMethod()
+    queue = _CapturingQueue()
+    logPath = str(tmp_path / "attempt.log")
+
+    completed = _RunOneAttempt(
+        method, task, 0, 0, 1, 1, logPath, [], 1,
+        queue, "w0",
+    )
+
+    assert completed is False
+    kinds = [event["type"] for event in queue.events]
+    assert "task_attempt_failed" in kinds
+    assert kinds[-1] == "task_failed"
+    failed = queue.events[-1]
+    assert "RuntimeError" in failed["error"]
+
+
+def test_run_command_loop_processes_task_then_shutdown(tmp_path):
+    method = _RecordingWorkerMethod()
+    queue = _CapturingQueue()
+    logPath = str(tmp_path / "attempt.log")
+    task = _BatchTask(count=1)
+
+    sentCommands = [
+        {
+            "op": "task",
+            "task": task,
+            "task_index": 0,
+            "start_attempt": 1,
+            "max_attempts": 1,
+            "log_paths": {1: logPath},
+        },
+        {"op": "shutdown"},
+    ]
+
+    class _PipeEnd:
+        def __init__(self, commands):
+            self._commands = list(commands)
+
+        def recv(self_inner):
+            return self_inner._commands.pop(0)
+
+    _RunCommandLoop(
+        method, [], 1, _PipeEnd(sentCommands), queue, "w0", 0,
+        str(tmp_path / "instance.log"),
+    )
+
+    kinds = [event["type"] for event in queue.events]
+    assert "task_started" in kinds
+    assert "task_done" in kinds
+    assert kinds[-1] == "worker_idle"
+
+
+def test_run_command_loop_breaks_on_eof(tmp_path):
+    method = _RecordingWorkerMethod()
+    queue = _CapturingQueue()
+
+    class _ClosedPipe:
+        def recv(self_inner):
+            raise EOFError
+
+    _RunCommandLoop(
+        method, [], 1, _ClosedPipe(), queue, "w0", 0,
+        str(tmp_path / "instance.log"),
+    )
+
+    # The only emitted event is the spurious one if the loop were miscoded;
+    # an immediate EOFError should leave the queue empty.
+    assert queue.events == []

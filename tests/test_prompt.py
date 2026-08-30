@@ -1,6 +1,6 @@
 import pytest
 
-from helpers.Prompt import ComposeInterleavedReuse, ComposeReuse, ContextText
+from helpers.backends.Prompt import ComposeInterleavedReuse, ComposeReuse, ContextText
 
 
 def test_context_text_handles_empty_and_preserves_segments():

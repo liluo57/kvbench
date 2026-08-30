@@ -146,6 +146,12 @@ class RunContext:
     it to the three support classes, and reads ``status`` /
     ``fatalError`` / ``fatalStatus`` out of it during the main loop. The
     support classes own most field-level mutation.
+
+    The two GPU fields (``gpuPool`` / ``gpuSnapshot``) live here, not on the
+    Engine instance: GpuGovernor writes ``gpuSnapshot`` on every refresh and
+    Reporter reads it on every snapshot, so the previous shape (Engine held
+    both as private attributes and collaborators reached through) duplicated
+    one concept across two homes. RunContext is the single home now.
     """
 
     pending: Dict[int, Deque[int]]
@@ -158,6 +164,8 @@ class RunContext:
     knownLogs: Set[str]
     workers: Dict[str, _WorkerState]
     workerHistory: List[Dict[str, Any]]
+    gpuPool: List[int]
+    gpuSnapshot: List[Any]
     freeGpus: List[int]
     coolingGpus: Dict[int, Dict[str, Any]]
     gpuBaseline: Dict[int, int]
@@ -225,6 +233,8 @@ def BuildRunContext(
         knownLogs=set(),
         workers={},
         workerHistory=[],
+        gpuPool=list(gpuPool),
+        gpuSnapshot=list(gpuSnapshot),
         freeGpus=list(gpuPool),
         coolingGpus={},
         gpuBaseline={gpu.id: gpu.memoryUsed for gpu in gpuSnapshot},

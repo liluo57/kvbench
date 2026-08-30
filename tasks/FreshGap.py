@@ -32,7 +32,7 @@ from core.Result import Result
 from core.Task import Case, Task
 from workload.RAGWorkload import RAGInput, RAGWorkload
 
-from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
+from helpers.backends.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 
 class FreshGapTask(Task):

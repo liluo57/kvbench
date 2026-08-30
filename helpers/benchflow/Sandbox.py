@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Mapping, Optional, Sequence, Tuple
 
-from .util import ResolveHostSitePackages
+from .Util import ResolveHostSitePackages
 
 if TYPE_CHECKING:
     from .helper import BenchflowHelper

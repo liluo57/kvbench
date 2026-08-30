@@ -206,18 +206,18 @@ class GpuGovernor:
         for gpuId in released:
             self.ctx.coolingGpus.pop(gpuId, None)
             self.ctx.freeGpus.append(gpuId)
-        self.ctx.freeGpus.sort(key=self.engine._gpuPool.index)
+        self.ctx.freeGpus.sort(key=self.ctx.gpuPool.index)
 
     def refreshGpuSnapshot(self, now: float) -> None:
         """Refresh dashboard GPU telemetry once per second."""
         if (
-            not self.engine._tui.enabled
+            not self.engine.isTuiEnabled()
             or now - self.ctx.lastGpuSnapshotPoll < _GPU_SNAPSHOT_INTERVAL
         ):
             return
         self.ctx.lastGpuSnapshotPoll = now
         try:
-            self.engine._gpuSnapshot = QueryGpus()
+            self.ctx.gpuSnapshot = list(QueryGpus())
         except RuntimeError as exc:
             # Telemetry is best-effort: retain the last good sample instead
             # of interrupting a running benchmark for a transient NVML error.

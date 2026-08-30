@@ -24,8 +24,8 @@ from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
-from helpers.Prompt import ComposeInterleavedReuse
-from helpers.TransformersHelper import CacheLayerPairs, TransformersGenerator
+from helpers.backends.Prompt import ComposeInterleavedReuse
+from helpers.backends.TransformersHelper import CacheLayerPairs, TransformersGenerator
 
 
 class NaiveTransformer(Method):
