@@ -41,7 +41,6 @@ class _FullPrefillBase(Method):
 
     def __init__(
         self,
-        modelPath: str,
         *,
         gpuNums: int,
         perfWeight: float,
@@ -56,7 +55,8 @@ class _FullPrefillBase(Method):
             maxGpuNums=maxGpuNums,
             tag=tag,
         )
-        self.modelPath = modelPath or DefaultModelPath()
+        # Model path is config-only — switch models via config.yaml.
+        self.modelPath = DefaultModelPath()
         self.maxNewTokens = maxNewTokens
         self.dtype = dtype
 
@@ -100,14 +100,12 @@ class FullPrefillTransformer(_FullPrefillBase):
         self,
         gpuNums: int = 1,
         perfWeight: float = 1.0,
-        modelPath: str | None = None,
         *,
         maxNewTokens: int = 64,
         dtype: str = "bfloat16",
         tag: Optional[str] = None,
     ):
         super().__init__(
-            modelPath or "",
             gpuNums=gpuNums,
             perfWeight=perfWeight,
             maxGpuNums=1,
@@ -151,7 +149,6 @@ class FullPrefillVllm(_FullPrefillBase):
         self,
         gpuNums: int = 1,
         perfWeight: float = 1.0,
-        modelPath: str | None = None,
         *,
         maxNewTokens: int = 64,
         gpuMemoryUtilization: float = 0.7,
@@ -161,7 +158,6 @@ class FullPrefillVllm(_FullPrefillBase):
         tag: Optional[str] = None,
     ):
         super().__init__(
-            modelPath or "",
             gpuNums=gpuNums,
             perfWeight=perfWeight,
             maxGpuNums=None,

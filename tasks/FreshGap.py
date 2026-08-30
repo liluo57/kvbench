@@ -31,7 +31,7 @@ from core.Result import Result
 from core.Task import Case, Task
 from workload.RAGWorkload import RAGInput, RAGWorkload
 
-from .TemplateHelper import AssistantSuffix, UserContext
+from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 
 class FreshGapTask(Task):
@@ -47,7 +47,7 @@ class FreshGapTask(Task):
 
         # Keep A / C identical across cases. Only the tiny fresh B changes.
         # This makes the performance comparison less noisy.
-        self._a = UserContext(
+        self._a = user_turn_prefix() + (
             "Read the following context and answer the final question. "
             "Return only the requested numeric code.\n\n"
             + self._Filler("A")
@@ -55,10 +55,9 @@ class FreshGapTask(Task):
 
         self._c = (
             self._Filler("C")
-            + AssistantSuffix(
-                "\nWhat is the transient code? "
-                "Answer with the numeric code only.\n"
-            )
+            + assistant_turn_suffix()
+            + "\nWhat is the transient code? "
+            "Answer with the numeric code only.\n"
         )
 
     def Cases(self) -> Iterator[Case]:

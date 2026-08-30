@@ -47,10 +47,10 @@ class MultiAgentFullConnectionWorkload(Workload):
         if not self._data.chatTemplate:
             return userPrompt
 
-        # This benchmark's configured model is Qwen3-Instruct. Match
-        # tokenizer.apply_chat_template(..., enable_thinking=False) so the
-        # model sees real system/user turns and stops at <|im_end|>, instead of
-        # treating the prompt as an unbounded plain-text continuation.
+        # The agent always sees real system/user turns (and stops at the
+        # model's chat-template close token); helpers.ModelAdapter.render_chat
+        # owns the per-arch kwargs (``enable_thinking``, etc.) and the boundary
+        # strings. The configured model is whatever ``config.yaml`` points at.
         systemPrompt = spec.systemPrompt or f"You are the {spec.role}."
         return (
             f"<|im_start|>system\n{systemPrompt}<|im_end|>\n"

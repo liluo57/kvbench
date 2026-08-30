@@ -4,7 +4,7 @@ import pytest
 
 from core.Result import Result
 from core.Workload import ActionKind, ActionResult
-from tasks import TemplateHelper
+from helpers import ModelAdapter
 from tasks.bases.KBBase import (
     NormalizeAnswer,
     ParseGeneration,
@@ -209,22 +209,56 @@ def test_ruler_loader_rejects_missing_or_blank_outputs(tmp_path, outputs):
         _RulerTask(dataDir=str(tmp_path))._LoadSamples()
 
 
-def test_template_helper_detects_qwen3_and_honors_override(tmp_path, monkeypatch):
+def test_model_adapter_arch_family_reads_config_json(tmp_path, monkeypatch):
+    """``arch_family`` inspects ``<ModelPath>/config.json`` ``architectures``."""
     modelDir = tmp_path / "model"
     modelDir.mkdir()
     (modelDir / "config.json").write_text(
         json.dumps({"architectures": ["Qwen3ForCausalLM"]}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(TemplateHelper, "_ModelPath", lambda: str(modelDir))
-    TemplateHelper._ThinksByDefault.cache_clear()
+    monkeypatch.setattr(ModelAdapter, "_ModelPath", lambda: str(modelDir))
+    ModelAdapter.arch_family.cache_clear()
     try:
-        automatic = TemplateHelper.AssistantSuffix("question")
-        forcedThinking = TemplateHelper.AssistantSuffix("question", nonThinking=False)
-        forcedNonThinking = TemplateHelper.AssistantSuffix("question", nonThinking=True)
+        assert ModelAdapter.arch_family() == "qwen3"
     finally:
-        TemplateHelper._ThinksByDefault.cache_clear()
+        ModelAdapter.arch_family.cache_clear()
 
-    assert automatic.endswith("<think>\n\n</think>")
-    assert forcedNonThinking.endswith("<think>\n\n</think>")
-    assert not forcedThinking.endswith("<think>\n\n</think>")
+    (modelDir / "config.json").write_text(
+        json.dumps({"architectures": ["MuseGlimmerForCausalLM"]}),
+        encoding="utf-8",
+    )
+    ModelAdapter.arch_family.cache_clear()
+    try:
+        assert ModelAdapter.arch_family() == "muse_glimmer"
+    finally:
+        ModelAdapter.arch_family.cache_clear()
+
+
+def test_model_adapter_thinking_kwargs_translate_per_arch():
+    """The CoT toggle is translated to the kwarg name the model's jinja reads."""
+    ModelAdapter.set_arch_for_testing("qwen3")
+    assert ModelAdapter._thinking_kwargs(False) == {"enable_thinking": False}
+    assert ModelAdapter._thinking_kwargs(True) == {"enable_thinking": True}
+    assert ModelAdapter._thinking_kwargs(None) == {}
+
+    ModelAdapter.set_arch_for_testing("muse_glimmer")
+    assert ModelAdapter._thinking_kwargs(False) == {"reasoning_strength": "low"}
+    assert ModelAdapter._thinking_kwargs(True) == {"reasoning_strength": "high"}
+    assert ModelAdapter._thinking_kwargs(None) == {}
+
+    # Unknown archs ignore the kwarg entirely.
+    ModelAdapter.set_arch_for_testing("other")
+    assert ModelAdapter._thinking_kwargs(False) == {}
+    assert ModelAdapter._thinking_kwargs(True) == {}
+
+    ModelAdapter.set_arch_for_testing(None)
+
+
+def test_model_adapter_render_chat_includes_assistant_generation_prompt():
+    """render_chat appends the assistant generation prompt regardless of body."""
+    ModelAdapter.set_arch_for_testing("qwen3")
+    out = ModelAdapter.render_chat([{"role": "user", "content": "hi"}])
+    assert out.startswith("<|im_start|>user\n")
+    assert out.endswith("<|im_start|>assistant\n")
+    ModelAdapter.set_arch_for_testing(None)

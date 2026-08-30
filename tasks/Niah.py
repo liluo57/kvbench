@@ -30,8 +30,8 @@ from core.Result import Result
 from core.Task import Case
 from workload.RAGWorkload import RAGInput, RAGWorkload
 
-from .TemplateHelper import AssistantSuffix, UserContext
 from .bases.RulerBase import RulerBase
+from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 
 class NIAHTask(RulerBase):
@@ -116,7 +116,7 @@ class NIAHShuffleTask(NIAHTask):
         if questionStart < 0:
             raise RuntimeError(f"NIAH question not found in input: {sample['file']}")
 
-        prefix = UserContext(body[:instructionEnd])
+        prefix = user_turn_prefix() + body[:instructionEnd]
         essay = body[instructionEnd:questionStart]
         value = str(sample["outputs"][0])
         vpos = essay.find(value)
@@ -135,7 +135,7 @@ class NIAHShuffleTask(NIAHTask):
         nBefore = max(1, self._NEssays // 2)
         nAfter = max(1, self._NEssays - nBefore)
         essays = self._SplitInto(before, nBefore) + self._SplitInto(after, nAfter)
-        suffix = body[questionStart:] + AssistantSuffix("") + answerPrefix
+        suffix = body[questionStart:] + assistant_turn_suffix() + answerPrefix
 
         parts = [prefix, *essays, needle, suffix]
         return parts, "".join(parts)

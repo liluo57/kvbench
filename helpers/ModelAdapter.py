@@ -1,0 +1,342 @@
+"""Single thin adapter that owns every per-arch chat-rendering decision.
+
+Tasks call into here. They never read ``config.json``, never branch on
+``Qwen3`` vs ``MuseGlimmer``, never concatenate ``<|im_start|>`` /
+``<|im_end|>`` by hand. The adapter resolves the configured model's
+architecture, then routes through:
+
+- the model's own ``chat_template`` (via ``tokenizer.apply_chat_template``)
+  for prompt rendering — so every model sees the exact format it was
+  trained on, and per-arch kwargs (``enable_thinking`` for Qwen3,
+  ``reasoning_strength`` for Muse Glimmer) are set automatically;
+- vLLM's ``ToolParserManager`` + ``ReasoningParserManager`` for parsing
+  the model's output back into OpenAI-shaped tool / reasoning fields.
+
+For RULER / KB tasks that split a prompt into a cacheable prefix and a
+fresh tail (so reuse methods can store each segment's KV once), the
+adapter also exposes :func:`user_turn_prefix` and
+:func:`assistant_turn_suffix` — literal boundary strings derived from
+the same jinja, so chunk boundaries stay byte-identical to what
+``render_chat`` would emit if the whole prompt were rendered at once.
+"""
+
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+
+from core.Config import ModelPath as _ModelPath
+
+
+# ---------------------------------------------------------------------------
+# Architecture detection — the ONLY place in kvbench that knows arch names.
+# ---------------------------------------------------------------------------
+
+#: Architectures whose Instruct chat defaults to thinking mode (Qwen3). Adding
+#: a new model means appending to one of these tuples.
+_Qwen3Archs: Tuple[str, ...] = ("Qwen3ForCausalLM",)
+
+#: Architectures that use the Meta-style ``<|start|>/<|message|>/<|eot|>`` chat
+#: format. vLLM maps ``MuseGlimmerForConditionalGeneration`` to the
+#: ``MuseGlimmerForCausalLM`` class (text-only), so both names appear.
+_MuseGlimmerArchs: Tuple[str, ...] = (
+    "MuseGlimmerForCausalLM",
+    "MuseGlimmerForConditionalGeneration",
+)
+
+#: Test seam: when non-None, :func:`arch_family` returns this verbatim
+#: instead of reading ``config.json``. Production code never sets this.
+_ArchOverrideForTesting: Optional[str] = None
+
+
+@lru_cache(maxsize=1)
+def arch_family() -> Literal["qwen3", "muse_glimmer", "other"]:
+    """Return the chat-format arch for the configured model.
+
+    Reads ``<ModelPath>/config.json`` and inspects the ``architectures`` list.
+    Any I/O failure (missing model dir / malformed config) falls back to
+    ``"other"``. Honors :data:`_ArchOverrideForTesting` for tests.
+    """
+    if _ArchOverrideForTesting is not None:
+        return _ArchOverrideForTesting
+    modelPath = _ModelPath()
+    if not modelPath:
+        return "other"
+    try:
+        with open(Path(modelPath) / "config.json", encoding="utf-8") as f:
+            archs = json.load(f).get("architectures", [])
+    except (OSError, ValueError):
+        return "other"
+    if any(a in _MuseGlimmerArchs for a in archs):
+        return "muse_glimmer"
+    if any(a in _Qwen3Archs for a in archs):
+        return "qwen3"
+    return "other"
+
+
+def set_arch_for_testing(arch: Optional[str]) -> None:
+    """Force :func:`arch_family` to return ``arch`` until cleared.
+
+    Pass ``None`` to restore production behaviour. Test-only — production
+    code never touches :data:`_ArchOverrideForTesting`.
+    """
+    global _ArchOverrideForTesting
+    _ArchOverrideForTesting = arch
+    arch_family.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Tokenizer (lazy) — used by every chat-rendering path below.
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _tokenizer():
+    """Lazy-load a ``transformers`` tokenizer for the configured model.
+
+    The Method (vLLM / transformers backend) keeps its own tokenizer; loading
+    one here lets the adapter render prompts and instantiate parsers without
+    holding a back-reference to the Method. Tokenizer files are small
+    (<100MB), the load is ~2s and happens once per process.
+    """
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(_ModelPath())
+
+
+# ---------------------------------------------------------------------------
+# Chat-prompt rendering via native jinja.
+# ---------------------------------------------------------------------------
+
+
+#: Per-arch (template kwarg name) -> True/False/None value mapping. ``None``
+#: means "let the jinja decide" — the kwarg is omitted entirely so the
+#: template's own default takes effect. ``True``/``False`` set the kwarg.
+def _thinking_kwargs(thinking: Optional[bool]) -> Dict[str, Any]:
+    arch = arch_family()
+    if thinking is None:
+        return {}
+    if arch == "qwen3":
+        return {"enable_thinking": bool(thinking)}
+    if arch == "muse_glimmer":
+        return {"reasoning_strength": "high" if thinking else "low"}
+    return {}
+
+
+def _normalise_messages(
+    messages: List[Dict[str, Any]],
+    system_prefix: str,
+) -> List[Dict[str, Any]]:
+    """Fold ``system_prefix`` into the first system message and JSON-decode
+    tool-call ``arguments`` strings back to dicts (ATEM template quirk)."""
+    msgs: List[Dict[str, Any]] = []
+    systemPrepended = False
+    for m in messages:
+        role = str(m.get("role", "user"))
+        if role == "system" and not systemPrepended and system_prefix:
+            baseContent = m.get("content")
+            content = (
+                f"{system_prefix.rstrip()}\n\n{baseContent}"
+                if baseContent
+                else system_prefix
+            )
+            msgs.append({"role": "system", "content": content})
+            systemPrepended = True
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            tcs: List[Dict[str, Any]] = []
+            for tc in m.get("tool_calls") or []:
+                if not isinstance(tc, Mapping):
+                    continue
+                fn = tc.get("function") if isinstance(tc, Mapping) else None
+                if not isinstance(fn, Mapping):
+                    continue
+                fn_d = vars(fn) if hasattr(fn, "__dict__") else dict(fn)
+                args = fn_d.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"_raw": args}
+                tc_d = vars(tc) if hasattr(tc, "__dict__") else dict(tc)
+                tcs.append({
+                    "id": tc_d.get("id", f"call_{len(tcs)}"),
+                    "type": tc_d.get("type", "function"),
+                    "function": {
+                        "name": fn_d.get("name"),
+                        "arguments": args,
+                    },
+                })
+            msgs.append({
+                "role": "assistant",
+                "content": m.get("content") or "",
+                "tool_calls": tcs,
+            })
+            continue
+        msgs.append(m)
+    if not systemPrepended and system_prefix:
+        msgs.insert(0, {"role": "system", "content": system_prefix})
+    return msgs
+
+
+def render_chat(
+    messages: List[Dict[str, Any]],
+    *,
+    tools: Optional[Sequence[Mapping[str, Any]]] = None,
+    system_prefix: str = "",
+    thinking: Optional[bool] = None,
+) -> str:
+    """Render an OpenAI chat message list to a text prompt for the configured
+    model.
+
+    Routing:
+
+    1. ``tokenizer.apply_chat_template`` with ``add_generation_prompt=True`` —
+       the model sees the exact chat format it was trained on (Qwen ChatML,
+       Glimmer ATEM, Mistral [INST], …).
+    2. The per-arch CoT toggle is passed as a top-level kwarg to
+       ``apply_chat_template`` (Qwen3 reads ``enable_thinking``; Muse
+       Glimmer reads ``reasoning_strength``; other archs ignore the kwarg).
+       transformers' ``apply_chat_template`` reads top-level kwargs, not
+       values nested in ``chat_template_kwargs`` — the dict-form only works
+       on newer (>= 4.45) templates that opt in.
+
+    ``system_prefix`` is folded into the first system message's content so
+    the model's existing system role keeps its place. ``tools`` are passed
+    through to the tokenizer as-is.
+    """
+    tok = _tokenizer()
+    msgs = _normalise_messages(list(messages), system_prefix)
+    return tok.apply_chat_template(
+        msgs,
+        tools=list(tools) if tools else None,
+        tokenize=False,
+        add_generation_prompt=True,
+        **_thinking_kwargs(thinking),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chat-prompt boundary primitives — for tasks that split a prompt into chunks.
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def user_turn_prefix() -> str:
+    """The literal prefix that opens a user turn in the configured model.
+
+    Derived by rendering an empty user message: the jinja emits the user
+    opener (``<|im_start|>user\\n`` for Qwen), then the empty body, then the
+    user-turn closer (``<|im_end|>\\n``). We return everything up to but
+    not including the closer. Tasks that build chunked prompts use this
+    instead of literal ``<|im_start|>user\\n`` — the boundary stays correct
+    for every supported chat format without per-arch code.
+    """
+    rendered = render_chat([{"role": "user", "content": ""}])
+    for closer in ("<|im_end|>", "<|eot|>"):
+        idx = rendered.find(closer)
+        if idx >= 0:
+            return rendered[:idx]
+    raise RuntimeError(
+        f"could not locate user-turn closer in rendered prompt: {rendered!r}"
+    )
+
+
+@lru_cache(maxsize=1)
+def assistant_turn_suffix() -> str:
+    """The literal suffix that closes the user turn and opens the assistant
+    turn.
+
+    Pairs with :func:`user_turn_prefix` for tasks that compose prompts by
+    string concatenation rather than full-template rendering (RULER's
+    shuffled variants, KBBase's prepare chunks, FreshGap). For Qwen3 this
+    is ``<|im_end|>\\n<|im_start|>assistant\\n``; for Glimmer it is
+    ``<|eot|>\\n<|start|>assistant<|message|>``.
+    """
+    rendered = render_chat([{"role": "user", "content": ""}])
+    for closer in ("<|im_end|>", "<|eot|>"):
+        idx = rendered.find(closer)
+        if idx >= 0:
+            return rendered[idx:]
+    raise RuntimeError(
+        f"could not locate user-turn closer in rendered prompt: {rendered!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool-call and reasoning parsing via vLLM-native parsers.
+# ---------------------------------------------------------------------------
+
+
+#: arch -> (tool_parser_name, reasoning_parser_name). The dispatcher is a
+#: flat table so adding a new arch is one row. vLLM-native parsers handle
+#: both protocol framing (Qwen3 XML, ATEM ``<|tool_call|>``) and
+#: reasoning-channel stripping (``ReasoningParserManager``).
+_ARCH_PARSERS: Dict[str, Tuple[Optional[str], Optional[str]]] = {
+    # arch               tool_parser       reasoning_parser
+    "muse_glimmer":      ("muse_glimmer",   "muse_glimmer"),
+    "qwen3":             ("qwen3_xml",      "qwen3"),
+    # Anything not listed raises in parse_tool_calls.
+}
+
+
+def parse_tool_calls(
+    output: str,
+    payload: Mapping[str, Any],
+) -> Tuple[str, Optional[str], List[Dict[str, Any]]]:
+    """Parse a vLLM ``generate`` output into OpenAI chat-completion fields.
+
+    Returns ``(content, reasoning, tool_calls)``. Uses vLLM's
+    ``ToolParserManager`` + ``ReasoningParserManager`` for the configured
+    arch. Raises if the arch has no registered parser pair — every model
+    KVBench currently supports has one.
+    """
+    from vllm.entrypoints.openai.chat_completion.protocol import (  # type: ignore[import-not-found]
+        ChatCompletionRequest,
+    )
+    from vllm.reasoning import ReasoningParserManager  # type: ignore[import-not-found]
+    from vllm.tool_parsers import ToolParserManager  # type: ignore[import-not-found]
+
+    tool_name, reasoning_name = _ARCH_PARSERS.get(arch_family(), (None, None))
+    if tool_name is None or reasoning_name is None:
+        raise ValueError(
+            f"no vLLM-native parser pair registered for arch "
+            f"{arch_family()!r}; add a row to ModelAdapter._ARCH_PARSERS "
+            f"or extend the supported arch list"
+        )
+
+    tok = _tokenizer()
+    tool_cls = ToolParserManager.get_tool_parser(tool_name)
+    reasoning_cls = ReasoningParserManager.get_reasoning_parser(reasoning_name)
+    tool_parser = tool_cls(tok)
+    reasoning_parser = reasoning_cls(tok)
+
+    request = ChatCompletionRequest.model_validate(dict(payload))
+    reasoning, content = reasoning_parser.extract_reasoning(output, request)
+    extracted = tool_parser.extract_tool_calls(content or output, request)
+    raw_calls = list(extracted.tool_calls) if extracted.tool_calls else []
+
+    # vLLM's parsers return pydantic ``ToolCall`` / ``FunctionCall`` models
+    # (vllm.entrypoints.openai.engine.protocol.ToolCall extends
+    # ``OpenAIBaseModel``). They carry a stray ``id=None`` that breaks strict
+    # OpenAI clients, so reshape to plain dicts.
+    from time import time_ns
+
+    clean_calls: List[Dict[str, Any]] = []
+    for i, tc in enumerate(raw_calls):
+        function = tc.function
+        arguments = function.arguments
+        if not isinstance(arguments, str):
+            arguments = json.dumps(dict(arguments), ensure_ascii=False)
+        clean_calls.append({
+            "id": tc.id or f"call_{time_ns()}_{i}",
+            "type": "function",
+            "function": {
+                "name": function.name,
+                "arguments": arguments,
+            },
+        })
+
+    return extracted.content or "", reasoning, clean_calls

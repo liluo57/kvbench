@@ -115,7 +115,6 @@ def test_dataset_and_model_paths_use_explicit_config(tmp_path):
 
     assert DatasetDir("ruler", config=config) == expected
     assert ModelPath(config=config) == "/models/default"
-    assert ModelPath("/models/override", config=config) == "/models/override"
 
     with pytest.raises(FileNotFoundError, match="missing"):
         DatasetDir("missing", config=config)

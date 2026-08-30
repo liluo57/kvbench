@@ -9,8 +9,8 @@ themselves are independent of the CacheBlend method. Each resolves its data by
 
 The prompt text mirrors what the original scripts build (same instruction
 prefixes, chunk format and query text) — minus the model-specific chat special
-tokens (``[INST]``/``[/INST]``), since the KVBench backends encode the Qwen chat
-format built by ``TemplateHelper``.
+tokens (``[INST]``/``[/INST]``), since the KVBench backends encode the chat
+format built by ``helpers.ModelAdapter``.
 
 Data shape (the original ``inputs/*.json``):
     musique / wikimqa:  ``{"ctxs": [{"title", "text"}], "question", "answers"}``
@@ -43,7 +43,7 @@ from core.Result import Result
 from core.Task import Case, Task
 from workload.RAGWorkload import RAGInput, RAGWorkload
 
-from ..TemplateHelper import AssistantSuffix, UserContext
+from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 # ---------------------------------------------------------------------------
 # Metric helpers (mirror ``example/utils.py`` without the extra deps)
@@ -194,10 +194,10 @@ class KBBase(Task):
             if not chunks or not suffix:
                 continue
             # The whole prompt is one user turn + assistant header (chat format):
-            # the user-turn header goes at the start of the cached context and
-            # the assistant header is fused with the fresh query.
-            chunks = [UserContext(chunks[0])] + chunks[1:]
-            suffix = AssistantSuffix(suffix)
+            # the user-turn opener goes at the start of the cached context and
+            # the assistant opener is fused with the fresh query.
+            chunks = [user_turn_prefix() + chunks[0]] + chunks[1:]
+            suffix = assistant_turn_suffix() + suffix
             fullPrompt = "".join(chunks) + suffix
             yield Case(
                 input=RAGInput(prepare_input=chunks, run_input=fullPrompt),

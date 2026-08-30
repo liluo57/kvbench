@@ -44,8 +44,8 @@ from core.Result import Result
 from core.Task import Case
 from workload.RAGWorkload import RAGInput, RAGWorkload
 
-from .TemplateHelper import AssistantSuffix, UserContext
 from .bases.RulerBase import RulerBase
+from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 #: The CWE instruction line, used to locate the test example's list.
 _HeaderLine = "Below is a numbered list"
@@ -123,9 +123,9 @@ class CWEShuffleTask(CWETask):
         bounds = [0] + [
             itemStarts[k * len(itemStarts) // nChunks] for k in range(1, nChunks)
         ] + [len(listText)]
-        head = UserContext(body[:hdrEnd])
+        head = user_turn_prefix() + body[:hdrEnd]
         chunks = [listText[bounds[k]:bounds[k + 1]] for k in range(nChunks)]
-        tail = body[qpos:] + AssistantSuffix("") + answerPrefix
+        tail = body[qpos:] + assistant_turn_suffix() + answerPrefix
         return [head, *chunks, tail]
 
     def Cases(self) -> Iterator[Case]:

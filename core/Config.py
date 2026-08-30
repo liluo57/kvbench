@@ -56,10 +56,13 @@ def DatasetDir(dataset: str, config: Optional[Dict[str, Any]] = None) -> Path:
     return path
 
 
-def ModelPath(model: Optional[str] = None,
-              config: Optional[Dict[str, Any]] = None) -> str:
-    """Return the model path to use, defaulting to the config's ModelPath."""
-    return model or str(Get("ModelPath", None, config=config) or "")
+def ModelPath(config: Optional[Dict[str, Any]] = None) -> str:
+    """Return the model path declared in ``config.yaml``.
+
+    Single source of truth — there is no override parameter. Switch models
+    by editing ``config.yaml``, not by passing paths at call sites.
+    """
+    return str(Get("ModelPath", None, config=config) or "")
 
 
 # ── AgentBenchFlow (SkillsBench + benchflow integration) ────────────────────

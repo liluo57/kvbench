@@ -43,8 +43,8 @@ from core.Result import Result
 from core.Task import Case
 from workload.RAGWorkload import RAGInput, RAGWorkload
 
-from .TemplateHelper import AssistantSuffix, UserContext
 from .bases.RulerBase import RulerBase
+from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 #: A ``VAR x = y`` assignment: ``VAR ABCDE = 12345`` or ``VAR FGHIJ = VAR ABCDE``.
 _ChainPattern = re.compile(r"VAR [A-Z]+ = (?:VAR [A-Z]+|\d+)")
@@ -112,13 +112,13 @@ class VTShuffleTask(VTTask):
         if not starts:
             raise RuntimeError(f"no VAR assignments after the test instruction: {sample['file']}")
 
-        head = UserContext(body[:starts[0]])
+        head = user_turn_prefix() + body[:starts[0]]
         chain = [
             body[starts[k]:starts[k + 1]] if k + 1 < len(starts)
             else body[starts[k]:qpos]
             for k in range(len(starts))
         ]
-        tail = body[qpos:] + AssistantSuffix("") + answerPrefix
+        tail = body[qpos:] + assistant_turn_suffix() + answerPrefix
         return [head, *chain, tail]
 
     def Cases(self) -> Iterator[Case]:

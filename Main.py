@@ -37,50 +37,45 @@ from tasks import (
 )
 from tasks.FreshGap import FreshGapTask
 
-MAX_SAMPLES=1
+MAX_SAMPLES=64
 MAX_NEW_TOKENS=64
 
 def Main() -> None:
     tasks = [
-        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        # VTShuffleTask(maxSamples=MAX_SAMPLES),
-        # MusiqueTask(maxSamples=MAX_SAMPLES),
-        # SamsumTask(maxSamples=MAX_SAMPLES),
-        # WikimQATask(maxSamples=MAX_SAMPLES),
-        # FreshGapTask(nCases=MAX_SAMPLES),
-        # KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        # KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-        # KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
-        AgentBenchFlowTask(
-            image_override="docker://python:3.13-slim",
-            task_ids=[
-                "azure-bgp-oscillation-route-leak",
-                "adaptive-cruise-control",
-                "citation-check",
-                "bike-rebalance",
-            ],
-            # thinking=True (default): let the model CoT. Flip to False to
-            # suppress. Qwen3 omits the empty pre-closed <think></think>
-            # block; Muse Glimmer sets Reasoning strength: high|low in the
-            # system prompt.
-        ),
+        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        VTShuffleTask(maxSamples=MAX_SAMPLES),
+        MusiqueTask(maxSamples=MAX_SAMPLES),
+        SamsumTask(maxSamples=MAX_SAMPLES),
+        WikimQATask(maxSamples=MAX_SAMPLES),
+        FreshGapTask(nCases=MAX_SAMPLES),
+        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+        # AgentBenchFlowTask(
+        #     image_override="docker://python:3.13-slim",
+        #     task_ids=[
+        #         "azure-bgp-oscillation-route-leak",
+        #         "adaptive-cruise-control",
+        #         "citation-check",
+        #         "bike-rebalance",
+        #     ],
+        #     # thinking=True (default): let the model CoT. Flip to False to
+        #     # suppress. The per-arch kwarg translation lives in
+        #     # helpers.ModelAdapter.render_chat.
+        # ),
     ]
 
-    #: Methods to run (edit to taste). Constructors are lightweight: concrete
-    #: GPU ids are assigned later by Engine. perfWeight is relative expected
-    #: per-task runtime and controls how additional instances are distributed.
     methods = [
         # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
         # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
         # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
         # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
         FullPrefillVllm(
-            gpuNums=2, perfWeight=2, maxNewTokens=512,
+            gpuNums=1, perfWeight=2, maxNewTokens=512,
             gpuMemoryUtilization=0.88,
             maxModelLen=32768,
-            modelPath="/data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-32B",
         ),
     ]
 

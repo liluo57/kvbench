@@ -32,7 +32,6 @@ Cacheblend:
   Repo:
     # The original CacheBlend repo clone (holds vllm_blend + .venv).
     RepoPath: /data/lyh/cache-blend/CacheBlend
-    ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B
 
 
 # SkillsBench + mini-SWE integration for AgentBenchFlowTask.

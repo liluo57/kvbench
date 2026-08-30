@@ -47,7 +47,6 @@ class NaiveTransformer(Method):
         self,
         gpuNums: int = 1,
         perfWeight: float = 1.0,
-        modelPath: str | None = None,
         *,
         maxNewTokens: int = 64,
         dtype: str = "bfloat16",
@@ -59,7 +58,8 @@ class NaiveTransformer(Method):
             maxGpuNums=1,
             tag=tag,
         )
-        self.modelPath = modelPath or DefaultModelPath()
+        # Model path is config-only — switch models via config.yaml.
+        self.modelPath = DefaultModelPath()
         self.maxNewTokens = maxNewTokens
         self.dtype = dtype
         self._gen = None

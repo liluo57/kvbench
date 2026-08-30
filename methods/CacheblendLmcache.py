@@ -101,7 +101,6 @@ class CacheblendLmcache(Method):
         self,
         gpuNums: int = 1,
         perfWeight: float = 1.0,
-        modelPath: Optional[str] = None,
         *,
         maxNewTokens: int = 64,
         maxModelLen: int = 40960,
@@ -119,7 +118,8 @@ class CacheblendLmcache(Method):
         tag: Optional[str] = None,
     ):
         super().__init__(gpuNums=gpuNums, perfWeight=perfWeight, tag=tag)
-        self.modelPath = modelPath or DefaultModelPath()
+        # Model path is config-only — switch models via config.yaml.
+        self.modelPath = DefaultModelPath()
         self.maxNewTokens = maxNewTokens
         self.maxModelLen = maxModelLen
         self.gpuMemoryUtilization = gpuMemoryUtilization

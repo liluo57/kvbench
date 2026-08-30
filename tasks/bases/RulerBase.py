@@ -11,8 +11,9 @@ Each line is a RULER record::
 
 ``input`` is the (possibly ``[INST]``-wrapped) prompt text; ``answer_prefix``
 is the start of the expected answer the model should continue from. The tasks
-rebuild it as a Qwen chat prompt: the whole ``input`` is the user turn and the
-``answer_prefix`` opens the assistant turn (see ``TemplateHelper``).
+rebuild it as a chat prompt: the whole ``input`` is the user turn and the
+``answer_prefix`` opens the assistant turn (see ``helpers.ModelAdapter`` for the
+arch-aware boundary strings).
 
 :class:`RulerBase` owns the data loading, the chat-prompt building and the
 string-match scoring shared by the three task families; each family lives in
@@ -30,7 +31,7 @@ from core.Config import DatasetDir
 from core.Result import Result
 from core.Task import Case, Task
 
-from ..TemplateHelper import AssistantSuffix, UserContext
+from helpers.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
 
 def _References(refs) -> List[Any]:
@@ -174,8 +175,8 @@ class RulerBase(Task):
         return body, sample.get("answer_prefix", "")
 
     def _FullChat(self, body: str, answerPrefix: str) -> str:
-        """The complete Qwen chat prompt for ``input = body``."""
-        return UserContext(body) + AssistantSuffix("") + answerPrefix
+        """The complete chat prompt for ``input = body`` (arch-aware via ModelAdapter)."""
+        return user_turn_prefix() + body + assistant_turn_suffix() + answerPrefix
 
     def _Needle(self, sample: Dict[str, Any], body: str) -> str:
         """The needle sentence of ``body``.
@@ -210,9 +211,9 @@ class RulerBase(Task):
 
         needle = self._Needle(sample, body)
         pos = body.find(needle)
-        a = UserContext(body[:pos])
+        a = user_turn_prefix() + body[:pos]
         b = needle
-        c = body[pos + len(needle):] + AssistantSuffix("") + answerPrefix
+        c = body[pos + len(needle):] + assistant_turn_suffix() + answerPrefix
         return [a, b, c], a + b + c
 
     # -------------------------------------------------------------- shuffle

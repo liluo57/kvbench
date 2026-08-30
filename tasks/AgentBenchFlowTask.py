@@ -107,10 +107,10 @@ class AgentBenchFlowTask(Task):
             if result_json_timeout is not None
             else float(cfg.get("ResultJsonTimeoutSec", 3600))
         )
-        # CoT toggle for the agent pipeline. ``True`` (default) lets the
-        # model reason: Qwen3 omits the empty pre-closed ``<think></think>``
-        # block, Muse Glimmer sets ``Reasoning strength: high.``. ``False``
-        # suppresses CoT. ``None`` collapses to ``True``.
+        # CoT toggle for the agent pipeline. ``True`` (default) lets the model
+        # reason; ``False`` suppresses CoT. The per-arch kwarg translation
+        # lives in ``helpers.ModelAdapter.render_chat``. ``None`` collapses to
+        # ``True``.
         self.thinking = thinking if thinking is not None else True
         self._resolvedTaskIds = self._ResolveTaskIds(task_ids)
 

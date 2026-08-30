@@ -12,12 +12,8 @@ import pytest
 
 from core.Result import Result
 from core.Task import Case
-from helpers.BenchflowHelper import (
-    ApptainerSandbox,
-    _ParseToolCalls,
-    _RenderChatPrompt,
-    _SetArchForTesting,
-)
+from helpers import ModelAdapter
+from helpers.BenchflowHelper import ApptainerSandbox
 from helpers.SkillInjector import BuildSkillsBlock, ParseSkillFrontmatter
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
 from workload.AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
@@ -91,12 +87,15 @@ def test_case_metadata_has_required_keys(fakeSkillsbench):
     assert isinstance(first.input, AgentBenchFlowInput)
 
 
-def test_sandbox_type_defaults_to_docker(fakeSkillsbench):
-    """Production path: SkillsBench task Dockerfile container."""
+def test_sandbox_type_defaults_to_config(fakeSkillsbench):
+    """No override -> falls back to AgentBenchFlow.SandboxType in config.yaml."""
+    from core.Config import AgentBenchFlowDefaults
+
+    expected = AgentBenchFlowDefaults().get("SandboxType")
     task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench)
-    assert task.sandboxType == "docker"
+    assert task.sandboxType == expected
     case = next(iter(task.Cases()))
-    assert case.input.sandbox_type == "docker"
+    assert case.input.sandbox_type == expected
 
 
 def test_sandbox_type_can_be_overridden_to_local(fakeSkillsbench):
@@ -140,11 +139,22 @@ def test_agent_command_default_is_mini_swe_agent(fakeSkillsbench):
     assert task.agentCommand == "mini-swe-agent"
 
 
-def test_qwen_prompt_exposes_tools_and_preserves_tool_history():
-    # Default behaviour (thinking=True) lets Qwen3 reason — the assistant
-    # header is bare. Pass ``thinking=False`` to verify the legacy
-    # non-thinking-block behaviour.
-    prompt = _RenderChatPrompt([
+def test_qwen_prompt_exposes_tools_and_preserves_tool_history(arch):
+    """Multi-turn trace: tools, prior tool_call, tool_response all rendered."""
+    arch("qwen3")
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Execute a bash command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    }]
+    prompt = ModelAdapter.render_chat([
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "Inspect the files."},
         {
@@ -164,33 +174,12 @@ def test_qwen_prompt_exposes_tools_and_preserves_tool_history():
             "tool_call_id": "call-1",
             "content": "{\"returncode\": 0}",
         },
-    ], thinking=False, force_native=False)
+    ], tools=tools, thinking=False)
     assert "<tools>" in prompt
     assert '"name": "bash"' in prompt
     assert "<tool_call>" in prompt
     assert "<tool_response>" in prompt
     assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
-
-
-def test_qwen_output_becomes_openai_tool_call():
-    content, calls = _ParseToolCalls(
-        '<think>brief</think>\n<tool_call>\n'
-        '{"name":"bash","arguments":{"command":"ls -la"}}\n'
-        "</tool_call>"
-    )
-    assert content == "<think>brief</think>"
-    assert len(calls) == 1
-    assert calls[0]["function"]["name"] == "bash"
-    assert '"command": "ls -la"' in calls[0]["function"]["arguments"]
-
-
-def test_legacy_fenced_command_is_adapted_to_tool_call():
-    _content, calls = _ParseToolCalls(
-        "I will inspect the task.\n```mswea_bash_command\n"
-        "cat /root/task.md\n```"
-    )
-    assert calls[0]["function"]["name"] == "bash"
-    assert "cat /root/task.md" in calls[0]["function"]["arguments"]
 
 
 # ---------------------------------------------------- SkillInjector (frontmatter)
@@ -317,18 +306,19 @@ def test_build_skills_block_handles_quoted_description(tmp_path):
     assert '"A long description with spaces."' not in block
 
 
-# ----------------------------------------------- _RenderChatPrompt with prefix
+# ----------------------------------------------- ModelAdapter.render_chat with prefix
 
 
 def test_render_prompt_with_system_prefix_appends_to_first_system():
+    """``system_prefix`` is folded into the first system message's content."""
     messages = [
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "Inspect the files."},
     ]
     prefix = "# Skills\n\n## foo\ndoes foo\n"
-    prompt = _RenderChatPrompt(messages, system_prefix=prefix, force_native=False)
-    # The prefix appears inside the first system region, before the user's
-    # original system content.
+    prompt = ModelAdapter.render_chat(messages, system_prefix=prefix)
+    # The prefix appears in the rendered prompt, before the user's original
+    # system content (which is folded into the same system turn by the jinja).
     assert prompt.index(prefix.rstrip()) < prompt.index("You are an agent.")
     # The skills block is part of the system block, not a separate region.
     sysIdx = prompt.index("system\n")
@@ -337,27 +327,27 @@ def test_render_prompt_with_system_prefix_appends_to_first_system():
 
 
 def test_render_prompt_without_system_prefix_unchanged():
-    """Existing behaviour when no prefix is passed must be preserved."""
+    """No prefix → the first system message's content renders as-is."""
     messages = [
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "hi"},
     ]
-    prompt = _RenderChatPrompt(messages, force_native=False)
+    prompt = ModelAdapter.render_chat(messages)
     assert "You are an agent." in prompt
     assert "# Skills" not in prompt
 
 
 def test_render_prompt_skills_block_does_not_leak_to_user_turn():
-    """A second ``system`` message falls through to the user branch."""
+    """``system_prefix`` only folds into the first system message — never twice."""
     prefix = "# Skills\n\n## foo\ndoes foo\n"
     messages = [
         {"role": "system", "content": "first system"},
         {"role": "system", "content": "second system"},
     ]
-    prompt = _RenderChatPrompt(messages, system_prefix=prefix, force_native=False)
+    prompt = ModelAdapter.render_chat(messages, system_prefix=prefix)
     # The prefix appears exactly once.
     assert prompt.count(prefix.rstrip()) == 1
-    # The second system message becomes a user-role turn (not a second system).
+    # The second system message's content is preserved (rendered as its own turn).
     assert "second system" in prompt
     assert prompt.index("second system") > prompt.index("first system")
 
@@ -514,13 +504,13 @@ def test_final_result_is_none_before_any_observation():
 
 @pytest.fixture
 def arch():
-    """Force ``_DetectArch`` to return a specific value, restoring after.
+    """Force ``ModelAdapter.arch_family`` to return a specific value.
 
     The setter clears the lru_cache automatically, so each test sees a fresh
     arch without cross-test pollution.
     """
     def set_(value):
-        _SetArchForTesting(value)
+        ModelAdapter.set_arch_for_testing(value)
     set_("qwen3")
     yield set_
     set_(None)
@@ -534,56 +524,73 @@ def _TwoTurnMessages():
 
 
 def test_qwen3_thinking_true_default_emits_no_non_thinking_block(arch):
-    """Default Qwen3 + ``thinking=True`` (also covers ``None``) — let CoT."""
+    """Qwen3 + ``thinking=True`` (or ``None``) — let CoT, header is bare."""
     arch("qwen3")
-    prompt = _RenderChatPrompt(_TwoTurnMessages(), thinking=True, force_native=False)
-    assert prompt.endswith("<|im_start|>assistant\n")
-    assert "<think>" not in prompt
+    prompt_true = ModelAdapter.render_chat(_TwoTurnMessages(), thinking=True)
+    assert prompt_true.endswith("<|im_start|>assistant\n")
+    assert "<think>" not in prompt_true
+    prompt_none = ModelAdapter.render_chat(_TwoTurnMessages(), thinking=None)
+    assert prompt_none.endswith("<|im_start|>assistant\n")
+    assert "<think>" not in prompt_none
 
 
 def test_qwen3_thinking_false_injects_non_thinking_block(arch):
-    """``thinking=False`` on Qwen3 suppresses CoT — legacy behaviour."""
+    """``thinking=False`` on Qwen3 emits the empty pre-closed think block."""
     arch("qwen3")
-    prompt = _RenderChatPrompt(_TwoTurnMessages(), thinking=False, force_native=False)
+    prompt = ModelAdapter.render_chat(_TwoTurnMessages(), thinking=False)
     assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
 
 
-def test_glimmer_thinking_true_uses_high_reasoning(arch):
-    """``thinking=True`` on Glimmer → ``Reasoning strength: high.``.
+def test_glimmer_thinking_true_translates_to_high_reasoning_kwarg(arch):
+    """Glimmer + ``thinking=True`` → ``chat_template_kwargs={"reasoning_strength": "high"}``."""
+    arch("muse_glimmer")
+    assert ModelAdapter._thinking_kwargs(True) == {"reasoning_strength": "high"}
 
-    The renderer itself does not inject the ``Reasoning strength:`` line —
-    that is the BenchflowHelper's job (in ``__init__``), where it appends
-    to the cached skills block. The test simulates that path by passing
-    the line via ``system_prefix``.
+
+def test_glimmer_thinking_false_translates_to_low_reasoning_kwarg(arch):
+    """Glimmer + ``thinking=False`` → ``chat_template_kwargs={"reasoning_strength": "low"}``."""
+    arch("muse_glimmer")
+    assert ModelAdapter._thinking_kwargs(False) == {"reasoning_strength": "low"}
+
+
+def test_glimmer_user_supplied_reasoning_strength_not_duplicated(arch):
+    """A user-supplied ``Reasoning strength:`` line in the system prompt is preserved exactly once.
+
+    The jinja's ``render_reasoning`` macro checks for existing
+    ``reasoning strength`` text in the system content and skips
+    re-emitting — so a user override (passed via ``system_prefix``) wins
+    over the ``reasoning_strength`` kwarg without duplication.
     """
     arch("muse_glimmer")
-    system_prefix = "# Skills\n\nReasoning strength: high.\n"
-    prompt = _RenderChatPrompt(
-        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True, force_native=False)
-    assert "Reasoning strength: high." in prompt
-    assert "Reasoning strength: low." not in prompt
-    assert prompt.endswith("<|start|>assistant<|message|>")
-
-
-def test_glimmer_thinking_false_uses_low_reasoning(arch):
-    """``thinking=False`` on Glimmer → ``Reasoning strength: low.``.
-
-    Same as the True test — simulate the helper's injection via
-    ``system_prefix``.
-    """
-    arch("muse_glimmer")
-    system_prefix = "# Skills\n\nReasoning strength: low.\n"
-    prompt = _RenderChatPrompt(
-        _TwoTurnMessages(), system_prefix=system_prefix, thinking=False, force_native=False)
-    assert "Reasoning strength: low." in prompt
+    system_prefix = "# Skills\n\nReasoning strength: medium.\n"
+    prompt = ModelAdapter.render_chat(
+        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True)
+    assert prompt.count("Reasoning strength: medium.") == 1
     assert "Reasoning strength: high." not in prompt
-    assert prompt.endswith("<|start|>assistant<|message|>")
+    assert "Reasoning strength: low." not in prompt
 
 
-def test_glimmer_assistant_and_tool_turns_use_meta_envelope(arch):
-    """Glimmer uses ``<|start|>role<|message|>`` and plain ``<tool_call>``."""
-    arch("muse_glimmer")
-    prompt = _RenderChatPrompt([
+def test_render_chat_renders_tool_calls_and_tool_response(arch):
+    """Multi-turn trace: tool envelope, tool_call history, tool_response all rendered.
+
+    Tests the Qwen3 jinja's tool rendering (the only tokenizer available in
+    the test environment). Glimmer's Meta envelope differs structurally but
+    the kwarg translation is covered by the dedicated tests above.
+    """
+    arch("qwen3")
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Execute a bash command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    }]
+    prompt = ModelAdapter.render_chat([
         {"role": "system", "content": "You are an agent."},
         {"role": "user", "content": "Inspect the files."},
         {
@@ -603,39 +610,9 @@ def test_glimmer_assistant_and_tool_turns_use_meta_envelope(arch):
             "tool_call_id": "call-1",
             "content": "{\"returncode\": 0}",
         },
-    ], thinking=False, force_native=False)
-    # Assistant envelope uses Meta tokens, not Qwen tokens.
-    assert "<|start|>assistant<|message|>" in prompt
-    assert "<|im_start|>" not in prompt
-    # Tool response wrapped in user-role Meta envelope.
-    assert "<|start|>user<|message|><tool_response>" in prompt
-    assert "</tool_response><|eot|>" in prompt
-    # Tool-call tag is plain ``<tool_call>`` (no ZWSP).
+    ], tools=tools, thinking=False)
+    assert "<tools>" in prompt
+    assert '"name": "bash"' in prompt
     assert "<tool_call>" in prompt
-    # The existing parser regex still picks up the Glimmer-style call.
-    content, calls = _ParseToolCalls(
-        "<tool_call>\n"
-        '{"name":"bash","arguments":{"command":"ls -la"}}\n'
-        "</tool_call>"
-    )
-    assert len(calls) == 1
-    assert calls[0]["function"]["name"] == "bash"
-    assert '"command": "ls -la"' in calls[0]["function"]["arguments"]
-
-
-def test_glimmer_user_supplied_reasoning_strength_overrides_helper(arch):
-    """A user-supplied ``Reasoning strength:`` line is not duplicated.
-
-    The Glimmer renderer itself does not inject the line — the helper does
-    that in ``__init__`` (only when missing). So a user-supplied line
-    survives the renderer unchanged. This test exercises the renderer path
-    by passing the line via ``system_prefix`` (the same slot the helper
-    uses) and verifying the prompt contains it and not a duplicate.
-    """
-    arch("muse_glimmer")
-    system_prefix = "# Skills\n\nReasoning strength: medium.\n"
-    prompt = _RenderChatPrompt(
-        _TwoTurnMessages(), system_prefix=system_prefix, thinking=True, force_native=False)
-    assert prompt.count("Reasoning strength: medium.") == 1
-    assert "Reasoning strength: high." not in prompt
-    assert "Reasoning strength: low." not in prompt
+    assert "<tool_response>" in prompt
+    assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")

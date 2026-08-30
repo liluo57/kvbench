@@ -51,11 +51,10 @@ class AgentBenchFlowInput:
     # ── Agent settings ─────────────────────────────────────────────────────
     agent_command: str = "mini-swe-agent"
     agent_extra_args: Sequence[str] = field(default_factory=tuple)
-    # ── CoT toggle (Qwen3 + Muse Glimmer) ──────────────────────────────────
-    # ``True`` lets the model reason (Qwen3 omits the empty pre-closed
-    # ``<think></think>`` block; Muse Glimmer sets
-    # ``Reasoning strength: high.``). ``False`` suppresses CoT. ``None``
-    # collapses to ``True``.
+    # ── CoT toggle ─────────────────────────────────────────────────────────
+    # ``True`` (default) lets the model reason; ``False`` suppresses CoT.
+    # The per-arch kwarg translation lives in ``helpers.ModelAdapter.render_chat``.
+    # ``None`` collapses to ``True``.
     thinking: Optional[bool] = True
     # ── Network ────────────────────────────────────────────────────────────
     host: str = "0.0.0.0"

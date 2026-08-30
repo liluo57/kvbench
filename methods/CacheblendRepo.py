@@ -28,9 +28,10 @@ The constructor declares a strict GPU count, the relative scheduling weight,
 and the recomputation ratio ``recompRatio`` (0.15 default;
 >0 repairs cross-chunk attention in a chunk-isolated knowledge base), and
 ``fullPrefill`` — when True every query is a plain full prefill (no cache, no
-fusion), serving as the control group against the fused runs. The repo and model
-paths come **only** from ``config.yaml`` (``Cacheblend.Repo.RepoPath``
-/ ``Cacheblend.Repo.ModelPath``); the constructor raises if either is missing.
+fusion), serving as the control group against the fused runs. The repo path
+comes **only** from ``config.yaml`` (``Cacheblend.Repo.RepoPath``); the model
+path comes from the framework-wide top-level ``ModelPath`` (same as every other
+method). The constructor raises if the repo path is missing.
 """
 
 import json
@@ -44,7 +45,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from core.Config import Get
+from core.Config import Get, ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
@@ -94,17 +95,16 @@ class CacheblendRepo(Method):
         self.fullPrefill = fullPrefill
         self.startTimeout = startTimeout
 
-        # Repo + model paths come only from config.yaml; no defaults.
+        # Repo path comes from config.yaml; model path from the framework-wide
+        # ``ModelPath`` (the same source every other method uses).
         repo = (Get("Cacheblend", {}) or {}).get("Repo", {}) or {}
         repoPath = repo.get("RepoPath")
-        modelPath = repo.get("ModelPath")
-        if not repoPath or not modelPath:
+        if not repoPath:
             raise RuntimeError(
-                "CacheblendRepo: Cacheblend.Repo.RepoPath / Cacheblend.Repo."
-                "ModelPath are missing in config.yaml"
+                "CacheblendRepo: Cacheblend.Repo.RepoPath is missing in config.yaml"
             )
         self.repoRoot = Path(str(repoPath)).expanduser()
-        self.modelPath = str(modelPath)
+        self.modelPath = DefaultModelPath()
         self.workerPython = self.repoRoot / ".venv" / "bin" / "python"
         if not self.workerPython.exists():
             raise FileNotFoundError(
