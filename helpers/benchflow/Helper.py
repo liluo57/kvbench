@@ -19,11 +19,11 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from helpers.SkillInjector import BuildSkillsBlock
+from helpers.benchflow.SkillInjector import BuildSkillsBlock
 
-from .http_handler import HelperHTTPHandler
-from .sandbox import ApptainerSandbox, DockerSandbox, LocalSandbox, Sandbox
-from .util import FindFreePort
+from .HttpHandler import HelperHTTPHandler
+from .Sandbox import ApptainerSandbox, DockerSandbox, LocalSandbox, Sandbox
+from .Util import FindFreePort
 
 
 class BenchflowHelper:

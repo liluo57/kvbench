@@ -49,7 +49,7 @@ from core.Config import Get, ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
-from helpers.Prompt import ComposeInterleavedReuse
+from helpers.backends.Prompt import ComposeInterleavedReuse
 
 #: Worker readiness marker printed on the helper's stdout at startup.
 _ReadyLine = "[cacheblend-helper] ready"

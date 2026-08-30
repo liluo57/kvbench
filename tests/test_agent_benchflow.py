@@ -12,9 +12,9 @@ import pytest
 
 from core.Result import Result
 from core.Task import Case
-from helpers import ModelAdapter
+from helpers.backends import ModelAdapter
 from helpers.benchflow import ApptainerSandbox
-from helpers.SkillInjector import BuildSkillsBlock, ParseSkillFrontmatter
+from helpers.benchflow.SkillInjector import BuildSkillsBlock, ParseSkillFrontmatter
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
 from workload.AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
 

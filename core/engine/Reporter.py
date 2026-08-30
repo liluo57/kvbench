@@ -145,11 +145,11 @@ class Reporter:
                 ),
                 "total": len(self.ctx.pairStatus),
             },
-            "gpu_pool": self.engine._gpuPool,
+            "gpu_pool": self.ctx.gpuPool,
             "free_gpus": self.ctx.freeGpus,
             "cooling_gpus": sorted(self.ctx.coolingGpus),
             "gpu_snapshot": [
-                gpu.AsDict() for gpu in self.engine._gpuSnapshot
+                gpu.AsDict() for gpu in self.ctx.gpuSnapshot
             ],
             "gpu_snapshot_at": self.ctx.gpuSnapshotAt,
             "gpu_snapshot_error": self.ctx.gpuSnapshotError,

@@ -5,7 +5,7 @@ import pytest
 from core.Config import ModelPath as _ModelPath
 from core.Result import Result
 from core.Workload import ActionKind, ActionResult
-from helpers import ModelAdapter
+from helpers.backends import ModelAdapter
 from tasks.bases.KBBase import (
     NormalizeAnswer,
     ParseGeneration,
@@ -117,7 +117,10 @@ def test_multiagent_plain_prompts_without_shared_prepare():
 def test_multiagent_observe_requires_one_result():
     workload = MultiAgentFullConnectionWorkload(
         1,
-        MultiAgentFullConnectionInput("task", [AgentSpec("A", "{task}")]),
+        MultiAgentFullConnectionInput(
+            "task", [AgentSpec("A", "{task}")],
+            modelPath=_ModelPath(),
+        ),
     )
     workload.next()
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
+from time import time_ns
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
 
@@ -336,8 +337,6 @@ def parse_tool_calls(
     # (vllm.entrypoints.openai.engine.protocol.ToolCall extends
     # ``OpenAIBaseModel``). They carry a stray ``id=None`` that breaks strict
     # OpenAI clients, so reshape to plain dicts.
-    from time import time_ns
-
     clean_calls: List[Dict[str, Any]] = []
     for i, tc in enumerate(raw_calls):
         function = tc.function

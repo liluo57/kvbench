@@ -1,8 +1,9 @@
 """Single-round sequential complete-DAG multi-agent workload."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
+from core.Config import ModelPath
 from core.Result import Result
 from core.Workload import Action, ActionKind, ActionResult, Workload
 
@@ -21,6 +22,12 @@ class MultiAgentFullConnectionInput:
     decisionAgent: Optional[AgentSpec] = None
     prepareSharedTask: bool = True
     chatTemplate: bool = True
+    #: Path to the model whose chat template wraps each agent's prompt.
+    #: Used only when ``chatTemplate=True``; :func:`render_chat` loads the
+    #: tokenizer from this path. Defaults to the framework-wide
+    #: ``ModelPath()`` so existing callers (the four KVComm tasks) keep
+    #: working without having to thread the path through their constructors.
+    modelPath: str = field(default_factory=ModelPath)
 
 
 class MultiAgentFullConnectionWorkload(Workload):
@@ -48,14 +55,21 @@ class MultiAgentFullConnectionWorkload(Workload):
             return userPrompt
 
         # The agent always sees real system/user turns (and stops at the
-        # model's chat-template close token); helpers.ModelAdapter.render_chat
-        # owns the per-arch kwargs (``enable_thinking``, etc.) and the boundary
-        # strings. The configured model is whatever ``config.yaml`` points at.
+        # model's chat-template close token); helpers.backends.ModelAdapter
+        # .render_chat owns the per-arch kwargs (``enable_thinking``, etc.)
+        # and the boundary strings, so the same workload renders correctly
+        # for Qwen3 / Muse Glimmer / Mistral / any future arch. ``thinking``
+        # is forced off: the multi-agent decision flow does not benefit
+        # from a per-agent <think> trace and KV-reuse tasks would otherwise
+        # eat the budget on reasoning.
+        from helpers.backends.ModelAdapter import render_chat
+
         systemPrompt = spec.systemPrompt or f"You are the {spec.role}."
-        return (
-            f"<|im_start|>system\n{systemPrompt}<|im_end|>\n"
-            f"<|im_start|>user\n{userPrompt}<|im_end|>\n"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        return render_chat(
+            [{"role": "user", "content": userPrompt}],
+            modelPath=self._data.modelPath,
+            system_prefix=systemPrompt,
+            thinking=False,
         )
 
     def next(self) -> Optional[List[Action]]:

@@ -28,14 +28,14 @@ The Helper's ``sandbox_type`` selects the isolation strategy:
   isolation — only for dev / smoke tests.
 """
 
-from .helper import BenchflowHelper
-from .sandbox import (
+from .Helper import BenchflowHelper
+from .Sandbox import (
     ApptainerSandbox,
     DockerSandbox,
     LocalSandbox,
     Sandbox,
 )
-from .util import FindFreePort, ResolveHostSitePackages
+from .Util import FindFreePort, ResolveHostSitePackages
 
 
 __all__ = [

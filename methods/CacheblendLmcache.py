@@ -62,8 +62,8 @@ from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 
-from helpers.Prompt import ComposeReuse
-from helpers.VllmCacheblendPatches import (
+from helpers.backends.Prompt import ComposeReuse
+from helpers.backends.VllmCacheblendPatches import (
     ApplyPatches,
     BuildContextTokens,
     CreateBlendLlm,
