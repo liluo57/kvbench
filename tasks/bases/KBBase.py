@@ -189,17 +189,17 @@ class KBBase(Task):
 
     # ---------------------------------------------------------------- cases
     def Cases(self) -> Iterator[Case]:
+        from helpers.backends.ModelAdapter import render_user_prompt
         modelPath = ModelPath()
         for i, s in enumerate(self._LoadSamples()):
             chunks, suffix = self._Build(s)
             if not chunks or not suffix:
                 continue
-            # The whole prompt is one user turn + assistant header (chat format):
-            # the user-turn opener goes at the start of the cached context and
-            # the assistant opener is fused with the fresh query.
-            chunks = [user_turn_prefix(modelPath) + chunks[0]] + chunks[1:]
-            suffix = assistant_turn_suffix(modelPath) + suffix
-            fullPrompt = "".join(chunks) + suffix
+
+            fullPrompt = render_user_prompt(
+                "".join(chunks) + suffix,
+                modelPath=modelPath, thinking=False,
+            )
             yield Case(
                 input=RAGInput(prepare_input=chunks, run_input=fullPrompt),
                 workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=chunks, run_input=fullPrompt)),

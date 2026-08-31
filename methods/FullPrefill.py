@@ -155,6 +155,11 @@ class FullPrefillVllm(_FullPrefillBase):
         maxModelLen: int = 40960,
         enforceEager: bool = False,
         chatTemplate: Optional[str] = None,
+        # Pass ``True`` for multimodal checkpoints that ship a vision tower
+        # (Qwen3.5 / Qwen3.8 etc., arch = ``*ForConditionalGeneration``) when
+        # only the language model will be exercised. Saves the vision encoder
+        # weights + mm_profiler scratch on each rank.
+        languageModelOnly: bool = False,
         tag: Optional[str] = None,
     ):
         super().__init__(
@@ -170,6 +175,7 @@ class FullPrefillVllm(_FullPrefillBase):
         self.enforceEager = enforceEager
         # None -> CreateLlm auto-detects ``<model>/chat_template.jinja``.
         self.chatTemplate = chatTemplate
+        self.languageModelOnly = languageModelOnly
         self.llm = None
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
@@ -182,6 +188,7 @@ class FullPrefillVllm(_FullPrefillBase):
             tensorParallelSize=self.gpuNums,
             enforceEager=self.enforceEager,
             chatTemplate=self.chatTemplate,
+            languageModelOnly=self.languageModelOnly,
         )
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:

@@ -314,8 +314,18 @@ class BenchflowHelper:
                 taskText = body.lstrip("\n")
         skillsDir = taskMd.parent / "environment" / "skills"
         if not skillsDir.is_dir():
-            return taskText
-        return "\n\n## Task\n" + taskText.rstrip()
+            return (
+                "The task inputs are pre-generated and available exactly at "
+                "/app/data/. Do not inspect the Azure deployment template or "
+                "the verifier/oracle; solve the requested task directly.\n\n"
+                + taskText
+            )
+        return (
+            "The task inputs are pre-generated and available exactly at "
+            "/app/data/. Do not inspect the Azure deployment template or the "
+            "verifier/oracle; solve the requested task directly.\n\n## Task\n"
+            + taskText.rstrip()
+        )
 
     # --------------------------------------------------- internals: watchdog
     def _StartWatchdog(self) -> None:

@@ -112,6 +112,7 @@ def CreateLlm(
     dtype: str = "bfloat16",
     enforceEager: bool = False,
     chatTemplate: Optional[str] = None,
+    languageModelOnly: bool = False,
 ):
     """Build the system vLLM ``LLM`` for ``modelPath`` on ``gpuIds``.
 
@@ -148,6 +149,11 @@ def CreateLlm(
         max_model_len=maxModelLen,
         tensor_parallel_size=tensorParallelSize,
         enforce_eager=enforceEager,
+        # Skip the vision encoder for multimodal checkpoints (Qwen3.5 /
+        # Qwen3.8 ship as ``*ForConditionalGeneration`` and vLLM would
+        # otherwise load the vision tower just to ignore it). vLLM 0.28+
+        # honours this kwarg via EngineArgs; see vllm/config/model.py.
+        language_model_only=languageModelOnly,
     )
     if chatTemplate is not None:
         llm_kwargs["chat_template"] = chatTemplate

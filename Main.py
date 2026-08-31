@@ -43,29 +43,15 @@ MAX_NEW_TOKENS=64
 
 def Main() -> None:
     tasks = [
-        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        VTShuffleTask(maxSamples=MAX_SAMPLES),
-        MusiqueTask(maxSamples=MAX_SAMPLES),
-        SamsumTask(maxSamples=MAX_SAMPLES),
-        WikimQATask(maxSamples=MAX_SAMPLES),
-        FreshGapTask(nCases=MAX_SAMPLES),
-        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
-        # AgentBenchFlowTask(
-        #     image_override="docker://python:3.13-slim",
-        #     task_ids=[
-        #         "azure-bgp-oscillation-route-leak",
-        #         "adaptive-cruise-control",
-        #         "citation-check",
-        #         "bike-rebalance",
-        #     ],
-        #     # thinking=True (default): let the model CoT. Flip to False to
-        #     # suppress. The per-arch kwarg translation lives in
-        #     # helpers.ModelAdapter.render_chat.
-        # ),
+        AgentBenchFlowTask(
+            image_override="docker://python:3.13-slim",
+            task_ids=["azure-bgp-oscillation-route-leak"],
+            thinking=False,
+            agent_extra_args=[
+                "--config", "/host_lib/minisweagent/config/mini.yaml",
+                "--config", "agent.step_limit=10",
+            ],
+        ),
     ]
 
     methods = [
@@ -74,15 +60,17 @@ def Main() -> None:
         # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
         # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
         FullPrefillVllm(
-            gpuNums=1, perfWeight=2, maxNewTokens=512,
-            gpuMemoryUtilization=0.88,
+            gpuNums=2, perfWeight=2, maxNewTokens=4096,
+            gpuMemoryUtilization=0.85,
             maxModelLen=32768,
+            enforceEager=True,
+            languageModelOnly=True,
         ),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
 
-    batchSize = 4
+    batchSize = 1
 
     print(
         f"[main] model={ModelPath()}\n"
@@ -93,7 +81,7 @@ def Main() -> None:
     sys.stdout.flush()
 
     engine = Engine(
-        availableGpuIds='auto',
+        availableGpuIds=[1, 3],
         batchSize=batchSize,
         initializeTimeout=1800,
         taskTimeout=3600,

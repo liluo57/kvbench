@@ -79,6 +79,23 @@ class HelperHTTPHandler(BaseHTTPRequestHandler):
             self._WriteJSON(500, {"error": f"generation failed: {exc}"})
             return
 
+        # Persist the raw vLLM output before parsing — this is what mini-
+        # swe-agent actually receives, and is the only way to see why the
+        # agent repeated-format-errored on a previous run. No-op if the
+        # output dir is read-only / non-existent.
+        try:
+            debug_path = helper.outputDir / "debug_llm_io.jsonl"
+            with open(debug_path, "a", encoding="utf-8") as f:
+                rec = {
+                    "phase": "response_raw",
+                    "endpoint": "BenchflowHelper",
+                    "output_text": output,
+                    "output_len": len(output) if isinstance(output, str) else -1,
+                }
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
         try:
             content, reasoning, toolCalls = parse_tool_calls(output, payload, modelPath=helper.modelPath)
         except Exception as exc:

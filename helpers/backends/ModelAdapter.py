@@ -41,6 +41,26 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 #: a new model means appending to one of these tuples.
 _Qwen3Archs: Tuple[str, ...] = ("Qwen3ForCausalLM",)
 
+#: Qwen3.5 / Qwen3.8 and later — distinct lineage from Qwen3:
+#: - hybrid linear+full attention (Mamba-style SSM layers interleaved with
+#:   full-attention layers — no per-token KV cache for the linear layers).
+#: - ships as multimodal ``*ForConditionalGeneration`` (text-only selected
+#:   at load time via vLLM's ``language_model_only=True``).
+#: - chat template defaults to opening ``<think>\n`` and emits a system-level
+#:   "Reasoning effort is set to xhigh" preamble unless the template is given
+#:   ``enable_thinking=False`` (the same kwarg Qwen3 reads).
+#: We treat this as its own family rather than folding it into ``qwen3``
+#: because: (1) the architecture is materially different (linear attention
+#: changes KV-cache layout), and (2) the default-rendered prompt format
+#: diverges enough that concat-style chunk prompts (RAG/KBBase's legacy path)
+#: hit different failure modes than Qwen3.
+_Qwen3_5Archs: Tuple[str, ...] = (
+    "Qwen3_5ForCausalLM",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForCausalLM",
+    "Qwen3_5MoeForConditionalGeneration",
+)
+
 #: Architectures that use the Meta-style ``<|start|>/<|message|>/<|eot|>`` chat
 #: format. vLLM maps ``MuseGlimmerForConditionalGeneration`` to the
 #: ``MuseGlimmerForCausalLM`` class (text-only), so both names appear.
@@ -54,7 +74,7 @@ _MuseGlimmerArchs: Tuple[str, ...] = (
 _ArchOverrideForTesting: Optional[str] = None
 
 
-def _read_arch_from_config_json(modelPath: str) -> Optional[Literal["qwen3", "muse_glimmer"]]:
+def _read_arch_from_config_json(modelPath: str) -> Optional[Literal["qwen3", "qwen3_5", "muse_glimmer"]]:
     """Read ``<modelPath>/config.json`` and map ``architectures`` to a family name.
 
     Returns ``None`` when the file is missing or malformed, when the modelPath
@@ -72,11 +92,13 @@ def _read_arch_from_config_json(modelPath: str) -> Optional[Literal["qwen3", "mu
         return "muse_glimmer"
     if any(a in _Qwen3Archs for a in archs):
         return "qwen3"
+    if any(a in _Qwen3_5Archs for a in archs):
+        return "qwen3_5"
     return None
 
 
 @lru_cache(maxsize=8)
-def arch_family(modelPath: str = "") -> Literal["qwen3", "muse_glimmer", "other"]:
+def arch_family(modelPath: str = "") -> Literal["qwen3", "qwen3_5", "muse_glimmer", "other"]:
     """Return the chat-format arch for the configured model.
 
     Reads ``<modelPath>/config.json`` and inspects the ``architectures`` list.
@@ -129,7 +151,17 @@ def _thinking_kwargs(thinking: Optional[bool], modelPath: str) -> Dict[str, Any]
     arch = arch_family(modelPath)
     if thinking is None:
         return {}
-    if arch == "qwen3":
+    if arch in ("qwen3", "qwen3_5"):
+        # Both Qwen3 and Qwen3.5 chat templates read the same
+        # ``enable_thinking`` kwarg. Qwen3.5 ships an additional
+        # ``reasoning_effort`` (``xhigh``/``medium``/``low``) that defaults
+        # to ``xhigh`` and prepends a "Reasoning effort is set to xhigh"
+        # system-prompt preamble unless explicitly passed.
+        if arch == "qwen3_5":
+            return {
+                "enable_thinking": bool(thinking),
+                "reasoning_effort": "low" if not thinking else "xhigh",
+            }
         return {"enable_thinking": bool(thinking)}
     if arch == "muse_glimmer":
         return {"reasoning_strength": "high" if thinking else "low"}
@@ -230,6 +262,37 @@ def render_chat(
     )
 
 
+def render_user_prompt(
+    userContent: str,
+    *,
+    modelPath: str,
+    thinking: Optional[bool] = False,
+) -> str:
+    """Render a single ``user`` message as a complete, model-ready prompt.
+
+    The chat-template renderer (see :func:`render_chat`) is the only thing
+    that knows about the per-arch turn boundaries — Qwen3 / Qwen3.5 ChatML
+    vs. Glimmer ATEM vs. Mistral [INST]. Tasks that build a single user
+    message out of arbitrarily-many document chunks + a query suffix
+    (KBBase / QABase / SumBase) should funnel through here rather than
+    concatenating chunks + ``assistant_turn_suffix`` themselves: the chunk
+    concat puts the user-opener marker in the middle of the prompt and
+    Qwen3.5's chat template then lands trailing text outside the turn
+    boundary, which makes the model predict EOS (verified: empty output
+    on Qwen3.8-27B KB tasks with the concat path, correct answers via
+    this function).
+
+    ``thinking=False`` is the default — KB / RAG / summarisation tasks
+    have short ``max_new_tokens`` and a CoT preamble would burn the budget
+    before the answer. Multi-agent paths that want CoT pass ``thinking=True``.
+    """
+    return render_chat(
+        [{"role": "user", "content": userContent}],
+        modelPath=modelPath,
+        thinking=thinking,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Chat-prompt boundary primitives — for tasks that split a prompt into chunks.
 # ---------------------------------------------------------------------------
@@ -263,9 +326,15 @@ def assistant_turn_suffix(modelPath: str) -> str:
 
     Pairs with :func:`user_turn_prefix` for tasks that compose prompts by
     string concatenation rather than full-template rendering (RULER's
-    shuffled variants, KBBase's prepare chunks, FreshGap). For Qwen3 this
-    is ``\\nassistant\\n``; for Glimmer it is
+    shuffled variants, FreshGap). For Qwen3 / Qwen3.5 this is the raw
+    template-rendered suffix (Qwen3's default emits nothing extra; Qwen3.5
+    emits ``<think>\\n`` — the model's own CoT toggle). For Glimmer it is
     ``<|eot|>\\n<|start|>assistant<|message|>``.
+
+    KB tasks do *not* use this — they route through :func:`render_user_prompt`
+    because Qwen3.5's open-think-default prompts land outside the turn
+    boundary when chunk-concatenated, and the model predicts EOS on the
+    trailing text. The fix is the prompt structure, not this boundary.
     """
     rendered = render_chat([{"role": "user", "content": ""}], modelPath=modelPath)
     for closer in ("", "<|eot|>"):
@@ -290,6 +359,11 @@ _ARCH_PARSERS: Dict[str, Tuple[Optional[str], Optional[str]]] = {
     # arch               tool_parser       reasoning_parser
     "muse_glimmer":      ("muse_glimmer",   "muse_glimmer"),
     "qwen3":             ("qwen3_xml",      "qwen3"),
+    # Qwen3.5 / Qwen3.8 keep the same ``<tool_call><function=...>`` XML
+    # framing as Qwen3 (see its ``chat_template.jinja``) so the vLLM-shipped
+    # ``qwen3_xml`` parser handles both, and ``qwen3`` strips the
+    # ``<think>...</think>`` reasoning block the same way.
+    "qwen3_5":           ("qwen3_xml",      "qwen3"),
     # Anything not listed raises in parse_tool_calls.
 }
 

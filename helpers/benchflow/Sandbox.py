@@ -456,6 +456,19 @@ class ApptainerSandbox(Sandbox):
         self._hostPythonRoot = Path(sys.executable).resolve().parent.parent
         self._StageHostTools(self._hostTools)
         self._StageEnvironmentInputs(task_dir)
+        # Dockerfile COPY/RUN steps are not applied when we use a rootless
+        # base-image SIF.  Keep the conventional paths writable/persistent so
+        # generated task inputs and agent outputs are visible to both phases.
+        (self._agentWorkspace / "data").mkdir(parents=True, exist_ok=True)
+        (self._agentWorkspace / "output").mkdir(parents=True, exist_ok=True)
+        envBin = self._agentWorkspace / ".local" / "bin"
+        envBin.mkdir(parents=True, exist_ok=True)
+        envFile = envBin / "env"
+        if not envFile.exists():
+            envFile.write_text(
+                '#!/bin/sh\nexport PATH="/host_tools:$PATH"\n',
+                encoding="utf-8",
+            )
 
         # Resolve the image URI: override wins; else first FROM line.
         if self.imageOverride:
@@ -509,6 +522,16 @@ class ApptainerSandbox(Sandbox):
             task_id=task_id,
             extra_binds=self._AgentBinds(helper),
         )
+        # Reproduce the environment image's data-generation RUN step.  The
+        # generator uses the Dockerfile's absolute paths, which are provided
+        # by the binds below; failures are logged but must not prevent the
+        # agent from starting (some tasks ship static inputs only).
+        generate = self._agentWorkspace / "generate_data.py"
+        if generate.is_file():
+            prepCmd = [self.apptainerPath, "exec", *apArgs, str(self._sifPath),
+                       "python3", "/root/generate_data.py"]
+            subprocess.run(prepCmd, env={**os.environ, **env}, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         fullCmd = [self.apptainerPath, "exec", *apArgs, str(self._sifPath), *cmd]
         with open(log_path, "w", encoding="utf-8") as logFile:
             proc = subprocess.run(
@@ -608,12 +631,21 @@ class ApptainerSandbox(Sandbox):
         assert self._agentWorkspace is not None and self._hostTools is not None
         # /logs is what the agent + verifier write reward.txt under; we
         # point it at the agent workspace so a stray write survives.
-        return [
+        binds = [
             f"{self._agentWorkspace.resolve()}:/root",
             f"{self._agentWorkspace.resolve()}:/logs",
+            f"{(self._agentWorkspace / 'data').resolve()}:/app/data",
+            f"{(self._agentWorkspace / 'output').resolve()}:/app/output",
+            f"{(helper.skillsbenchDir / 'tasks' / helper.taskId / 'environment' / 'data').resolve()}:/app/environment/data:ro",
+            f"{(helper.skillsbenchDir / 'tasks' / helper.taskId / 'environment' / 'generate_data.py').resolve()}:/app/environment/generate_data.py:ro",
             f"{self._hostTools.resolve()}:/host_tools",
             f"{helper.skillsbenchDir.resolve()}/tasks/{helper.taskId}:/root/tasks_dir:ro",
         ]
+        # ``/host_lib`` carries the host's site-packages (for the
+        # ``mini-swe-agent`` import that lives only on the host).
+        if self._hostSitePackages is not None:
+            binds.append(f"{self._hostSitePackages.resolve()}:/host_lib")
+        return binds
 
     def _VerifierBinds(
         self, helper: "BenchflowHelper", verifier_test_sh: Path
@@ -622,12 +654,16 @@ class ApptainerSandbox(Sandbox):
         assert self._verifierWorkspace is not None and self._hostTools is not None
         # The verifier expects ``/logs/verifier/reward.txt``; capture it
         # to ``verifierWorkspace`` so we can read it back from the host.
-        return [
+        binds = [
             f"{self._verifierWorkspace.resolve()}:/logs",
             f"{self._agentWorkspace.resolve() if self._agentWorkspace else self._verifierWorkspace}:/root:ro",
+            f"{(self._agentWorkspace / 'output').resolve() if self._agentWorkspace else self._verifierWorkspace}:/app/output:ro",
             f"{verifier_test_sh.parent.resolve()}:/verifier:ro",
             f"{self._hostTools.resolve()}:/host_tools",
         ]
+        if self._hostSitePackages is not None:
+            binds.append(f"{self._hostSitePackages.resolve()}:/host_lib")
+        return binds
 
     def _ComposeApptainerArgs(
         self, *, task_id: str, extra_binds: List[str]
@@ -640,9 +676,28 @@ class ApptainerSandbox(Sandbox):
             apArgs.extend(["--bind", bind])
         if self.writableTmpfs:
             apArgs.append("--writable-tmpfs")
+        # Prepend ``/host_tools`` to PATH so the staged ``mini-swe-agent``
+        # launcher (no extension, see :meth:`_StageHostTools`) is found when
+        # the agent subprocess invokes ``mini-swe-agent`` by name. The
+        # container image (python:3.13-slim by default) doesn't ship
+        # ``mini-swe-agent`` itself — only the launcher we stage into
+        # ``/host_tools`` resolves it.
+        apArgs.extend(["--env", "PATH=/host_tools:/usr/local/bin:/usr/bin:/bin"])
         # PYTHONPATH for the host's site-packages (mini-swe-agent imports).
+        # Bind-mount the host's site-packages directly into the container at
+        # ``/host_lib``. Earlier revisions symlinked ``_lib`` under
+        # ``/host_tools``, but apptainer preserves the symlink target path
+        # verbatim — pointing at a host filesystem path that doesn't exist
+        # inside the sandbox — so Python in the container still couldn't
+        # find ``minisweagent``. A direct bind-mount makes
+        # ``/host_lib``/``minisweagent`` resolvable.
         if self._hostSitePackages is not None:
-            apArgs.extend(["--env", f"PYTHONPATH=/host_lib"])
+            apArgs.extend(["--env", "PYTHONPATH=/host_lib"])
+            apArgs.extend(["--bind", f"{self._hostSitePackages.resolve()}:/host_lib"])
+        # The upstream verifier installs uv/pytest through /root, which is a
+        # read-only agent handoff mount.  Keep caches in the writable tmpfs and
+        # make the pre-staged env script discoverable.
+        apArgs.extend(["--env", "HOME=/root", "--env", "UV_CACHE_DIR=/tmp/uv-cache"])
         # Honor the user's environment if it asks for unshare.
         if os.environ.get("KVBENCH_APT_USE_UNSHARE", "0") == "1":
             return ["unshare", "-U", "-r", "--map-root-user", *apArgs]
@@ -681,7 +736,7 @@ class ApptainerSandbox(Sandbox):
             f"No FROM line found in {dockerfile}; cannot resolve base image"
         )
 
-    def _StageHostTools(hostToolsDir: Path) -> None:
+    def _StageHostTools(self, hostToolsDir: Path) -> None:
         """Stage host binaries the agent needs.
 
         The container's base image is expected to ship a ``python3`` (use
@@ -696,25 +751,25 @@ class ApptainerSandbox(Sandbox):
         the container's base image).
         """
         msaScript = shutil.which("mini-swe-agent")
-        if not msaScript:
-            return
-        baseName = os.path.basename(msaScript)
+        baseName = os.path.basename(msaScript) if msaScript else ""
 
         # Stage the script under a non-conflicting name so the launcher
         # (which gets the canonical ``baseName``) can call it via
         # ``python3``.
-        stagedScript = hostToolsDir / f"{baseName}.py"
-        try:
-            stagedScript.write_text(
-                Path(msaScript).read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
-        except OSError:
-            return
-        try:
-            stagedScript.chmod(0o755)
-        except OSError:
-            pass
+        if msaScript:
+            stagedScript = hostToolsDir / f"{baseName}.py"
+            try:
+                stagedScript.write_text(
+                    Path(msaScript).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            except OSError:
+                msaScript = None
+            if msaScript:
+                try:
+                    stagedScript.chmod(0o755)
+                except OSError:
+                    pass
 
         # Stage the host's site-packages dir at ``_lib`` so Python inside
         # the container can import minisweagent + its deps. Symlink, not
@@ -733,14 +788,32 @@ class ApptainerSandbox(Sandbox):
         # container so ``mini-swe-agent`` resolves to the launcher, which
         # invokes ``python3`` on the staged script. PYTHONPATH points at
         # /host_lib (bound directly from the host's site-packages dir).
-        launcher = hostToolsDir / baseName
-        inContainerScript = f"/host_tools/{baseName}.py"
-        launcher.write_text(
-            f"#!/bin/sh\nexec env PYTHONPATH=/host_lib /host_conda/bin/python "
-            f"{inContainerScript} \"$@\"\n",
-            encoding="utf-8",
-        )
-        try:
-            launcher.chmod(0o755)
-        except OSError:
-            pass
+        # Use ``python3`` (PATH-resolved) instead of ``/host_conda/bin/python``
+        # — the container image (python:3.13-slim by default) doesn't ship
+        # ``/host_conda``, so the hard-coded path fails.
+        if msaScript:
+            launcher = hostToolsDir / baseName
+            inContainerScript = f"/host_tools/{baseName}.py"
+            launcher.write_text(
+                f"#!/bin/sh\nexec env PYTHONPATH=/host_lib python3 "
+                f"{inContainerScript} \"$@\"\n",
+                encoding="utf-8",
+            )
+            try:
+                launcher.chmod(0o755)
+            except OSError:
+                pass
+
+        # Rootless task verifiers commonly bootstrap with curl + uvx.  Those
+        # tools are not present in python:*-slim, so stage host copies when
+        # available; this avoids privileged apt/pip operations in the SIF.
+        for toolName in ("curl", "uv", "uvx"):
+            source = shutil.which(toolName)
+            if not source:
+                continue
+            target = hostToolsDir / toolName
+            try:
+                shutil.copy2(Path(source).resolve(), target)
+                target.chmod(0o755)
+            except OSError:
+                pass
