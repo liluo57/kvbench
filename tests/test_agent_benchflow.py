@@ -1,631 +1,411 @@
-"""Locks the new AgentBenchFlow pieces — Task discovery, Evaluate, Workload
-final_result contract — without spawning a ``bench eval run`` subprocess.
+"""Boundary tests for the KVBench endpoint and real BenchFlow bridge."""
 
-End-to-end behaviour (HTTP server + Docker sandbox) is intentionally out of
-scope here: the helper has its own watchdog lifecycle and is best exercised
-in a real sandbox. These tests pin down the kvbench-facing surface.
-"""
-
+import json
+from concurrent.futures import Future
+import threading
+from http.client import HTTPConnection
 from pathlib import Path
 
 import pytest
 
 from core.Result import Result
-from core.Task import Case
+from core.Workload import ActionResult
 from helpers.backends import ModelAdapter
-from helpers.benchflow import ApptainerSandbox
-from helpers.benchflow.SkillInjector import BuildSkillsBlock, ParseSkillFrontmatter
+from helpers.benchflow import BenchflowRunner
+from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
 from workload.AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
 
 
 @pytest.fixture
 def fakeSkillsbench(tmp_path):
-    """A minimal SkillsBench repo layout: ``tasks/<id>/task.md`` per task."""
-    for tid in ("alpha", "beta", "gamma"):
-        (tmp_path / "tasks" / tid).mkdir(parents=True)
-        (tmp_path / "tasks" / tid / "task.md").write_text(f"# {tid}\n")
+    for taskId in ("alpha", "beta", "citation-check"):
+        taskDir = tmp_path / "tasks" / taskId
+        taskDir.mkdir(parents=True)
+        (taskDir / "task.md").write_text(f"# {taskId}\n", encoding="utf-8")
     return tmp_path
 
 
-# --------------------------------------------------------------- Task.Cases
+@pytest.fixture
+def endpoint(monkeypatch, tmp_path):
+    renderCalls = []
 
-
-def test_cases_default_scan(fakeSkillsbench):
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench)
-    ids = [c.metadata["task_id"] for c in task.Cases()]
-    assert ids == ["alpha", "beta", "gamma"]
-
-
-def test_cases_explicit_task_ids(fakeSkillsbench):
-    task = AgentBenchFlowTask(
-        skillsbench_dir=fakeSkillsbench, task_ids=["gamma", "alpha"]
-    )
-    ids = [c.metadata["task_id"] for c in task.Cases()]
-    assert ids == ["gamma", "alpha"]
-
-
-def test_cases_exclude_task_ids(fakeSkillsbench):
-    task = AgentBenchFlowTask(
-        skillsbench_dir=fakeSkillsbench, exclude_task_ids=["beta"]
-    )
-    ids = [c.metadata["task_id"] for c in task.Cases()]
-    assert ids == ["alpha", "gamma"]
-
-
-def test_cases_max_samples_caps(fakeSkillsbench):
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench, max_samples=2)
-    ids = [c.metadata["task_id"] for c in task.Cases()]
-    assert ids == ["alpha", "beta"]
-
-
-def test_cases_empty_task_ids_raises(fakeSkillsbench):
-    with pytest.raises(ValueError, match="typo"):
-        AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench, task_ids=[])
-
-
-def test_cases_missing_tasks_dir_raises(tmp_path):
-    with pytest.raises(FileNotFoundError, match="no tasks/ directory"):
-        AgentBenchFlowTask(skillsbench_dir=tmp_path)
-
-
-def test_cases_filtered_to_empty_raises(fakeSkillsbench):
-    with pytest.raises(ValueError, match="no SkillsBench tasks to run"):
-        AgentBenchFlowTask(
-            skillsbench_dir=fakeSkillsbench,
-            task_ids=["alpha"],
-            exclude_task_ids=["alpha"],
+    def render(messages, *, modelPath, tools=None, thinking=None):
+        renderCalls.append(
+            {
+                "messages": messages,
+                "modelPath": modelPath,
+                "tools": tools,
+                "thinking": thinking,
+            }
         )
+        return "rendered prompt"
 
-
-def test_case_metadata_has_required_keys(fakeSkillsbench):
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench)
-    first = next(iter(task.Cases()))
-    assert first.metadata["task_id"] == "alpha"
-    assert first.metadata["case_id"] == 0
-    assert first.metadata["skillsbench_dir"] == str(fakeSkillsbench)
-    assert isinstance(first.input, AgentBenchFlowInput)
-
-
-def test_sandbox_type_defaults_to_config(fakeSkillsbench):
-    """No override -> falls back to AgentBenchFlow.SandboxType in config.yaml."""
-    from core.Config import AgentBenchFlowDefaults
-
-    expected = AgentBenchFlowDefaults().get("SandboxType")
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench)
-    assert task.sandboxType == expected
-    case = next(iter(task.Cases()))
-    assert case.input.sandbox_type == expected
-
-
-def test_sandbox_type_can_be_overridden_to_local(fakeSkillsbench):
-    """Dev / smoke path: skip the Docker sandbox, run on the host."""
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench, sandbox_type="local")
-    case = next(iter(task.Cases()))
-    assert case.input.sandbox_type == "local"
-
-
-def test_sandbox_type_can_be_overridden_to_apptainer(fakeSkillsbench):
-    """Rootless path: no Docker daemon needed."""
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench, sandbox_type="apptainer")
-    case = next(iter(task.Cases()))
-    assert case.input.sandbox_type == "apptainer"
-
-
-def test_image_override_default_is_none(fakeSkillsbench):
-    """Without override, sandbox parses the Dockerfile's FROM line."""
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench, sandbox_type="apptainer")
-    case = next(iter(task.Cases()))
-    assert case.input.image_override is None
-
-
-def test_image_override_per_task_dict(fakeSkillsbench):
-    """Per-task ImageOverrides dict wins over the single ImageOverride."""
-    task = AgentBenchFlowTask(
-        skillsbench_dir=fakeSkillsbench,
-        sandbox_type="apptainer",
-        image_override="docker://default:1",
-        image_overrides={"alpha": "docker://python:3.11-slim"},
-    )
-    cases = list(task.Cases())
-    byId = {c.metadata["task_id"]: c.input.image_override for c in cases}
-    assert byId["alpha"] == "docker://python:3.11-slim"
-    assert byId["beta"] == "docker://default:1"
-    assert byId["gamma"] == "docker://default:1"
-
-
-def test_agent_command_default_is_mini_swe_agent(fakeSkillsbench):
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench)
-    assert task.agentCommand == "mini-swe-agent"
-
-
-def test_qwen_prompt_exposes_tools_and_preserves_tool_history(arch, modelPath):
-    """Multi-turn trace: tools, prior tool_call, tool_response all rendered."""
-    arch("qwen3")
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Execute a bash command",
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-            },
-        },
-    }]
-    prompt = ModelAdapter.render_chat([
-        {"role": "system", "content": "You are an agent."},
-        {"role": "user", "content": "Inspect the files."},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{
+    def parse(output, payload, *, modelPath):
+        if output == "tool-output":
+            return "", "internal reasoning", [{
                 "id": "call-1",
                 "type": "function",
-                "function": {
-                    "name": "bash",
-                    "arguments": '{"command":"ls"}',
-                },
-            }],
-        },
+                "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+            }]
+        return output, None, []
+
+    monkeypatch.setattr(ModelAdapter, "render_chat", render)
+    monkeypatch.setattr(ModelAdapter, "parse_tool_calls", parse)
+    server = KVBenchEndpoint(
+        modelPath="/models/test",
+        host="127.0.0.1",
+        debugLogPath=tmp_path / "llm.jsonl",
+    ).start()
+    yield server, renderCalls
+    server.stop()
+
+
+def _post(endpoint, payload):
+    connection = HTTPConnection("127.0.0.1", endpoint.port, timeout=3)
+    connection.request(
+        "POST",
+        "/v1/chat/completions",
+        body=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+    )
+    response = connection.getresponse()
+    body = response.read()
+    connection.close()
+    return response.status, response.getheader("Content-Type"), body
+
+
+def _serve_one(endpoint, payload):
+    result = {}
+
+    def call():
+        result["value"] = _post(endpoint, payload)
+
+    thread = threading.Thread(target=call)
+    thread.start()
+    request = endpoint.wait_for_request(timeout=2)
+    assert request is not None
+    return thread, request, result
+
+
+def test_endpoint_health(endpoint):
+    server, _calls = endpoint
+    connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    connection.request("GET", "/health")
+    response = connection.getresponse()
+    assert response.status == 200
+    assert json.loads(response.read()) == {"status": "ok"}
+    connection.close()
+
+
+def test_endpoint_renders_and_queues_without_skill_prefix(endpoint):
+    server, renderCalls = endpoint
+    payload = {
+        "model": "vllm/test",
+        "messages": [{"role": "system", "content": "system"}, {"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "bash"}}],
+    }
+    thread, request, result = _serve_one(server, payload)
+    assert request.prompt == "rendered prompt"
+    assert renderCalls[0]["tools"] == payload["tools"]
+    assert "system_prefix" not in renderCalls[0]
+    assert request.payload == payload
+    server.respond(request, "hello")
+    thread.join(timeout=2)
+    assert result["value"][0] == 200
+    body = json.loads(result["value"][2])
+    assert body["choices"][0]["message"]["content"] == "hello"
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+def test_endpoint_tool_calls_and_reasoning(endpoint):
+    server, _calls = endpoint
+    thread, request, result = _serve_one(
+        server,
+        {"model": "vllm/test", "messages": [{"role": "user", "content": "run ls"}]},
+    )
+    server.respond(request, "tool-output")
+    thread.join(timeout=2)
+    body = json.loads(result["value"][2])
+    message = body["choices"][0]["message"]
+    assert message["content"] == ""
+    assert message["reasoning_content"] == "internal reasoning"
+    assert message["tool_calls"][0]["function"]["name"] == "bash"
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_endpoint_stream_true_returns_sse(endpoint):
+    server, _calls = endpoint
+    thread, request, result = _serve_one(
+        server,
         {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": "{\"returncode\": 0}",
+            "model": "vllm/test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
         },
-    ], modelPath=modelPath, tools=tools, thinking=False)
-    assert "<tools>" in prompt
-    assert '"name": "bash"' in prompt
-    assert "<tool_call>" in prompt
-    assert "<tool_response>" in prompt
-    assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
-
-
-# ---------------------------------------------------- SkillInjector (frontmatter)
-
-
-def test_parse_frontmatter_with_simple_keys():
-    text = "---\nname: foo\ndescription: bar\n---\n# body\n"
-    fields, body = ParseSkillFrontmatter(text)
-    assert fields == {"name": "foo", "description": "bar"}
-    assert body == "# body"
-
-
-def test_parse_frontmatter_strips_surrounding_quotes():
-    text = '---\nname: foo\ndescription: "a b c"\n---\nbody\n'
-    fields, body = ParseSkillFrontmatter(text)
-    assert fields["description"] == "a b c"
-    assert body == "body"
-
-
-def test_parse_frontmatter_skips_nested_metadata_block():
-    text = (
-        "---\n"
-        "name: foo\n"
-        "description: d\n"
-        "license: MIT\n"
-        "metadata:\n"
-        "    skill-author: K-Dense\n"
-        "    extra: nested\n"
-        "---\n"
-        "# body\n"
     )
-    fields, body = ParseSkillFrontmatter(text)
-    assert fields == {"name": "foo", "description": "d", "license": "MIT"}
-    assert "skill-author" not in fields
-    assert body == "# body"
+    server.respond(request, "hello")
+    thread.join(timeout=2)
+    status, contentType, body = result["value"]
+    assert status == 200
+    assert contentType == "text/event-stream"
+    assert b"chat.completion.chunk" in body
+    assert body.endswith(b"data: [DONE]\n\n")
 
 
-def test_parse_frontmatter_missing_returns_empty_fields():
-    text = "# no frontmatter\njust body\n"
-    fields, body = ParseSkillFrontmatter(text)
-    assert fields == {}
-    assert body == "# no frontmatter\njust body\n"
+def test_endpoint_malformed_request_is_4xx(endpoint):
+    server, _calls = endpoint
+    status, _contentType, body = _post(server, {"model": "vllm/test"})
+    assert status == 400
+    assert "messages must be a list" in json.loads(body)["error"]["message"]
 
 
-def test_parse_frontmatter_unterminated_returns_body():
-    text = "---\nname: foo\nstill frontmatter\n"
-    fields, body = ParseSkillFrontmatter(text)
-    assert fields == {}
-    assert body.startswith("---")
-
-
-# --------------------------------------------- SkillInjector.BuildSkillsBlock
-
-
-def _MakeSkill(skillsDir: Path, name: str, body: str = "do the thing") -> Path:
-    skillDir = skillsDir / name
-    skillDir.mkdir(parents=True, exist_ok=True)
-    (skillDir / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: describes {name}\n---\n\n{body}\n",
-        encoding="utf-8",
+def test_endpoint_logs_raw_request_and_response(endpoint, tmp_path):
+    server, _calls = endpoint
+    thread, request, result = _serve_one(
+        server,
+        {
+            "model": "vllm/test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.2,
+        },
     )
-    return skillDir
+    server.respond(request, "raw output")
+    thread.join(timeout=2)
+    assert result["value"][0] == 200
+    records = [json.loads(line) for line in (tmp_path / "llm.jsonl").read_text().splitlines()]
+    assert [record["phase"] for record in records] == ["request", "response"]
+    assert records[0]["unsupported_generation_fields"] == ["temperature"]
+    assert records[1]["raw_output"] == "raw output"
 
 
-def test_build_skills_block_empty_when_no_skills_dir(tmp_path):
-    """Tasks with no environment/skills/ yield an empty block."""
-    skillsbench = tmp_path / "sb"
-    (skillsbench / "tasks" / "alpha").mkdir(parents=True)
-    assert BuildSkillsBlock(skillsbench, "alpha") == ""
-
-
-def test_build_skills_block_includes_all_skill_names(tmp_path):
-    skillsbench = tmp_path / "sb"
-    skillsDir = skillsbench / "tasks" / "alpha" / "environment" / "skills"
-    _MakeSkill(skillsDir, "alpha-skill", "alpha body")
-    _MakeSkill(skillsDir, "beta-skill", "beta body")
-    _MakeSkill(skillsDir, "gamma-skill", "gamma body")
-
-    block = BuildSkillsBlock(skillsbench, "alpha")
-    assert "## alpha-skill" in block
-    assert "## beta-skill" in block
-    assert "## gamma-skill" in block
-    assert "alpha body" in block
-    assert "beta body" in block
-    assert "gamma body" in block
-
-
-def test_build_skills_block_strips_frontmatter_from_output(tmp_path):
-    skillsbench = tmp_path / "sb"
-    skillsDir = skillsbench / "tasks" / "alpha" / "environment" / "skills"
-    _MakeSkill(skillsDir, "foo", "real body content")
-
-    block = BuildSkillsBlock(skillsbench, "alpha")
-    # The opening ``---`` fence from the frontmatter must not leak.
-    assert "name: foo" not in block
-    assert "describes foo" in block
-    assert "real body content" in block
-
-
-def test_build_skills_block_renders_description_before_body(tmp_path):
-    skillsbench = tmp_path / "sb"
-    skillsDir = skillsbench / "tasks" / "alpha" / "environment" / "skills"
-    _MakeSkill(skillsDir, "foo", "body goes here")
-
-    block = BuildSkillsBlock(skillsbench, "alpha")
-    fooIdx = block.index("## foo")
-    descIdx = block.index("describes foo")
-    bodyIdx = block.index("body goes here")
-    assert fooIdx < descIdx < bodyIdx
-
-
-def test_build_skills_block_handles_quoted_description(tmp_path):
-    skillsbench = tmp_path / "sb"
-    skillsDir = skillsbench / "tasks" / "alpha" / "environment" / "skills"
-    skillDir = skillsDir / "quoted"
-    skillDir.mkdir(parents=True, exist_ok=True)
-    (skillDir / "SKILL.md").write_text(
-        '---\nname: quoted\ndescription: "A long description with spaces."\n---\n\nbody\n',
-        encoding="utf-8",
+def test_runner_builds_real_benchflow_dataset_command(tmp_path):
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/Qwen3.8-27B",
+        sourceMode="dataset",
+        dataset="skillsbench@1.1",
+        agent="pi-acp",
+        sandbox="docker",
+        skillMode="with-skill",
+        providerHost="host.docker.internal",
+        port=43123,
+        jobsDir=tmp_path / "case",
+        providerApiKey="dummy-from-test",
     )
-    block = BuildSkillsBlock(skillsbench, "alpha")
-    assert "A long description with spaces." in block
-    # The surrounding quotes must be stripped.
-    assert '"A long description with spaces."' not in block
+    command = runner.BuildCommand()
+    assert command[:3] == ["bench", "eval", "run"]
+    assert ["--dataset", "skillsbench@1.1"] == command[3:5]
+    assert "--include" in command and "citation-check" in command
+    assert "--sandbox" in command and command[command.index("--sandbox") + 1] == "docker"
+    assert "--skill-mode" in command and command[command.index("--skill-mode") + 1] == "with-skill"
+    assert ["--usage-tracking", "off"] == command[command.index("--usage-tracking"):command.index("--usage-tracking") + 2]
+    assert f"BENCHFLOW_PROVIDER_BASE_URL=http://host.docker.internal:43123/v1" in command
+    assert "BENCHFLOW_PROVIDER_API_KEY=dummy-from-test" in command
+    assert str(tmp_path / "case") in command
+    assert "vllm/Qwen3.8-27B" in command
 
 
-# ----------------------------------------------- ModelAdapter.render_chat with prefix
-
-
-def test_render_prompt_with_system_prefix_appends_to_first_system(modelPath):
-    """``system_prefix`` is folded into the first system message's content."""
-    messages = [
-        {"role": "system", "content": "You are an agent."},
-        {"role": "user", "content": "Inspect the files."},
-    ]
-    prefix = "# Skills\n\n## foo\ndoes foo\n"
-    prompt = ModelAdapter.render_chat(messages, modelPath=modelPath, system_prefix=prefix)
-    # The prefix appears in the rendered prompt, before the user's original
-    # system content (which is folded into the same system turn by the jinja).
-    assert prompt.index(prefix.rstrip()) < prompt.index("You are an agent.")
-    # The skills block is part of the system block, not a separate region.
-    sysIdx = prompt.index("system\n")
-    userIdx = prompt.index("user\n")
-    assert prompt[sysIdx:userIdx].count(prefix.rstrip()) == 1
-
-
-def test_render_prompt_without_system_prefix_unchanged(modelPath):
-    """No prefix → the first system message's content renders as-is."""
-    messages = [
-        {"role": "system", "content": "You are an agent."},
-        {"role": "user", "content": "hi"},
-    ]
-    prompt = ModelAdapter.render_chat(messages, modelPath=modelPath)
-    assert "You are an agent." in prompt
-    assert "# Skills" not in prompt
-
-
-def test_render_prompt_skills_block_does_not_leak_to_user_turn(modelPath):
-    """``system_prefix`` only folds into the first system message — never twice."""
-    prefix = "# Skills\n\n## foo\ndoes foo\n"
-    messages = [
-        {"role": "system", "content": "first system"},
-        {"role": "system", "content": "second system"},
-    ]
-    prompt = ModelAdapter.render_chat(messages, modelPath=modelPath, system_prefix=prefix)
-    # The prefix appears exactly once.
-    assert prompt.count(prefix.rstrip()) == 1
-    # The second system message's content is preserved (rendered as its own turn).
-    assert "second system" in prompt
-    assert prompt.index("second system") > prompt.index("first system")
-
-
-def test_apptainer_stages_copy_to_root_directory(tmp_path):
-    taskDir = tmp_path / "tasks" / "sample"
-    environmentDir = taskDir / "environment"
-    environmentDir.mkdir(parents=True)
-    (environmentDir / "Dockerfile").write_text(
-        "FROM python:3.13-slim\n"
-        "COPY scan_data.stl /root/\n"
-        "COPY material_density_table.md /root\n"
+def test_runner_builds_local_tasks_dir_command(tmp_path):
+    repo = tmp_path / "skillsbench"
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/model",
+        sourceMode="local",
+        skillsbenchDir=repo,
+        jobsDir=tmp_path / "case",
     )
-    (environmentDir / "scan_data.stl").write_text("mesh")
-    (environmentDir / "material_density_table.md").write_text("density")
-
-    outputDir = tmp_path / "output"
-    outputDir.mkdir()
-    sandbox = ApptainerSandbox.__new__(ApptainerSandbox)
-    sandbox._agentWorkspace = outputDir / "agent_workspace"
-    sandbox._agentWorkspace.mkdir()
-
-    sandbox._StageEnvironmentInputs(taskDir)
-
-    assert (sandbox._agentWorkspace / "scan_data.stl").read_text() == "mesh"
-    assert (
-        sandbox._agentWorkspace / "material_density_table.md"
-    ).read_text() == "density"
+    command = runner.BuildCommand()
+    assert command[3:5] == ["--tasks-dir", str(repo / "tasks")]
+    assert command[command.index("--include") + 1] == "citation-check"
 
 
-def test_apptainer_stages_directory_copy(tmp_path):
-    """Directory sources from Dockerfile COPY must be recursively staged.
-
-    Regression: ``ada-bathroom-plan-repair`` ships ``COPY input /root/input``,
-    the staging helper only copied files (not directories), so the agent saw
-    an empty ``/root/input`` and invented a placeholder DXF, then gave up.
-    """
-    taskDir = tmp_path / "tasks" / "sample"
-    environmentDir = taskDir / "environment"
-    environmentDir.mkdir(parents=True)
-    (environmentDir / "Dockerfile").write_text(
-        "FROM python:3.13-slim\n"
-        "COPY input /root/input\n"
-        "COPY output_schema /root/output_schema\n"
+def test_runner_reads_official_result_shape(tmp_path):
+    resultPath = tmp_path / "case" / "job" / "citation-check" / "rollout" / "result.json"
+    resultPath.parent.mkdir(parents=True)
+    payload = {
+        "task_name": "citation-check",
+        "rewards": {"reward": 1.0},
+        "error": None,
+        "verifier_error": None,
+        "n_tool_calls": 4,
+        "n_skill_invocations": 1,
+        "agent_result": {"n_prompts": 3},
+        "final_metrics": {"reward": 1.0},
+    }
+    resultPath.write_text(json.dumps(payload), encoding="utf-8")
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/model",
+        jobsDir=tmp_path / "case",
     )
-    # Populate the source directories with files that must reach the agent.
-    inputDir = environmentDir / "input"
-    inputDir.mkdir()
-    (inputDir / "ada_bath_input.dxf").write_text("real dxf bytes")
-    (inputDir / "layer_schema.json").write_text("{}")
-    schemaDir = environmentDir / "output_schema"
-    schemaDir.mkdir()
-    (schemaDir / "schema.json").write_text("{}")
-
-    outputDir = tmp_path / "output"
-    outputDir.mkdir()
-    sandbox = ApptainerSandbox.__new__(ApptainerSandbox)
-    sandbox._agentWorkspace = outputDir / "agent_workspace"
-    sandbox._agentWorkspace.mkdir()
-
-    sandbox._StageEnvironmentInputs(taskDir)
-
-    # Full directory tree must be staged under agent_workspace/input/.
-    assert (sandbox._agentWorkspace / "input" / "ada_bath_input.dxf").read_text() == "real dxf bytes"
-    assert (sandbox._agentWorkspace / "input" / "layer_schema.json").read_text() == "{}"
-    assert (sandbox._agentWorkspace / "output_schema" / "schema.json").read_text() == "{}"
+    assert runner.ReadOfficialResult() == payload
+    assert runner.officialResultPath == resultPath
+    assert runner.Diagnostics()["benchflow_n_tool_calls"] == 4
 
 
-def test_apptainer_fallback_copies_directory_top_level(tmp_path):
-    """Tasks without an explicit COPY line still get their top-level dirs."""
-    taskDir = tmp_path / "tasks" / "sample"
-    environmentDir = taskDir / "environment"
-    environmentDir.mkdir(parents=True)
-    (environmentDir / "Dockerfile").write_text("FROM python:3.13-slim\n")
-    extras = environmentDir / "extras"
-    extras.mkdir()
-    (extras / "notes.md").write_text("x")
+def test_runner_subprocess_is_mockable_and_lifecycle_is_explicit(tmp_path):
+    class FakeProcess:
+        returncode = 0
 
-    outputDir = tmp_path / "output"
-    outputDir.mkdir()
-    sandbox = ApptainerSandbox.__new__(ApptainerSandbox)
-    sandbox._agentWorkspace = outputDir / "agent_workspace"
-    sandbox._agentWorkspace.mkdir()
+        def poll(self):
+            return 0
 
-    sandbox._StageEnvironmentInputs(taskDir)
+        def wait(self, timeout=None):
+            return 0
 
-    assert (sandbox._agentWorkspace / "extras" / "notes.md").read_text() == "x"
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    calls = []
+
+    def popen(command, **kwargs):
+        calls.append((command, kwargs))
+        return FakeProcess()
+
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/model",
+        jobsDir=tmp_path / "case",
+        popenFactory=popen,
+        port=43124,
+    )
+    runner.start()
+    runner._monitorThread.join(timeout=2)
+    assert calls and calls[0][0][0:3] == ["bench", "eval", "run"]
+    assert runner.is_done
+    runner.stop()
 
 
-# ------------------------------------------------------------- Task.Evaluate
+class _FakeRunner:
+    def __init__(self, requests):
+        self.requests = list(requests)
+        self.responses = []
+        self.officialResult = {
+            "task_name": "citation-check",
+            "rewards": {"reward": 0.75},
+            "error": "",
+        }
+        self.started = False
+
+    def start(self):
+        self.started = True
+        return self
+
+    def wait_for_request(self):
+        return self.requests.pop(0) if self.requests else None
+
+    def respond(self, request, output):
+        self.responses.append((request, output))
+
+    def Diagnostics(self):
+        return {"official_result_path": "/jobs/result.json", "benchflow_error": None}
+
+    def stop(self):
+        pass
+
+
+class _FailingRunner(_FakeRunner):
+    def __init__(self):
+        super().__init__([])
+        self.stopped = False
+
+    def start(self):
+        raise RuntimeError("BenchFlow task failed to start")
+
+    def stop(self):
+        self.stopped = True
+
+
+def _request(prompt):
+    return OpenAIRequest(
+        requestId="req",
+        payload={"model": "vllm/model", "messages": []},
+        messages=[],
+        tools=None,
+        prompt=prompt,
+        stream=False,
+        responseFuture=Future(),
+    )
+
+
+def test_workload_bridges_multiple_turns_and_retains_output():
+    first = _request("first rendered prompt")
+    second = _request("second rendered prompt")
+    runner = _FakeRunner([first, second])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+    action = workload.next()[0]
+    assert runner.started
+    assert action.kind.value == "run"
+    assert action.data == "first rendered prompt"
+    assert action.retainOutput is True
+    workload.observe([ActionResult(3, Result(output="first output"))])
+    assert runner.responses == [(first, "first output")]
+    assert workload.next()[0].data == "second rendered prompt"
+    workload.observe([ActionResult(3, Result(output="second output"))])
+    assert workload.next() is None
+    assert workload.finished
+    assert workload.final_result.output["rewards"]["reward"] == 0.75
+
+
+def test_workload_converts_runner_failure_to_zero_score():
+    runner = _FailingRunner()
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="broken-task"),
+        runner=runner,
+    )
+
+    assert workload.next() is None
+    assert workload.finished
+    assert runner.stopped
+    assert workload.final_result.output["reward"] == 0.0
+
+
+def test_task_filters_and_propagates_benchflow_configuration(fakeSkillsbench):
+    task = AgentBenchFlowTask(
+        skillsbench_dir=fakeSkillsbench,
+        source_mode="local",
+        task_ids=["citation-check", "alpha"],
+        exclude_task_ids=["alpha"],
+        agent="opencode",
+        skill_mode="no-skill",
+        provider_host="host.docker.internal",
+    )
+    case = next(iter(task.Cases()))
+    assert case.metadata["task_id"] == "citation-check"
+    assert case.input.agent == "opencode"
+    assert case.input.skill_mode == "no-skill"
+    assert case.input.source_mode == "local"
+    assert case.input.provider_host == "host.docker.internal"
 
 
 @pytest.mark.parametrize(
     "payload,expected",
     [
-        (None, 0.0),
-        (0.0, 0.0),
-        (1.0, 1.0),
-        ({"reward": 0.5}, 0.5),
-        ({"rewards": [0.0, 1.0, 1.0]}, pytest.approx(2 / 3)),
-        ({"scores": {"a": 1.0, "b": 0.0}}, 0.5),
-        ({"reward": "0.8"}, 0.8),
-        ({"reward": True}, 1.0),
-        ({"unrelated": 42}, 0.0),
+        ({"rewards": {"reward": 1.0}}, 1.0),
+        ({"rewards": {"criteria_a": 1.0, "criteria_b": 0.0}}, 0.5),
+        ({"rewards": [0.0, 1.0]}, 0.5),
+        ({"final_metrics": {"pass_rate": 0.25}}, 0.25),
+        ({"error": "verifier failed", "rewards": None}, 0.0),
     ],
 )
-def test_extract_reward_shapes(payload, expected):
-    assert AgentBenchFlowTask._ExtractReward(payload) == expected
+def test_task_extracts_official_rewards(payload, expected):
+    assert AgentBenchFlowTask._ExtractReward(payload) == pytest.approx(expected)
 
 
-def test_evaluate_returns_reward_and_accuracy(fakeSkillsbench):
-    task = AgentBenchFlowTask(skillsbench_dir=fakeSkillsbench)
-    result = Result(output={"reward": 0.75})
-    scores = task.Evaluate(result, {"task_id": "alpha"})
-    assert scores == {"reward": 0.75, "accuracy": 0.75}
-
-
-# ------------------------------------------------------- Workload contract
-
-
-def _Workload() -> AgentBenchFlowWorkload:
-    data = AgentBenchFlowInput(skillsbench_dir="/nonexistent", task_id="alpha")
-    return AgentBenchFlowWorkload(case_id=0, data=data)
-
-
-def test_workload_starts_without_helper():
-    """Construction is lazy — no subprocess is spawned until ``next`` runs."""
-    wl = _Workload()
-    assert wl._helper is None
-    assert wl.finished is False
-    assert wl.final_result is None
-
-
-def test_final_result_prefers_synthesised_over_last_inference():
-    wl = _Workload()
-    wl._lastResult = Result(output="ignored")
-    wl._finalResult = Result(output={"reward": 0.5}, metadata={"endpoint_url": "x"})
-    assert wl.final_result.output == {"reward": 0.5}
-
-
-def test_final_result_falls_back_to_last_inference_when_no_synthesis():
-    wl = _Workload()
-    wl._lastResult = Result(output="last inference")
-    assert wl.final_result.output == "last inference"
-
-
-def test_final_result_is_none_before_any_observation():
-    wl = _Workload()
-    assert wl.final_result is None
-
-
-# ----------------------------------------------------- thinking toggle (Qwen3 + Glimmer)
-
-
-@pytest.fixture
-def arch():
-    """Force ``ModelAdapter.arch_family`` to return a specific value.
-
-    The setter clears the lru_cache automatically, so each test sees a fresh
-    arch without cross-test pollution.
-    """
-    def set_(value):
-        ModelAdapter.set_arch_for_testing(value)
-    set_("qwen3")
-    yield set_
-    set_(None)
-
-
-@pytest.fixture
-def modelPath():
-    """The model path used by ``render_chat`` / ``_thinking_kwargs`` tests.
-
-    The Qwen3 tokenizer (the only one available in this test environment)
-    lives at the configured ``ModelPath``. Tests that override ``arch_family``
-    via :func:`arch` still load this real tokenizer when they call
-    ``render_chat`` — the test environment only ships one tokenizer on disk.
-    """
-    from core.Config import ModelPath as _ModelPath
-    return _ModelPath()
-
-
-def _TwoTurnMessages():
-    return [
-        {"role": "system", "content": "You are an agent."},
-        {"role": "user", "content": "Inspect the files."},
-    ]
-
-
-def test_qwen3_thinking_true_default_emits_no_non_thinking_block(arch, modelPath):
-    """Qwen3 + ``thinking=True`` (or ``None``) — let CoT, header is bare."""
-    arch("qwen3")
-    prompt_true = ModelAdapter.render_chat(_TwoTurnMessages(), modelPath=modelPath, thinking=True)
-    assert prompt_true.endswith("<|im_start|>assistant\n")
-    assert "<think>" not in prompt_true
-    prompt_none = ModelAdapter.render_chat(_TwoTurnMessages(), modelPath=modelPath, thinking=None)
-    assert prompt_none.endswith("<|im_start|>assistant\n")
-    assert "<think>" not in prompt_none
-
-
-def test_qwen3_thinking_false_injects_non_thinking_block(arch, modelPath):
-    """``thinking=False`` on Qwen3 emits the empty pre-closed think block."""
-    arch("qwen3")
-    prompt = ModelAdapter.render_chat(_TwoTurnMessages(), modelPath=modelPath, thinking=False)
-    assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
-
-
-def test_glimmer_thinking_true_translates_to_high_reasoning_kwarg(arch, modelPath):
-    """Glimmer + ``thinking=True`` → ``chat_template_kwargs={"reasoning_strength": "high"}``."""
-    arch("muse_glimmer")
-    assert ModelAdapter._thinking_kwargs(True, modelPath) == {"reasoning_strength": "high"}
-
-
-def test_glimmer_thinking_false_translates_to_low_reasoning_kwarg(arch, modelPath):
-    """Glimmer + ``thinking=False`` → ``chat_template_kwargs={"reasoning_strength": "low"}``."""
-    arch("muse_glimmer")
-    assert ModelAdapter._thinking_kwargs(False, modelPath) == {"reasoning_strength": "low"}
-
-
-def test_glimmer_user_supplied_reasoning_strength_not_duplicated(arch, modelPath):
-    """A user-supplied ``Reasoning strength:`` line in the system prompt is preserved exactly once.
-
-    The jinja's ``render_reasoning`` macro checks for existing
-    ``reasoning strength`` text in the system content and skips
-    re-emitting — so a user override (passed via ``system_prefix``) wins
-    over the ``reasoning_strength`` kwarg without duplication.
-    """
-    arch("muse_glimmer")
-    system_prefix = "# Skills\n\nReasoning strength: medium.\n"
-    prompt = ModelAdapter.render_chat(
-        _TwoTurnMessages(), modelPath=modelPath, system_prefix=system_prefix, thinking=True)
-    assert prompt.count("Reasoning strength: medium.") == 1
-    assert "Reasoning strength: high." not in prompt
-    assert "Reasoning strength: low." not in prompt
-
-
-def test_render_chat_renders_tool_calls_and_tool_response(arch, modelPath):
-    """Multi-turn trace: tool envelope, tool_call history, tool_response all rendered.
-
-    Tests the Qwen3 jinja's tool rendering (the only tokenizer available in
-    the test environment). Glimmer's Meta envelope differs structurally but
-    the kwarg translation is covered by the dedicated tests above.
-    """
-    arch("qwen3")
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Execute a bash command",
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-            },
-        },
-    }]
-    prompt = ModelAdapter.render_chat([
-        {"role": "system", "content": "You are an agent."},
-        {"role": "user", "content": "Inspect the files."},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{
-                "id": "call-1",
-                "type": "function",
-                "function": {
-                    "name": "bash",
-                    "arguments": '{"command":"ls"}',
-                },
-            }],
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": "{\"returncode\": 0}",
-        },
-    ], modelPath=modelPath, tools=tools, thinking=False)
-    assert "<tools>" in prompt
-    assert '"name": "bash"' in prompt
-    assert "<tool_call>" in prompt
-    assert "<tool_response>" in prompt
-    assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+def test_task_evaluate_keeps_infrastructure_diagnostics_available():
+    task = AgentBenchFlowTask(skillsbench_dir=Path("/tmp"), task_ids=["citation-check"])
+    result = Result(
+        output={"rewards": {"reward": 0.0}, "error": "Docker environment failed"},
+        metadata={"benchflow_error": "Docker environment failed"},
+    )
+    assert task.Evaluate(result, {}) == {"reward": 0.0, "accuracy": 0.0}
+    assert result.metadata["benchflow_error"] == "Docker environment failed"

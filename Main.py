@@ -44,13 +44,11 @@ MAX_NEW_TOKENS=64
 def Main() -> None:
     tasks = [
         AgentBenchFlowTask(
-            image_override="docker://python:3.13-slim",
-            task_ids=["azure-bgp-oscillation-route-leak"],
-            thinking=False,
-            agent_extra_args=[
-                "--config", "/host_lib/minisweagent/config/mini.yaml",
-                "--config", "agent.step_limit=10",
-            ],
+            source_mode="dataset",
+            task_ids=["citation-check"],
+            agent="pi-acp",
+            skill_mode="with-skill",
+            thinking=True,
         ),
     ]
 
@@ -81,7 +79,7 @@ def Main() -> None:
     sys.stdout.flush()
 
     engine = Engine(
-        availableGpuIds=[1, 3],
+        availableGpuIds='auto',
         batchSize=batchSize,
         initializeTimeout=1800,
         taskTimeout=3600,
