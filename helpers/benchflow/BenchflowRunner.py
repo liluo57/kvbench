@@ -13,6 +13,7 @@ import os
 import shlex
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -70,7 +71,15 @@ class BenchflowRunner:
         self.endpointHost = endpointHost
         self.port = int(port)
         self.modelId = modelId or Path(self.modelPath).name or "model"
+        # ``bench eval run --jobs-dir <dir>`` reuses any pre-existing
+        # ``result.json`` under ``<dir>`` ("resuming" the job), so a fresh
+        # subdirectory is required for every KVBench attempt. Without this
+        # the runner silently inherits a prior run's reward (e.g. a
+        # completed citation-check from an earlier KVBench invocation
+        # scores 1.0 on every subsequent attempt because bench finds no
+        # remaining work and reports the old summary).
         self.jobsDir = Path(jobsDir) if jobsDir else Path.cwd() / "jobs" / taskId
+        self.jobsDir = self.jobsDir / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
         self.resultJsonTimeout = float(resultJsonTimeout)
         self.thinking = thinking
         self.providerApiKey = providerApiKey

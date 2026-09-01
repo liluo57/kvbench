@@ -1,7 +1,7 @@
 """SkillsBench task selection and scoring for the real BenchFlow runtime."""
 
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from core.Config import AgentBenchFlowDefaults
 from core.Result import Result
@@ -27,6 +27,12 @@ class AgentBenchFlowTask(Task):
     # Each task id owns an independent BenchFlow rollout.  A broken rollout
     # must not prevent the remaining task ids from being evaluated.
     continueOnCaseFailure = True
+
+    # Cache of (skillsbench tasks root, task id) pairs whose Docker image has
+    # been confirmed available locally. Constructing many AgentBenchFlowTask
+    # instances over the same source checkout must not re-run `docker image
+    # inspect` per instance.
+    _validatedTaskKeys: set = set()
 
     def __init__(
         self,
@@ -92,6 +98,89 @@ class AgentBenchFlowTask(Task):
             bench_extra_args if bench_extra_args is not None else cfg.get("BenchExtraArgs") or []
         )
         self._resolvedTaskIds = self._ResolveTaskIds(task_ids)
+        if self.sourceMode == "local" and self.skillsbenchDir is not None:
+            AgentBenchFlowTask._EnsureLocalImages(
+                self.skillsbenchDir / "tasks", self._resolvedTaskIds
+            )
+
+    @classmethod
+    def _EnsureLocalImages(
+        cls,
+        skillsbenchTasksRoot: Path,
+        taskIds: Sequence[str],
+    ) -> None:
+        """Verify BenchFlow Docker images are prebuilt; raise before Engine.
+
+        Mirrors what used to live as :func:`ValidateSkillsbenchImages` in
+        ``Main.py``: it refuses to silently trigger a BenchFlow Dockerfile
+        build at run-time. The check is memoised on
+        ``(skillsbenchTasksRoot, taskId)`` so callers that construct one
+        ``AgentBenchFlowTask`` per task id do not re-run ``docker image
+        inspect`` for every instance.
+        """
+        # Imports kept local so the cold path does not pay the benchflow
+        # import cost in dataset-only runs.
+        import shutil
+        import subprocess
+
+        try:
+            from benchflow.task.document import TaskDocument
+        except ImportError as exc:
+            raise RuntimeError(
+                "BenchFlow is not importable; install the same environment "
+                "that provides the `bench` command"
+            ) from exc
+
+        if not shutil.which("docker"):
+            raise RuntimeError(
+                "docker is not on PATH; run scripts/PrepareSkillsbench.py first "
+                "after installing Docker"
+            )
+
+        missingConfiguration: List[str] = []
+        missingImages: List[str] = []
+        newlyVerified = 0
+        for taskId in taskIds:
+            key: Tuple[str, str] = (str(skillsbenchTasksRoot), taskId)
+            if key in cls._validatedTaskKeys:
+                continue
+            taskFile = skillsbenchTasksRoot / taskId / "task.md"
+            try:
+                image = TaskDocument.from_path(taskFile).config.sandbox.docker_image
+            except Exception as exc:  # noqa: BLE001 - report the task clearly
+                raise RuntimeError(
+                    f"could not read BenchFlow config for {taskId}: {exc}"
+                ) from exc
+            if not image:
+                missingConfiguration.append(taskId)
+                continue
+            inspected = subprocess.run(
+                ["docker", "image", "inspect", image],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if inspected.returncode != 0:
+                missingImages.append(f"{taskId} ({image})")
+            else:
+                cls._validatedTaskKeys.add(key)
+                newlyVerified += 1
+
+        if missingConfiguration or missingImages:
+            details: List[str] = []
+            if missingConfiguration:
+                details.append("no image in task.md: " + ", ".join(missingConfiguration))
+            if missingImages:
+                details.append("local image missing: " + ", ".join(missingImages))
+            raise RuntimeError(
+                "SkillsBench is not initialized; AgentBenchFlowTask refuses to "
+                "trigger task Dockerfile builds. "
+                + "; ".join(details)
+                + ". Run: python scripts/PrepareSkillsbench.py --proxy <proxy>"
+            )
+        if newlyVerified:
+            print(f"[main] verified {newlyVerified} prebuilt SkillsBench images")
 
     def _ResolveTaskIds(self, task_ids: Optional[Sequence[str]]) -> List[str]:
         if task_ids is None:

@@ -61,6 +61,6 @@ AgentBenchFlow:
   # BenchFlow writes the official result.json and all rollout artifacts here.
   BenchCommand: bench
   OutputDir: /data/lyh/kvbench/outputs/benchflow
-  ResultJsonTimeoutSec: 3600
+  ResultJsonTimeoutSec: 7200
   Thinking: true
   BenchExtraArgs: []
