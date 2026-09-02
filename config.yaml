@@ -18,10 +18,10 @@
 #              (fields: ctxs[{title,text}], question, answers)
 #   samsum/    cacheblend's summarization dataset (samsum.json)
 #   wikimqa/   cacheblend's wiki multi-hop QA dataset (wikimqa_s.json)
-DatasetPath: /data/lyh/kvbench/data
+DatasetPath: /root/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3.8-27B
+ModelPath: /root/autodl-tmp/models/Qwen3.8-27b
 
 # The CacheblendRepo method (methods/CacheblendRepo.py) runs the *original*
 # CacheBlend repo (YaoJiayi/CacheBlend): a patched vLLM 0.4.1 whose collect /
@@ -31,14 +31,14 @@ ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3.8-27B
 Cacheblend:
   Repo:
     # The original CacheBlend repo clone (holds vllm_blend + .venv).
-    RepoPath: /data/lyh/cache-blend/CacheBlend
+    RepoPath: /root/cache-blend/CacheBlend
 
 
 # SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:
   # Root of the cloned SkillsBench repo (must contain tasks/<id>/task.md).
   # Cloned from https://github.com/benchflow-ai/skillsbench.
-  SkillsBenchRepo: /data/lyh/skillsbench
+  SkillsBenchRepo: /root/skillsbench
 
   # Where the agent and verifier run. Options:
   #   "docker" (default): builds the task's environment/Dockerfile and runs
@@ -80,7 +80,7 @@ AgentBenchFlow:
   # log, synthetic result.json, agent + verifier workspaces, trajectory).
   # Each SkillsBench task gets its own subdir under this tree. Set to null
   # for a fresh tempdir per case.
-  OutputDir: /data/lyh/kvbench/outputs/benchflow
+  OutputDir: /root/kvbench/outputs/benchflow
 
   # Seconds to wait for the agent + verifier to finish inside the sandbox.
   # Engine.taskTimeout is the outer bound.
