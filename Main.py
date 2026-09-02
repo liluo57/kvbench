@@ -45,41 +45,7 @@ MAX_NEW_TOKENS=64
 
 
 def Main() -> None:
-    skillsbench_root = Path(
-        (Get("AgentBenchFlow", {}) or {}).get("SkillsBenchRepo", "/data/lyh/skillsbench")
-    )
-    skillsbench_tasks_root = skillsbench_root / "tasks"
-    task_ids = sorted(
-        entry.name
-        for entry in skillsbench_tasks_root.iterdir()
-        if (entry / "task.md").is_file()
-    )
-    SKIP_TASKS = {
-        # No sandbox image built (pre-existing gaps)
-        "3d-scan-calc",
-        "crystallographic-wyckoff-position-analysis",
-        # Dockerfile builds still failing under --use-mirror; the SkillsBench
-        # tasks below need downloads (Maven / sdkman / nodesource setup /
-        # playwright bundles / kokoro weights) that the wrap pipeline cannot
-        # cover from this host's proxy. Re-enable once their base images exist.
-        "fix-build-google-auto",
-        "fix-druid-loophole-cve",
-        "fix-visual-stability",
-        "multilingual-video-dubbing",
-        "python-scala-translation",
-        "spring-boot-jakarta-migration",
-        "suricata-custom-exfil",
-        "threejs-structure-parser",
-        "threejs-to-obj",
-    }
-    task_ids = [t for t in task_ids if t not in SKIP_TASKS]
-    # SMOKE: scope down to a single prebuilt, fast verification task so the
-    # first end-to-end run completes within minutes rather than days.
-    SMOKE_TASK = "reserves-at-risk-calc"
-    if SMOKE_TASK:
-        task_ids = [t for t in task_ids if t == SMOKE_TASK]
-    print(f"[main] running {len(task_ids)} tasks (skipped {len(SKIP_TASKS)} known-good)")
-
+    task_ids = ['adaptive-cruise-control','ada-bathroom-plan-repair']
     tasks = [
         AgentBenchFlowTask(
             source_mode="local",

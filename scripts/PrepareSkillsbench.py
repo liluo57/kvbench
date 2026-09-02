@@ -838,6 +838,12 @@ APT_UBUNTU_PATH = "ubuntu"
 APT_DEBIAN_PATH = "debian"
 PIP_MIRROR_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 RPM_MIRROR_HOST = "mirrors.tuna.tsinghua.edu.cn"
+# Tuna's RPM mirror is incomplete: it serves ``centos`` and ``fedora`` but
+# returns 404 for ``almalinux`` and ``rockylinux`` (AlmaLinux 9 / Rocky 9
+# images like ``jasonish/suricata:7.0.11`` need these). aliyun.com mirrors
+# all four distros. We list both as fallbacks so the rewritten ``baseurl=``
+# block carries both candidates and dnf fails over to the working one.
+RPM_MIRROR_FALLBACK_HOST = "mirrors.aliyun.com"
 RPM_DISTRO_PATHS = {
     "almalinux": "almalinux",
     "rocky": "rockylinux",
@@ -847,10 +853,28 @@ RPM_DISTRO_PATHS = {
 # GitHub proxy: front-end for github.com / raw.githubusercontent.com. Returns
 # the original asset bytes, so wrapping preserves content integrity.
 GITHUB_PROXY_HOST = "gh-proxy.com"
+# Fallback GitHub proxy. ``gh-proxy.com`` works for direct curl/wget downloads
+# but its availability is not guaranteed; if the primary host fails the wrap
+# retries against this one. The ``gh-proxy.org`` host accepts the same
+# ``https://<host>/https://github.com/...`` URL shape as the primary, so a
+# mirror-prefix swap is the only change needed.
+GITHUB_PROXY_FALLBACK = "gh-proxy.org"
+# Coursier reads ``COURSIER_MIRRORS`` to redirect Maven Central / GitHub
+# Maven artifacts the JVM resolves at run time (Scala compiler fetch,
+# self-update, etc.). Without this, coursier's ``./cs setup`` self-update
+# hits ``github.com`` directly through the host's proxy and dies on the
+# upstream S3 redirect's TLS handshake.
+COURSIER_MIRROR_URL = f"https://{GITHUB_PROXY_HOST}/https://github.com/coursier/maven"
 # npmmirror.com serves the official npm registry as a read-through mirror,
 # plus binaries/ (node, etc.). Used for both ``npm install`` and node tarballs.
 NPM_MIRROR_REGISTRY = "https://registry.npmmirror.com"
 NODE_BINARIES_MIRROR = "https://cdn.npmmirror.com/binaries/node"
+# HuggingFace mirror: ``huggingface_hub`` honors ``HF_ENDPOINT`` and the
+# ``huggingface-cli`` follows the same env var. Setting this to the
+# Chinese mirror sidesteps the build-time SSL flakiness against
+# huggingface.co from networks where the proxy is on, but the endpoint
+# itself is blocked or handshake-broken.
+HF_MIRROR_ENDPOINT = "https://hf-mirror.com"
 
 
 def WrapAptInstallRun(body: str) -> str:
@@ -945,13 +969,26 @@ def WrapDnfInstallRun(body: str) -> str:
         "  [ -f \"$f\" ] || continue; "
         "  sed -i -E "
         "    -e 's|^mirrorlist=|#mirrorlist=|g' "
-        "    -e 's|^#?baseurl=https?://[^/]*almalinux\\.org/|"
-        f"baseurl=https://{RPM_MIRROR_HOST}/almalinux/|g' "
-        "    -e 's|^#?baseurl=https?://[^/]*rockylinux\\.org/|"
-        f"baseurl=https://{RPM_MIRROR_HOST}/rockylinux/|g' "
-        "    -e 's|^#?baseurl=https?://[^/]*centos\\.org/|"
+        # The baseurl match consumes arbitrary whitespace before ``#``
+        # AND the trailing distro subpath (``/almalinux/`` /
+        # ``/rocky/`` / etc.) — AlmaLinux/Rocky ship the fallback line
+        # as ``# baseurl=https://repo.<distro>.org/<distro>/<releasever>/...``
+        # and the path has to align with the mirror's layout
+        # (``https://mirrors.aliyun.com/<distro>/<releasever>/...``),
+        # otherwise dnf gets ``…/almalinux/almalinux/9/...`` and 404s.
+        #
+        # dnf uses only ONE ``baseurl=`` per repo section. Tuna serves
+        # centos/fedora but returns 404 for almalinux/rockylinux; aliyun
+        # mirrors all four. We pick the working mirror per distro:
+        # aliyun for almalinux/rocky (tuna 404s), tuna for centos/fedora
+        # (tuna is closer / faster from this host).
+        "    -e 's|^[[:space:]]*#[[:space:]]*baseurl=https?://[^/]*almalinux\\.org/almalinux/?|"
+        f"baseurl=https://{RPM_MIRROR_FALLBACK_HOST}/almalinux/|g' "
+        "    -e 's|^[[:space:]]*#[[:space:]]*baseurl=https?://[^/]*rockylinux\\.org/rocky/?|"
+        f"baseurl=https://{RPM_MIRROR_FALLBACK_HOST}/rockylinux/|g' "
+        "    -e 's|^[[:space:]]*#[[:space:]]*baseurl=https?://[^/]*centos\\.org/centos/?|"
         f"baseurl=https://{RPM_MIRROR_HOST}/centos/|g' "
-        "    -e 's|^#?baseurl=https?://[^/]*fedora\\.org/|"
+        "    -e 's|^[[:space:]]*#[[:space:]]*baseurl=https?://[^/]*fedora\\.org/fedora/?|"
         f"baseurl=https://{RPM_MIRROR_HOST}/fedora/|g' "
         "    \"$f\"; "
         "done"
@@ -959,8 +996,14 @@ def WrapDnfInstallRun(body: str) -> str:
     restoreRepos = (
         "if [ -d /tmp/.kvbench-repo.bak/yum.repos.d ]; then "
         "rm -rf /etc/yum.repos.d; "
-        "mv /tmp/.kvbench-repo.bak/yum.repos.d /etc/yum.repos.d; fi; "
-        "dnf clean all >/dev/null 2>&1 || true"
+        "mv /tmp/.kvbench-repo.bak/yum.repos.d /etc/yum.repos.d; fi"
+        # NOTE: deliberately NOT appending ``|| true`` here. The previous
+        # ``dnf clean all >/dev/null 2>&1 || true`` masked install failures:
+        # the upstream ``dnf install ... && dnf clean all && rm -rf ...``
+        # chain returned non-zero but the trailing ``|| true`` made the
+        # whole RUN exit 0, so Docker committed the layer with broken state
+        # (e.g. xz missing) and a ``---> Using cache`` stamp tricked later
+        # steps. Letting this exit propagate surfaces the real failure.
     )
     return (
         f"{PROXY_UNSET_SHELL}; "
@@ -1043,6 +1086,15 @@ def WrapCurlWgetRun(body: str) -> str:
     (``&&`` / ``||`` / ``;`` / ``|``). This avoids rewriting the bare
     ``curl`` in ``apt-get install -y curl python3`` or ``RUN apt install
     curl wget``.
+
+    Flag-with-argument handling: ``curl -o FILE`` and ``wget -O FILE`` are
+    the canonical form that puts the new filename token *immediately* after
+    a single-letter flag. The regex captures the command word in group 1
+    and any pre-existing flag tokens in group 2; the new flags are inserted
+    between them so that ``-O`` and its filename stay adjacent. The same
+    shape protects ``curl --output FILE`` / ``wget --output-document FILE``
+    (the regex stops before the bare filename because it lacks a leading
+    dash, and before ``=FILE`` because ``=`` is not in ``[\\w-]``).
     """
 
     command_pos = r"(?:^|(?:&&|\|\||;|\|)\s+)"
@@ -1054,14 +1106,14 @@ def WrapCurlWgetRun(body: str) -> str:
     rewritten = RewriteCurlUrls(body)
     if re.search(rf"(?i){command_pos}curl\b", rewritten) and "--retry" not in rewritten:
         rewritten = re.sub(
-            rf"(?i)({command_pos}curl\b(?:\s+--?[A-Za-z][\w-]*)*)",
-            r"\1 --retry 5 --retry-delay 3 --retry-connrefused --max-time 1800",
+            rf"(?i)({command_pos}curl\b)((?:\s+--?[A-Za-z][\w-]*)*)",
+            r"\1 --retry 5 --retry-delay 3 --retry-connrefused --max-time 1800\2",
             rewritten,
         )
     if re.search(rf"(?i){command_pos}wget\b", rewritten) and "--tries" not in rewritten:
         rewritten = re.sub(
-            rf"(?i)({command_pos}wget\b(?:\s+--?[\w-]+)*)",
-            r"\1 --tries=5 --waitretry=3 --timeout=60",
+            rf"(?i)({command_pos}wget\b)((?:\s+--?[\w-]+)*)",
+            r"\1 --tries=5 --waitretry=3 --timeout=60\2",
             rewritten,
         )
     return _WithProxyUnset(rewritten)
@@ -1097,6 +1149,126 @@ def WrapGitCloneRun(body: str) -> str:
     return _WithProxyUnset(rewritten)
 
 
+# Nodesource's setup script (``deb.nodesource.com/setup_X.x``) is hosted on a
+# Cloudflare CDN that is intermittently blocked from networks whose egress
+# proxy's TLS path is flaky. The script itself also has no working Chinese
+# mirror (npmmirror has the redirect registered but the file is never
+# synced; tuna/aliyun/huawei all 404). The official Node.js binary tarball
+# IS mirrored on ``cdn.npmmirror.com/binaries/node/vX.Y.Z/`` (verified
+# reachable), so we replace the ``curl setup_X.x | bash - && apt-get install
+# nodejs`` pipeline with a direct tarball install. ``NODESOURCE_NODE_VERSION``
+# is the latest stable minor per major line; the wrap is only consulted when
+# ``deb.nodesource.com/setup_<N>.x`` actually appears in the body.
+NODESOURCE_NODE_VERSION = {
+    "18": "v18.20.4",
+    "20": "v20.18.0",
+    "22": "v22.12.0",
+}
+
+
+def WrapNodeSourceSetupRun(body: str) -> str:
+    """Replace ``curl ... setup_X.x | bash - && apt-get install -y nodejs``
+    with a tarball download from the npmmirror CDN.
+
+    ``setup_X.x`` writes the nodesource apt repo to ``/etc/apt/sources.list.d``
+    and runs ``apt-get install -y nodejs`` to fetch the binary. Both legs
+    depend on hosts we cannot reach; the official Node.js release tarball
+    IS mirrored at ``cdn.npmmirror.com/binaries/node/``, so we substitute
+    the whole pipeline with a self-contained tarball unpack that puts
+    ``node``/``npm``/``npx`` on ``/usr/local/bin``. ``apt-get install -y
+    nodejs`` is dropped because the unpacked tarball already provides
+    them — keeping it would only consume apt indexes against a missing
+    nodesource repo and fail.
+
+    The wrap only fires when the body mentions ``deb.nodesource.com/setup_``,
+    so unrelated tasks are untouched.
+    """
+
+    match = re.search(
+        r"https?://deb\.nodesource\.com/setup_(\d+)\.x",
+        body,
+    )
+    if match is None:
+        return body
+    version = match.group(1)
+    fullVersion = NODESOURCE_NODE_VERSION.get(version)
+    if fullVersion is None:
+        return body
+    archive = f"node-{fullVersion}-linux-x64"
+    archiveUrl = f"{NODE_BINARIES_MIRROR}/{fullVersion}/{archive}.tar.gz"
+    replacement = (
+        f"curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --max-time 1800 "
+        f"{archiveUrl} -o /tmp/.kvbench-node.tar.gz "
+        f"&& tar -xzf /tmp/.kvbench-node.tar.gz -C /opt "
+        f"&& ln -sf /opt/{archive}/bin/node /usr/local/bin/node "
+        f"&& ln -sf /opt/{archive}/bin/npm /usr/local/bin/npm "
+        f"&& ln -sf /opt/{archive}/bin/npx /usr/local/bin/npx "
+        f"&& ln -sf /opt/{archive}/bin/corepack /usr/local/bin/corepack"
+    )
+    # Match the entire ``curl ... setup_X.x | bash -`` segment and the
+    # immediately-trailing ``apt-get install -y nodejs`` (any quoting/flag
+    # shape, including the long ``--retry 5`` flags the other wraps add),
+    # stopping before the next &&-chained command. We keep the trailing
+    # commands (e.g. ``&& apt-get clean && rm -rf ...``) intact. The
+    # flag token regex accepts ``-x VALUE`` / ``--long VALUE`` / ``--flag=VALUE``
+    # in any combination so the wrap stays correct after ``WrapCurlWgetRun``
+    # has inserted ``--retry 5 --retry-delay 3 --retry-connrefused
+    # --max-time 1800`` ahead of the URL.
+    pattern = re.compile(
+        r"curl\s+"
+        r"(?:--?[A-Za-z][\w-]*(?:[ =][^\s|]+)?\s+)*"
+        r"https?://deb\.nodesource\.com/setup_\d+\.x\s*"
+        r"\|\s*(?:sudo\s+)?bash\s+-?\s*"
+        r"(?:\s*&&\s*apt-get\s+install\s+(?:--?[A-Za-z][\w-]*\s+)*nodejs\s*)?",
+        re.IGNORECASE,
+    )
+    rewritten, count = pattern.subn(replacement, body, count=1)
+    if count == 0:
+        return body
+    return rewritten
+
+
+def WrapCoursierRun(body: str) -> str:
+    """Make coursier (``cs setup`` / ``cs install``) survive flaky networks.
+
+    Two failure modes hit when the host proxy can't reach ``github.com``:
+
+    1. ``./cs setup --yes`` self-updates to the latest release straight from
+       ``github.com`` (not through the curl/wget rewrites), and the upstream
+       redirect to ``release-assets.githubusercontent.com`` times out on TLS.
+       M23's ``cs setup`` does NOT honor ``--no-self-update`` (the flag is
+       only available on ``cs launch`` / ``cs java``), so we drop the
+       ``cs setup`` segment entirely. The downstream ``cs install`` is
+       self-sufficient — it adds the artifacts to PATH via ``cs install``
+       itself, which is what the task actually needs.
+    2. ``./cs install <coord>`` resolves artifacts from Maven Central. With
+       no mirror env set, that hits ``repo1.maven.org`` directly. Setting
+       ``COURSIER_MIRRORS`` to the GitHub-proxy-fronted coursier mirror
+       lets coursier fetch through the proxy instead of the upstream.
+
+    Both fixes are no-ops when the body does not mention ``cs `` / ``coursier``
+    so existing tasks are unaffected.
+    """
+
+    if not re.search(r"(?i)\b(?:cs|coursier)\s+(?:setup|launch|install)\b", body):
+        return body
+    rewritten = body
+    # Drop the ``cs setup --yes`` segment and the ``&&`` that precedes
+    # it, since M23 doesn't expose a flag to skip its self-update, but
+    # the downstream ``cs install`` is self-sufficient. We consume the
+    # preceding operator but leave the trailing ``&&`` so the chain
+    # stays intact (e.g. ``... && chmod cs && ./cs install scala``).
+    rewritten = re.sub(
+        r"\s*&&\s*\.?/?cs\s+setup\b[^\n&|;]*?(?=\s*&&|\s*\|\||\s*;|\s*\||$)",
+        "",
+        rewritten,
+        count=1,
+    )
+    if "COURSIER_MIRRORS" not in rewritten:
+        rewritten = f"COURSIER_MIRRORS={COURSIER_MIRROR_URL} {rewritten}"
+    return rewritten
+
+
 def WrapNpmInstallRun(body: str) -> str:
     """Add ``--registry`` to ``npm install`` so it pulls from the npmmirror.
 
@@ -1125,10 +1297,41 @@ def _WithProxyUnset(body: str) -> str:
     detect that and skip it so the final RUN has a single ``unset`` once.
     """
 
-    stripped = body.lstrip()
-    if stripped.startswith(PROXY_UNSET_SHELL + ";"):
+    if body.lstrip().startswith(PROXY_UNSET_SHELL + ";"):
         return body
     return f"{PROXY_UNSET_SHELL}; {body}"
+
+
+def InjectHuggingfaceEndpoint(text: str) -> str:
+    """Insert an ``ENV HF_ENDPOINT=...`` line right after the first ``FROM``
+    so ``huggingface_hub`` (and ``huggingface-cli``) fetch through the
+    Chinese mirror at build time.
+
+    Some SkillsBench tasks run ``python3 -c "from <pkg> import <Model>; ..."``
+    to bake model weights into the image. The host's MITM proxy
+    intermittently drops the SSL stream to ``huggingface.co``; the
+    ``HF_ENDPOINT`` env var is honored by every official HuggingFace
+    client, so a single ``ENV`` line redirects every subsequent ``RUN``
+    (the env is inherited). Only used when ``--use-mirror`` is on so
+    default builds stay byte-identical to the upstream Dockerfile.
+
+    The ``ENV`` MUST come after a ``FROM`` (Docker requires ``FROM`` to be
+    the first non-ARG instruction), so we splice it in immediately after
+    the last ``FROM ... AS <stage>`` line. ARG-only Dockerfiles (a rare
+    multi-stage preamble) get the ``ENV`` appended at the end instead.
+    """
+
+    lines = text.splitlines(keepends=True)
+    lastFromIndex = -1
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.upper().startswith("FROM "):
+            lastFromIndex = index
+    if lastFromIndex == -1:
+        return f"ENV HF_ENDPOINT={HF_MIRROR_ENDPOINT}\n" + text
+    inserted = f"ENV HF_ENDPOINT={HF_MIRROR_ENDPOINT}\n"
+    lines.insert(lastFromIndex + 1, inserted)
+    return "".join(lines)
 
 
 def RewritePackageManagerRuns(text: str) -> str:
@@ -1195,6 +1398,10 @@ def RewritePackageManagerRuns(text: str) -> str:
             newBody = WrapGitCloneRun(newBody)
         if re.search(r"(?i)\bnpm\s+(?:install|i|add|ci)\b", newBody):
             newBody = WrapNpmInstallRun(newBody)
+        if re.search(r"(?i)\b(?:cs|coursier)\s+(?:setup|launch|install)\b", newBody):
+            newBody = WrapCoursierRun(newBody)
+        if "deb.nodesource.com/setup_" in newBody:
+            newBody = WrapNodeSourceSetupRun(newBody)
         if newBody == body:
             rendered.append(logical + "\n")
             continue
@@ -1366,6 +1573,10 @@ def BuildTaskImage(
             # by the base) but the actual install step still goes through the
             # proxy and benefits from the rewrite.
             rewritten = RewritePackageManagerRuns(rewritten)
+            # Redirect huggingface_hub to the Chinese mirror so build-time
+            # ``python3 -c "from <pkg> import <Model>; ..."`` model
+            # downloads survive the host's flaky SSL path to huggingface.co.
+            rewritten = InjectHuggingfaceEndpoint(rewritten)
         if DockerfileHasAptUpdate(dockerfile):
             canReuseAptBase = aptUpdateMode == "never"
             if (
