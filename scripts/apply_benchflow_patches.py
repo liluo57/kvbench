@@ -19,6 +19,15 @@ Patches applied:
   3. benchflow/sandbox/docker.py: drop `--rmi all` from the
      `compose down` in `stop()`. The prebuilt task image is expensive to
      rebuild (~25 min on slow apt) and we want to reuse it across runs.
+  4. benchflow/agents/registry.py: prepend a `sed` step to the pi-acp
+     install_cmd that rewrites `/etc/apt/sources.list.d/*.sources` and
+     `/etc/apt/sources.list` from `deb.debian.org` to
+     `mirrors.tuna.tsinghua.edu.cn` before the bootstrap's
+     `apt-get update` runs. SkillsBench task images ship the official
+     Debian mirror; from China the 9 MB trixie Packages.xz downloads at
+     ~8 KB/s and the 900 s install timeout can be hit before
+     apt-get update finishes. Tuna serves the same files from a
+     Tsinghua CDN mirror (~50 MB/s from China).
 
 All three patches are idempotent: each looks for a marker string (a comment
 or a distinctive post-patch substring) first and aborts that step with a
@@ -52,6 +61,7 @@ DOCKER_PATH = BENCHFLOW_ROOT / "sandbox" / "docker.py"
 MARKER_PIACP_VERSION = "# Patched for KVBench smoke runs: pi-acp 0.0.32 pin"
 MARKER_AUTONOMY = "# Patched for KVBench smoke runs: pi autonomous directive"
 MARKER_NO_RMI = "# Patched for kvbench smoke runs: do NOT pass `--rmi all`"
+MARKER_APT_MIRROR = "# Patched for KVBench smoke runs: rewrite apt mirror to tuna"
 
 # Belt-and-braces idempotency markers: post-patch substrings that are unique
 # to the patched state. The session's hand-edits left the actual code
@@ -142,6 +152,77 @@ def _has_piacp_pin(text: str) -> bool:
     return MARKER_PIACP_VERSION in text or POST_PATCH_PIACP in text
 
 
+# ---------------------------------------------------------------------------
+# Patch 4: registry.py — rewrite deb.debian.org → tuna before apt-get update
+# ---------------------------------------------------------------------------
+#
+# SkillsBench task images ship /etc/apt/sources.list.d/debian.sources pointing
+# at deb.debian.org (the official EU/US mirror). From China the 9MB
+# trixie/main Packages.xz downloads at ~8 KB/s — slow enough that the 900s
+# install timeout can be hit before apt-get update finishes.
+#
+# We prepend a sed step to the start of the pi-acp install_cmd so it rewrites
+# both /etc/apt/sources.list.d/*.sources and /etc/apt/sources.list to the
+# Tsinghua mirror BEFORE _js_agent_install's apt-get update runs.
+#
+# The `; true` guard and `2>/dev/null` make this safe to run on images where
+# either file is missing.
+
+# Anchor: the FIRST line of the pi-acp install_cmd (the `_js_agent_install('pi', ...)`
+# call). Prepending the sed here means it runs before any apt-get update
+# inside _js_agent_install.
+_PIACP_FIRST_LINE = (
+    "            f\"{_js_agent_install('pi', '@mariozechner/pi-coding-agent')} && \""
+)
+
+# Post-patch fingerprint: the sed command we inject.
+POST_PATCH_APT_MIRROR = "mirrors.tuna.tsinghua.edu.cn"
+
+
+def _has_apt_mirror_patch(text: str) -> bool:
+    """True iff registry.py has the apt-mirror rewrite (marker comment or
+    the post-patch tuna URL)."""
+    return MARKER_APT_MIRROR in text or POST_PATCH_APT_MIRROR in text
+
+
+def _build_apt_mirror_block() -> str:
+    """Return the sed-rewrite line prepended to the pi-acp install_cmd.
+
+    The image ships two apt source files pointing at deb.debian.org:
+
+    * ``/etc/apt/sources.list.d/debian.sources`` — the .sources-style file
+      with two stanzas (debian + debian-security), both on deb.debian.org.
+    * ``/etc/apt/sources.list`` — already rewritten to tuna by the image
+      author, BUT with a *broken* ``trixie-security`` line that points at
+      ``/debian/`` (tuna keeps ``trixie-security`` under
+      ``/debian-security/``).
+
+    A naive ``s|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g`` over BOTH
+    files causes apt-get update to fail because (a) ``trixie`` /
+    ``trixie-updates`` get duplicated across both files (warning only),
+    and (b) the broken ``trixie-security`` line still tries
+    ``trixie-security`` under ``/debian/`` which tuna does not serve.
+
+    The fix below does three things:
+      1. rewrite the .sources file to use tuna (debian + debian-security
+         URLs both work on tuna).
+      2. delete the broken ``trixie-security`` line from sources.list —
+         debian.sources now provides it correctly.
+      3. leave ``trixie`` / ``trixie-updates`` lines in sources.list alone
+         (their duplicate-config warnings are harmless and don't fail
+         apt-get update).
+    """
+    return (
+        MARKER_APT_MIRROR
+        + "\n"
+        + "            f\"( sed -i.bak "
+        + "'s|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' "
+        + "/etc/apt/sources.list.d/*.sources; "
+        + "sed -i.bak '/trixie-security/d' /etc/apt/sources.list; "
+        + "true ) && \"\n"
+    )
+
+
 def patch_registry() -> str:
     """Apply patches 1+2 to registry.py. Idempotent."""
     if not REGISTRY_PATH.exists():
@@ -180,6 +261,25 @@ def patch_registry() -> str:
             "writes directive file, sed-patches dist/index.js"
         )
 
+    # Sub-patch: prepend apt-mirror rewrite so apt-get update hits tuna
+    if _has_apt_mirror_patch(text):
+        msgs.append("[registry.py] apt-mirror rewrite already applied, skip")
+    else:
+        if _PIACP_FIRST_LINE not in text:
+            return (
+                "[registry.py] pi-acp first install_cmd line not found — "
+                "upstream may have rewritten the install block; manual patch needed"
+            )
+        text = text.replace(
+            _PIACP_FIRST_LINE,
+            _build_apt_mirror_block() + _PIACP_FIRST_LINE,
+            1,
+        )
+        msgs.append(
+            "[registry.py] prepended apt-mirror rewrite to pi-acp install_cmd "
+            "(deb.debian.org → mirrors.tuna.tsinghua.edu.cn)"
+        )
+
     REGISTRY_PATH.write_text(text)
     return "\n".join(msgs)
 
@@ -189,7 +289,11 @@ def check_registry() -> bool:
     if not REGISTRY_PATH.exists():
         return False
     text = REGISTRY_PATH.read_text()
-    return _has_autonomy_patch(text) and _has_piacp_pin(text)
+    return (
+        _has_autonomy_patch(text)
+        and _has_piacp_pin(text)
+        and _has_apt_mirror_patch(text)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         missing: list[str] = []
         if not check_registry():
-            missing.append("registry.py: pi-acp pin + autonomous directive")
+            missing.append("registry.py: pi-acp pin + autonomous directive + apt mirror")
         if not check_docker():
             missing.append("docker.py: --rmi all removal")
         if missing:

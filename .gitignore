@@ -10,5 +10,3 @@ outputs/
 .claude
 .pytest_cache/
 
-# benchmark data (populated via config.yaml DatasetPath)
-data/

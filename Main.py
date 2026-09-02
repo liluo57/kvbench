@@ -45,7 +45,14 @@ MAX_NEW_TOKENS=64
 
 
 def Main() -> None:
-    task_ids = ['adaptive-cruise-control','ada-bathroom-plan-repair']
+    skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
+    # 3 reps per task for pass-rate measurement. Engine processes cases
+    # sequentially (batchSize=1) so each rep gets its own GPU allocation.
+    REPS = 3
+    task_ids = (
+        ['adaptive-cruise-control'] * REPS
+        + ['ada-bathroom-plan-repair'] * REPS
+    )
     tasks = [
         AgentBenchFlowTask(
             source_mode="local",
