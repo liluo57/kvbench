@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
-from core.Config import AgentBenchFlowDefaults
+from core.Config import Get
 from core.Result import Result
 from core.Task import Case, Task
 from workload.AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
@@ -58,12 +58,12 @@ class AgentBenchFlowTask(Task):
         bench_command: Optional[str] = None,
         bench_extra_args: Optional[Sequence[str]] = None,
     ):
-        cfg = AgentBenchFlowDefaults()
-        self.sourceMode = source_mode or cfg.get("SourceMode", "dataset")
+        abf = Get("AgentBenchFlow", {}) or {}
+        self.sourceMode = source_mode or abf.get("SourceMode", "dataset")
         if self.sourceMode not in {"dataset", "local"}:
             raise ValueError("source_mode must be 'dataset' or 'local'")
-        self.dataset = dataset if dataset is not None else cfg.get("Dataset", "skillsbench@1.1")
-        configuredRepo = cfg.get("SkillsBenchRepo")
+        self.dataset = dataset if dataset is not None else abf.get("Dataset", "skillsbench@1.1")
+        configuredRepo = abf.get("SkillsBenchRepo")
         repoValue = skillsbench_dir if skillsbench_dir is not None else configuredRepo
         self.skillsbenchDir = Path(repoValue) if repoValue else None
         if self.sourceMode == "local" and self.skillsbenchDir is None:
@@ -72,30 +72,30 @@ class AgentBenchFlowTask(Task):
             )
         self.excludeTaskIds = set(exclude_task_ids or ())
         self.maxSamples = max_samples
-        self.agent = agent or cfg.get("Agent", "pi-acp")
-        self.sandbox = sandbox or cfg.get("Sandbox", "docker")
-        self.skillMode = skill_mode or cfg.get("SkillMode", "with-skill")
+        self.agent = agent or abf.get("Agent", "pi-acp")
+        self.sandbox = sandbox or abf.get("Sandbox", "docker")
+        self.skillMode = skill_mode or abf.get("SkillMode", "with-skill")
         if self.skillMode not in {"with-skill", "no-skill"}:
             raise ValueError("skill_mode must be 'with-skill' or 'no-skill'")
-        self.providerHost = provider_host or cfg.get("ProviderHost", "127.0.0.1")
-        self.endpointHost = endpoint_host or cfg.get("EndpointHost", "0.0.0.0")
+        self.providerHost = provider_host or abf.get("ProviderHost", "127.0.0.1")
+        self.endpointHost = endpoint_host or abf.get("EndpointHost", "0.0.0.0")
         self.port = 0 if port is None else int(port)
-        self.modelId = model_id if model_id is not None else cfg.get("ModelId")
-        configuredOutput = output_dir if output_dir is not None else cfg.get("OutputDir")
+        self.modelId = model_id if model_id is not None else abf.get("ModelId")
+        configuredOutput = output_dir if output_dir is not None else abf.get("OutputDir")
         self.outputDir = Path(configuredOutput) if configuredOutput else None
         self.resultJsonTimeout = (
             float(result_json_timeout)
             if result_json_timeout is not None
-            else float(cfg.get("ResultJsonTimeoutSec", 3600))
+            else float(abf.get("ResultJsonTimeoutSec", 3600))
         )
-        self.thinking = thinking if thinking is not None else cfg.get("Thinking")
+        self.thinking = thinking if thinking is not None else abf.get("Thinking")
         self.providerApiKey = provider_api_key
-        self.providerApiKeyEnv = provider_api_key_env or cfg.get(
+        self.providerApiKeyEnv = provider_api_key_env or abf.get(
             "ProviderApiKeyEnv", "KVBENCH_PROVIDER_API_KEY"
         )
-        self.benchCommand = bench_command or cfg.get("BenchCommand", "bench")
+        self.benchCommand = bench_command or abf.get("BenchCommand", "bench")
         self.benchExtraArgs = list(
-            bench_extra_args if bench_extra_args is not None else cfg.get("BenchExtraArgs") or []
+            bench_extra_args if bench_extra_args is not None else abf.get("BenchExtraArgs") or []
         )
         self._resolvedTaskIds = self._ResolveTaskIds(task_ids)
         if self.sourceMode == "local" and self.skillsbenchDir is not None:

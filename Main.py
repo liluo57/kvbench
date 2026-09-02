@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from core import ModelPath
-from core.Config import AgentBenchFlowDefaults
+from core.Config import Get
 from core.engine import Engine
 from metrics import ThroughputMetric, TTFTMetric
 
@@ -45,9 +45,8 @@ MAX_NEW_TOKENS=64
 
 
 def Main() -> None:
-    agentBenchFlowConfig = AgentBenchFlowDefaults()
     skillsbench_root = Path(
-        agentBenchFlowConfig.get("SkillsBenchRepo", "/data/lyh/skillsbench")
+        (Get("AgentBenchFlow", {}) or {}).get("SkillsBenchRepo", "/data/lyh/skillsbench")
     )
     skillsbench_tasks_root = skillsbench_root / "tasks"
     task_ids = sorted(

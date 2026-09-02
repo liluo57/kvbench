@@ -65,39 +65,3 @@ def ModelPath(config: Optional[Dict[str, Any]] = None) -> str:
     return str(Get("ModelPath", None, config=config) or "")
 
 
-# ── AgentBenchFlow (SkillsBench + benchflow integration) ────────────────────
-
-
-def AgentBenchFlowSection(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """The ``AgentBenchFlow:`` section from ``config.yaml`` as a dict.
-
-    Returns an empty dict when the section is absent so callers can layer
-    constructor arguments on top without duplicating the defaults.
-    """
-    source = LoadConfig() if config is None else config
-    section = source.get("AgentBenchFlow") or {}
-    return section if isinstance(section, dict) else {}
-
-
-def AgentBenchFlowDefaults(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """A flat dict of non-required defaults for the AgentBenchFlow* task family.
-
-    Used by :class:`tasks.AgentBenchFlowTask` to populate its constructor
-    arguments without forcing every caller to repeat the full config.
-    """
-    return dict(AgentBenchFlowSection(config=config))
-
-
-def AgentBenchFlowSkillsBenchRepo(config: Optional[Dict[str, Any]] = None) -> Path:
-    """Path to the cloned SkillsBench repo (must contain ``tasks/<id>/task.md``).
-
-    Raises ``FileNotFoundError`` when the configured path doesn't exist so a
-    missing clone surfaces loudly at Task construction time.
-    """
-    value = AgentBenchFlowSection(config=config).get("SkillsBenchRepo")
-    if not value:
-        raise FileNotFoundError(
-            f"config.yaml is missing AgentBenchFlow.SkillsBenchRepo "
-            f"(set it to the root of the cloned benchflow-ai/skillsbench repo)"
-        )
-    return Path(value)
