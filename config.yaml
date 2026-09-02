@@ -34,59 +34,31 @@ Cacheblend:
     RepoPath: /root/cache-blend/CacheBlend
 
 
-# SkillsBench + mini-SWE integration for AgentBenchFlowTask.
+# SkillsBench via the installed BenchFlow runtime.
 AgentBenchFlow:
   # Root of the cloned SkillsBench repo (must contain tasks/<id>/task.md).
   # Cloned from https://github.com/benchflow-ai/skillsbench.
   SkillsBenchRepo: /root/skillsbench
 
-  # Where the agent and verifier run. Options:
-  #   "docker" (default): builds the task's environment/Dockerfile and runs
-  #     both in containers. Production path when Docker daemon is available.
-  #   "apptainer": rootless — no Docker daemon, no sudo. Pulls the task's
-  #     base image (the FROM line of environment/Dockerfile) as a SIF and
-  #     runs agent + verifier with bind mounts. The Dockerfile's RUN/COPY
-  #     steps are NOT applied (apptainer build needs newuidmap/fuse-overlayfs
-  #     which we don't have); the task's per-image deps must already be in
-  #     the base image, or staged via /host_tools (the Helper bind-mounts
-  #     the host's mini-swe-agent into the container automatically).
-  #   "local": runs everything on the host without isolation; only for
-  #     dev / smoke testing the HTTP plumbing.
-  SandboxType: apptainer
+  # BenchFlow 0.7.5 currently provides pi-acp, opencode, and mimo, but not
+  # qwen-code. pi-acp has the skill path needed for with-skill runs and uses
+  # BenchFlow's normal ACP/provider routing.
+  Agent: pi-acp
+  Sandbox: docker
+  SkillMode: with-skill
 
-  # CLI binary invoked inside the sandbox. mini-swe-agent is the 100-line
-  # Python agent from SWE-agent/mini-swe-agent (Princeton/Stanford SWE-bench
-  # team); it talks to any OpenAI-compatible endpoint via litellm, so we
-  # point it at our kvbench-backed HTTP server with OPENAI_API_BASE.
-  AgentCommand: mini-swe-agent
+  # The endpoint binds to EndpointHost, while this host name is placed in the
+  # provider URL. With BenchFlow 0.7.5's mandatory host LiteLLM proxy,
+  # 127.0.0.1 is the correct upstream address from the host proxy to KVBench.
+  # For a direct provider path, use host.docker.internal or the Linux Docker
+  # host-gateway alias instead.
+  ProviderHost: 127.0.0.1
+  EndpointHost: 0.0.0.0
+  ProviderApiKeyEnv: KVBENCH_PROVIDER_API_KEY
 
-  # Sandbox image override (apptainer only). When the apptainer sandbox can't
-  # apply the task's Dockerfile RUN/COPY steps (rootless install without
-  # newuidmap/fakeroot), set one of these to skip the Dockerfile entirely
-  # and pull a pre-built image instead.
-  #
-  # ImageOverride:    single URI used for every task.
-  # ImageOverrides:   per-task dict; overrides ImageOverride if the task id
-  #                   is present. Useful when only some SkillsBench tasks
-  #                   need a custom base (e.g. python:3.11-slim for
-  #                   citation-check, while others might be fine on the
-  #                   default FROM line of their Dockerfile).
-  #
-  # Default (null): apptainer parses the FROM line of the task's Dockerfile.
-  # ImageOverride: null
-  # ImageOverrides: {}
-
-  # Where each case writes its per-rollout output files (agent log, verifier
-  # log, synthetic result.json, agent + verifier workspaces, trajectory).
-  # Each SkillsBench task gets its own subdir under this tree. Set to null
-  # for a fresh tempdir per case.
-  OutputDir: /root/kvbench/outputs/benchflow
-
-  # Seconds to wait for the agent + verifier to finish inside the sandbox.
-  # Engine.taskTimeout is the outer bound.
-  ResultJsonTimeoutSec: 3600
-
-  # Extra flags appended to the agent CLI invocation. Use for anything
-  # mini-swe-agent's CLI accepts beyond --task / --model / --yolo /
-  # --exit-immediately / --cost-limit (which the Helper sets).
-  AgentExtraArgs: []
+  # BenchFlow writes the official result.json and all rollout artifacts here.
+  BenchCommand: bench
+  OutputDir: /data/lyh/kvbench/outputs/benchflow
+  ResultJsonTimeoutSec: 7200
+  Thinking: true
+  BenchExtraArgs: []

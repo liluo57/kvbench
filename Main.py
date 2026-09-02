@@ -11,8 +11,10 @@ datasets resolve by name against ``DatasetPath``.
 
 import json
 import sys
+from pathlib import Path
 
 from core import ModelPath
+from core.Config import Get
 from core.engine import Engine
 from metrics import ThroughputMetric, TTFTMetric
 
@@ -41,17 +43,30 @@ from tasks.FreshGap import FreshGapTask
 MAX_SAMPLES=64
 MAX_NEW_TOKENS=64
 
+
 def Main() -> None:
+    skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
+    # 3 reps per task for pass-rate measurement. Engine processes cases
+    # sequentially (batchSize=1) so each rep gets its own GPU allocation.
+    REPS = 3
+    task_ids = (
+        ['adaptive-cruise-control'] * REPS
+        + ['ada-bathroom-plan-repair'] * REPS
+    )
     tasks = [
         AgentBenchFlowTask(
-            image_override="docker://python:3.13-slim",
-            task_ids=["azure-bgp-oscillation-route-leak"],
-            thinking=False,
-            agent_extra_args=[
-                "--config", "/host_lib/minisweagent/config/mini.yaml",
-                "--config", "agent.step_limit=10",
+            source_mode="local",
+            skillsbench_dir=skillsbench_root,
+            task_ids=[task_id],
+            agent="pi-acp",
+            skill_mode="with-skill",
+            thinking=True,
+            bench_extra_args=[
+                "--agent-idle-timeout", "3600",
+                "--config-override", '{"agent":{"timeout_sec":7200}}',
             ],
-        ),
+        )
+        for task_id in task_ids
     ]
 
     methods = [
@@ -81,16 +96,16 @@ def Main() -> None:
     sys.stdout.flush()
 
     engine = Engine(
-        availableGpuIds=[1, 3],
+        availableGpuIds='auto',
         batchSize=batchSize,
         initializeTimeout=1800,
-        taskTimeout=3600,
+        taskTimeout=10800,
         shutdownGracePeriod=30,
         gpuReleaseTimeout=30,
         gpuReleaseStableSeconds=1,
         gpuReleaseMemoryToleranceMiB=256,
         pairRetries=1,
-        tui=True,
+        tui=False,
         verbose=True,
     )
     report = engine.Evaluate(tasks=tasks, methods=methods, metrics=metrics)
@@ -101,4 +116,8 @@ def Main() -> None:
 
 
 if __name__ == "__main__":
-    Main()
+    try:
+        Main()
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"[main] ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

@@ -1,139 +1,132 @@
-"""One SkillsBench rollout, driven by mini-swe-agent (or another CLI agent).
-
-The Workload is the kvbench-facing side of the bridge; the HTTP server, the
-agent subprocess, and the verifier live in
-:class:`helpers.benchflow.BenchflowHelper`.
-The Workload's contract is the usual :class:`core.Workload.Workload`:
-
-- :meth:`next` blocks until the agent's next LLM call arrives, then emits a
-  single :class:`~core.Workload.Action` carrying the rendered prompt. The
-  Engine turns that into ``Method.Run``, which is the only place our KV cache
-  optimization enters the picture — Method itself has no idea that the
-  prompt came from an agent over HTTP.
-- :meth:`observe` hands the assistant text back to the Helper, which unblocks
-  the waiting HTTP request and lets the agent continue its turn.
-- :meth:`final_result` returns the parsed ``result.json`` so
-  :class:`tasks.AgentBenchFlowTask.AgentBenchFlowTask.Evaluate` can read the
-  rollout's reward.
-
-The rollout ends when the Helper's watchdog detects the agent subprocess
-exit + (in direct mode) the verifier has finished scoring; :meth:`next` then
-returns ``None``.
-"""
+"""Small Workload bridge between a real BenchFlow rollout and KVBench."""
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.Config import ModelPath
 from core.Result import Result
 from core.Workload import Action, ActionKind, ActionResult, Workload
 
-from helpers.benchflow import BenchflowHelper
+from helpers.benchflow import BenchflowRunner
 
 
 @dataclass
 class AgentBenchFlowInput:
-    """Per-case data for :class:`AgentBenchFlowWorkload`.
+    """Per-case configuration passed to :class:`AgentBenchFlowWorkload`."""
 
-    The fields are a thin pass-through to :class:`BenchflowHelper`; defaults
-    match what the Helper would pick if left to its own devices.
-    """
-
-    skillsbench_dir: str
     task_id: str
-    # ── Orchestration ──────────────────────────────────────────────────────
-    sandbox_type: str = "docker"  # "docker" | "apptainer" | "local"
-    # ── Sandbox image override (apptainer only) ───────────────────────────
-    # When non-None, the sandbox pulls this OCI/Docker URI instead of the
-    # FROM line of environment/Dockerfile. Used to skip Dockerfile RUN steps
-    # (which need newuidmap/fakeroot, unavailable in rootless installs) by
-    # pointing at a pre-built image that already has the required tools.
-    image_override: Optional[str] = None
-    # ── Agent settings ─────────────────────────────────────────────────────
-    agent_command: str = "mini-swe-agent"
-    agent_extra_args: Sequence[str] = field(default_factory=tuple)
-    # ── CoT toggle ─────────────────────────────────────────────────────────
-    # ``True`` (default) lets the model reason; ``False`` suppresses CoT.
-    # The per-arch kwarg translation lives in ``helpers.ModelAdapter.render_chat``.
-    # ``None`` collapses to ``True``.
-    thinking: Optional[bool] = True
-    # ── Network ────────────────────────────────────────────────────────────
-    host: str = "0.0.0.0"
-    port: Optional[int] = None
-    # ── Output / lifecycle ─────────────────────────────────────────────────
+    source_mode: str = "dataset"
+    dataset: Optional[str] = "skillsbench@1.1"
+    skillsbench_dir: Optional[str] = None
+    agent: str = "pi-acp"
+    sandbox: str = "docker"
+    skill_mode: str = "with-skill"
+    provider_host: str = "127.0.0.1"
+    endpoint_host: str = "0.0.0.0"
+    port: int = 0
+    model_id: Optional[str] = None
     output_dir: Optional[str] = None
     result_json_timeout: float = 3600.0
-    #: Populated by the Helper on first ``next`` so callers can inspect where
-    #: the rollout landed without recomputing paths.
+    thinking: Optional[bool] = None
+    provider_api_key: Optional[str] = None
+    provider_api_key_env: str = "KVBENCH_PROVIDER_API_KEY"
+    bench_command: str = "bench"
+    bench_extra_args: Sequence[str] = field(default_factory=tuple)
+    #: Filled after the runner starts; useful to callers and diagnostics.
     endpoint_url: str = field(default="", init=False)
 
 
 class AgentBenchFlowWorkload(Workload):
-    """Bridge a SkillsBench rollout through a CLI agent and ``Method.Run``."""
+    """Convert each external agent request into an ordinary RUN Action."""
 
-    def __init__(self, case_id: int, data: AgentBenchFlowInput):
+    def __init__(
+        self,
+        case_id: int,
+        data: AgentBenchFlowInput,
+        *,
+        runner: Optional[BenchflowRunner] = None,
+    ):
         self.case_id = case_id
         self._data = data
-        self._helper: Optional[BenchflowHelper] = None
-        self._pending: Optional[Any] = None
+        self._runner = runner
+        self._pending = None
         self._lastResult: Optional[Result] = None
         self._finalResult: Optional[Result] = None
+        self._finished = False
 
-    # ------------------------------------------------------------------ Workload
     def next(self) -> Optional[List[Action]]:
-        if self._helper is None:
-            self._helper = BenchflowHelper(
-                skillsbench_dir=self._data.skillsbench_dir,
-                task_id=self._data.task_id,
-                model_path=ModelPath(),
-                sandbox_type=self._data.sandbox_type,
-                image_override=self._data.image_override,
-                agent_command=self._data.agent_command,
-                agent_extra_args=self._data.agent_extra_args,
-                host=self._data.host,
-                port=self._data.port,
-                output_dir=self._data.output_dir,
-                result_json_timeout=self._data.result_json_timeout,
-                thinking=self._data.thinking,
-            )
-            self._data.endpoint_url = self._helper.endpointUrl
-
-        item = self._helper.wait_for_request()
-        if item is None:
-            self._finalResult = self._SynthesiseFinalResult()
+        if self._finished:
+            return None
+        try:
+            if self._runner is None:
+                self._runner = BenchflowRunner(
+                    taskId=self._data.task_id,
+                    modelPath=ModelPath(),
+                    sourceMode=self._data.source_mode,
+                    dataset=self._data.dataset,
+                    skillsbenchDir=self._data.skillsbench_dir,
+                    agent=self._data.agent,
+                    sandbox=self._data.sandbox,
+                    skillMode=self._data.skill_mode,
+                    providerHost=self._data.provider_host,
+                    endpointHost=self._data.endpoint_host,
+                    port=self._data.port,
+                    modelId=self._data.model_id,
+                    jobsDir=self._data.output_dir,
+                    resultJsonTimeout=self._data.result_json_timeout,
+                    thinking=self._data.thinking,
+                    providerApiKey=self._data.provider_api_key,
+                    providerApiKeyEnv=self._data.provider_api_key_env,
+                    benchCommand=self._data.bench_command,
+                    extraArgs=self._data.bench_extra_args,
+                )
+            self._runner.start()
+            self._data.endpoint_url = getattr(self._runner, "endpointUrl", "")
+            request = self._runner.wait_for_request()
+        except BaseException as exc:
+            self.fail(exc)
+            return None
+        if request is None:
+            self._finalResult = self._BuildFinalResult()
+            self._finished = True
             return None
 
-        prompt, _future = item
-        self._pending = item
-        return [Action(
-            kind=ActionKind.RUN,
-            case_id=self.case_id,
-            data=prompt,
-            tag="agent_turn",
-            retainOutput=False,
-        )]
+        if self._pending is not None:
+            raise RuntimeError("BenchFlow produced a request before the prior one was observed")
+        self._pending = request
+        return [
+            Action(
+                kind=ActionKind.RUN,
+                case_id=self.case_id,
+                data=request.prompt,
+                tag="agent_turn",
+                retainOutput=True,
+            )
+        ]
 
     def observe(self, results: List[ActionResult]) -> None:
         if len(results) != 1:
             raise ValueError(
-                f"AgentBenchFlowWorkload expects exactly one ActionResult per "
+                "AgentBenchFlowWorkload expects exactly one ActionResult per "
                 f"step, got {len(results)}"
             )
+        if self._pending is None:
+            raise RuntimeError("AgentBenchFlowWorkload observed a result without a pending request")
         result = results[0].result
         self._lastResult = result
-        if self._pending is None:
-            return
-        _prompt, future = self._pending
+        request = self._pending
         self._pending = None
         output = "" if result.output is None else str(result.output)
-        self._helper.respond(future, output)
+        if self._runner is None:
+            raise RuntimeError("AgentBenchFlowWorkload has no BenchFlow runner")
+        try:
+            self._runner.respond(request, output)
+        except BaseException as exc:
+            self.fail(exc)
 
     @property
     def finished(self) -> bool:
-        if self._helper is None:
-            return False
-        return self._helper.is_done
+        return self._finished
 
     @property
     def final_result(self) -> Optional[Result]:
@@ -141,31 +134,54 @@ class AgentBenchFlowWorkload(Workload):
             return self._finalResult
         return self._lastResult
 
-    # --------------------------------------------------------------- helpers
-    def _SynthesiseFinalResult(self) -> Result:
-        payload = self._helper.final_result() if self._helper is not None else None
-        output: Any = payload if payload is not None else self._lastResult
+    def fail(self, error: BaseException | str) -> None:
+        """Finish this rollout as a zero-score case and release its runner."""
+        if self._finished:
+            return
+        message = (
+            f"{type(error).__name__}: {error}"
+            if isinstance(error, BaseException)
+            else str(error)
+        )
         metadata: Dict[str, Any] = {}
-        if self._helper is not None:
-            metadata["endpoint_url"] = self._helper.endpointUrl
-            metadata["output_dir"] = str(self._helper.outputDir)
-            metadata["agent_log"] = str(self._helper.agentLogPath)
-            metadata["verifier_log"] = str(self._helper.verifierLogPath)
-            metadata["run_mode"] = self._helper.runMode
-        if isinstance(payload, dict):
-            for key in ("reward", "rewards", "score", "scores", "agent_exit_code",
-                        "verifier_ran", "verifier_error"):
-                if key in payload:
-                    metadata[f"benchflow_{key}"] = payload[key]
-        return Result(output=output, performance={}, metadata=metadata)
+        if self._runner is not None:
+            try:
+                metadata.update(self._runner.Diagnostics())
+            except BaseException:
+                pass
+            metadata["benchflow_error"] = message
+            try:
+                self._runner.stop()
+            except BaseException:
+                pass
+        self._pending = None
+        self._finalResult = Result(
+            output={"reward": 0.0, "error": message},
+            performance={},
+            metadata=metadata,
+        )
+        self._finished = True
+
+    def _BuildFinalResult(self) -> Result:
+        payload = self._runner.officialResult if self._runner is not None else None
+        metadata: Dict[str, Any] = (
+            self._runner.Diagnostics() if self._runner is not None else {}
+        )
+        if self._runner is not None:
+            # The monitor has already collected BenchFlow's result. Close the
+            # listening endpoint before the case is handed to Task.Evaluate.
+            self._runner.stop()
+        return Result(output=payload, performance={}, metadata=metadata)
+
+    def close(self) -> None:
+        if self._runner is not None:
+            self._runner.stop()
 
     def __del__(self) -> None:
-        helper = getattr(self, "_helper", None)
-        if helper is not None:
-            try:
-                helper.stop()
-            except Exception:  # noqa: BLE001 - destructor must not raise
-                pass
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 - best effort only
+            pass
 
 
 __all__ = ["AgentBenchFlowInput", "AgentBenchFlowWorkload"]

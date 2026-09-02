@@ -117,6 +117,18 @@ class _RecordingMethod(Method):
         self.resetCalls += 1
 
 
+class _FailOnceMethod(_RecordingMethod):
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def Run(self, data, retainOutput=None):
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("one case failed")
+        return super().Run(data, retainOutput)
+
+
 def test_evaluate_pair_batches_actions_and_aggregates_every_run():
     task = _BatchTask(count=3)
     method = _RecordingMethod()
@@ -155,6 +167,38 @@ def test_evaluate_pair_batches_actions_and_aggregates_every_run():
     assert method.resetCalls == 2
     assert task.evaluated == ["case-0:final", "case-1:final", "case-2:final"]
     assert all(len(workload.observed) == 3 for workload in task.workloads)
+
+
+class _CaseFailureIsolatedTask(Task):
+    name = "case-failure-isolated"
+    continueOnCaseFailure = True
+
+    def Cases(self):
+        for caseId in range(2):
+            yield Case(
+                workload=_TwoRunWorkload(caseId),
+                metadata={"expected": f"case-{caseId}:final"},
+            )
+
+    def Evaluate(self, result, metadata):
+        value = float(result.output == metadata["expected"])
+        return {"reward": value, "accuracy": value}
+
+    def CaseFailureScores(self, metadata, error):
+        return {"reward": 0.0, "accuracy": 0.0}
+
+
+def test_evaluate_pair_scores_failed_case_as_zero_and_continues():
+    method = _FailOnceMethod()
+
+    report = EvaluatePair(_CaseFailureIsolatedTask(), method, [], batchSize=2)
+
+    assert report["cases"] == 2
+    assert report["task_metrics"] == {
+        "reward": {"mean": 0.5},
+        "accuracy": {"mean": 0.5},
+    }
+    assert method.resetCalls == 2
 
 
 class _OneActionWorkload(Workload):

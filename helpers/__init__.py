@@ -29,12 +29,9 @@ loosely-coupled subsystems live here today:
      via side-effect (``AutoConfig.register`` + ``ModelRegistry.register_model``)
      for that worker.
 
-3. **BenchFlow (SkillsBench)** — agent-in-sandbox orchestration.
-
-   - :mod:`helpers.SkillInjector` — skill body feed into the system region.
-   - :mod:`helpers.benchflow` — HTTP endpoint, sandbox staging, and
-     watchdog that runs the agent + verifier in an apptainer SIF.
-
-The split is documentation-only for now; see the helpers/ subpackage
-split tracked separately for the structural cleanup.
+3. **BenchFlow bridge** — :mod:`helpers.benchflow` starts the installed
+   BenchFlow CLI; :mod:`helpers.endpoint` is the generic KVBench-owned
+   OpenAI-compatible inference endpoint. BenchFlow owns benchmark harness
+   concerns, while the endpoint remains the inference chokepoint used by
+   every KVBench method.
 """

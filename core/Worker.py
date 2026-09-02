@@ -32,29 +32,23 @@ def EvaluatePair(
         name: [] for name in method.method_metrics
     }
     nCases = 0
+    # AgentBenchFlow cases are independent external rollouts.  Keep them
+    # one-at-a-time so a Method.Run failure can be attributed to exactly one
+    # case and the following rollout can still use the same worker.
+    effectiveBatchSize = (
+        1 if getattr(task, "continueOnCaseFailure", False) else batchSize
+    )
     batch: List[Case] = []
     for case in task.Cases():
         batch.append(case)
-        if len(batch) >= batchSize:
-            nCases += _ProcessBatch(
-                task,
-                method,
-                metrics,
-                batch,
-                taskScores,
-                methodScores,
-                methodWeights,
+        if len(batch) >= effectiveBatchSize:
+            nCases += _ProcessCaseBatch(
+                task, method, metrics, batch, taskScores, methodScores, methodWeights
             )
             batch = []
     if batch:
-        nCases += _ProcessBatch(
-            task,
-            method,
-            metrics,
-            batch,
-            taskScores,
-            methodScores,
-            methodWeights,
+        nCases += _ProcessCaseBatch(
+            task, method, metrics, batch, taskScores, methodScores, methodWeights
         )
 
     report: Dict[str, Any] = {
@@ -77,6 +71,57 @@ def EvaluatePair(
                 stats[f"{name}_weight_total"] = sum(weights)
             report["method_metrics"][name] = stats
     return report
+
+
+def _ProcessCaseBatch(
+    task: Task,
+    method: Method,
+    metrics: List[Metric],
+    batch: List[Case],
+    taskScores: Dict[str, List[float]],
+    methodScores: Dict[str, List[float]],
+    methodWeights: Dict[str, List[float]],
+) -> int:
+    """Process a batch, isolating failures for tasks that opt in.
+
+    The normal engine contract intentionally keeps pair failures fatal after
+    retries.  AgentBenchFlow opts into the narrower case-level contract: its
+    external rollout is scored as zero when it fails, then the worker moves on
+    to the next case.
+    """
+    try:
+        return _ProcessBatch(
+            task,
+            method,
+            metrics,
+            batch,
+            taskScores,
+            methodScores,
+            methodWeights,
+        )
+    except BaseException as exc:
+        if not getattr(task, "continueOnCaseFailure", False) or len(batch) != 1:
+            raise
+
+        case = batch[0]
+        fail = getattr(case.workload, "fail", None)
+        if callable(fail):
+            try:
+                fail(exc)
+            except BaseException:
+                traceback.print_exc()
+
+        failureScorer = getattr(task, "CaseFailureScores", None)
+        if not callable(failureScorer):
+            raise
+        scores = NormalizeScores(failureScorer(case.metadata, exc))
+        for name, value in scores.items():
+            taskScores.setdefault(name, []).append(float(value))
+        try:
+            method.Reset()
+        except BaseException:
+            traceback.print_exc()
+        return 1
 
 
 def _ProcessBatch(
@@ -172,7 +217,10 @@ def _ProcessBatch(
     missingResults = [
         case.workload.case_id
         for case in batch
-        if case.workload.case_id not in finalResults
+        if (
+            case.workload.case_id not in finalResults
+            and getattr(case.workload, "final_result", None) is None
+        )
     ]
     if missingResults:
         raise RuntimeError(
@@ -184,7 +232,10 @@ def _ProcessBatch(
         # workloads whose scoring signal is *not* an inference output (e.g.
         # AgentBenchFlowWorkload, which exposes the rollout's ``result.json``)
         # may override ``final_result`` to surface a different Result.
-        result = case.workload.final_result or finalResults[case.workload.case_id]
+        result = (
+            getattr(case.workload, "final_result", None)
+            or finalResults[case.workload.case_id]
+        )
         scores = NormalizeScores(task.Evaluate(result, case.metadata))
         for name, value in scores.items():
             taskScores.setdefault(name, []).append(float(value))
