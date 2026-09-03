@@ -9,12 +9,16 @@ from pathlib import Path
 import pytest
 
 from core.Result import Result
-from core.Workload import ActionResult
+from core.Workload import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
 from helpers.benchflow import BenchflowRunner
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
-from workload.AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
+from workload.AgentBenchFlowWorkload import (
+    AgentBenchFlowInput,
+    AgentBenchFlowWorkload,
+    _ExtractSkillDocuments,
+)
 
 
 @pytest.fixture
@@ -366,16 +370,48 @@ class _FailingRunner(_FakeRunner):
         self.stopped = True
 
 
-def _request(prompt):
+def _request(prompt, messages=None):
+    messages = [] if messages is None else messages
     return OpenAIRequest(
         requestId="req",
-        payload={"model": "vllm/model", "messages": []},
-        messages=[],
+        payload={"model": "vllm/model", "messages": messages},
+        messages=messages,
         tools=None,
         prompt=prompt,
         stream=False,
         responseFuture=Future(),
     )
+
+
+def _skill_messages(skill_path, content, call_id="skill-call"):
+    return [
+        {
+            "role": "system",
+            "content": "available skills: " + skill_path,
+        },
+        {
+            "role": "user",
+            "content": "TASK: do not prepare this task description",
+        },
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "arguments": json.dumps({"path": skill_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": content,
+        },
+    ]
 
 
 def test_workload_bridges_multiple_turns_and_retains_output():
@@ -399,6 +435,105 @@ def test_workload_bridges_multiple_turns_and_retains_output():
     assert workload.next() is None
     assert workload.finished
     assert workload.final_result.output["rewards"]["reward"] == 0.75
+
+
+def test_skill_document_extraction_excludes_system_task_and_other_tool_output():
+    skill = "---\nname: demo-skill\n---\n\nUse the skill.\n"
+    messages = _skill_messages("/home/agent/.pi/agent/skills/demo/SKILL.md", skill)
+    messages[1]["content"] += " /tmp/fake/SKILL.md"
+    messages.extend(
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "other-call",
+                        "type": "function",
+                        "function": {
+                            "name": "read",
+                            "arguments": '{"path":"/tmp/notes.txt"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "other-call",
+                "content": "not a skill document",
+            },
+        ]
+    )
+
+    assert _ExtractSkillDocuments(messages) == [skill]
+
+
+def test_workload_prepares_only_skill_documents_before_the_original_run_prompt():
+    skill = "---\nname: demo-skill\n---\n\nUse the skill.\n"
+    first = _request("first rendered prompt")
+    second = _request(
+        "second rendered prompt",
+        _skill_messages("/home/agent/.pi/agent/skills/demo/SKILL.md", skill),
+    )
+    runner = _FakeRunner([first, second])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    firstAction = workload.next()[0]
+    assert firstAction.kind.value == "run"
+    workload.observe([ActionResult(3, Result(output="first output"))])
+
+    prepare = workload.next()[0]
+    assert prepare.kind == ActionKind.PREPARE
+    assert prepare.data == [skill]
+    assert "available skills" not in prepare.data[0]
+    assert "TASK:" not in prepare.data[0]
+
+    workload.observe([ActionResult(3, Result())])
+    secondAction = workload.next()[0]
+    assert secondAction.kind == ActionKind.RUN
+    assert secondAction.data == "second rendered prompt"
+    workload.observe([ActionResult(3, Result(output="second output"))])
+
+    assert runner.responses == [
+        (first, "first output"),
+        (second, "second output"),
+    ]
+
+
+def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
+    skillPath = (
+        tmp_path
+        / "tasks"
+        / "demo-task"
+        / "environment"
+        / "skills"
+        / "demo"
+        / "SKILL.md"
+    )
+    skillPath.parent.mkdir(parents=True)
+    skill = "---\nname: demo\n---\n\nLocal skill body\n"
+    skillPath.write_text(skill, encoding="utf-8")
+
+    request = _request("rendered prompt without a skill tool result")
+    runner = _FakeRunner([request])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(
+            task_id="demo-task",
+            source_mode="local",
+            skillsbench_dir=str(tmp_path),
+        ),
+        runner=runner,
+    )
+
+    prepare = workload.next()[0]
+    assert prepare.kind == ActionKind.PREPARE
+    assert prepare.data == [skill]
+    workload.observe([ActionResult(3, Result())])
+    assert workload.next()[0].kind == ActionKind.RUN
 
 
 def test_workload_converts_runner_failure_to_zero_score():

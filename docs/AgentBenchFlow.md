@@ -33,6 +33,38 @@ the normal KVBench Method path.
 waits for the process, and reads BenchFlow's official `result.json`. It does
 not create a substitute verifier, reward file, trajectory, or result artifact.
 
+## Skill-only KV reuse
+
+BenchFlow's provider requests have three relevant layers: a fixed agent system
+message, the task instruction, and the accumulated assistant/tool history. A
+task Skill's full document is not the system-level available-Skills index. It
+appears later, after the agent issues a tool call such as
+`read({"path":".../SKILL.md"})`, as the matching `tool` message body.
+
+`AgentBenchFlowWorkload` recognizes only those tool-call/response pairs. It
+sends the document bodies as a `PREPARE` action and then sends the unchanged,
+fully rendered provider prompt as a `RUN` action for the same request:
+
+```text
+provider request
+  -> PREPARE([skill-document-1, skill-document-2, ...])
+  -> RUN(full rendered request)
+  -> provider response
+```
+
+The system prompt, task instruction, tool-call metadata, and multi-turn common
+prefix are therefore not preparation inputs. Local SkillsBench runs load the
+task-bundled `environment/skills/*/SKILL.md` files before the first turn;
+dataset runs discover documents from the provider history as the agent reads
+them. Bodies are deduplicated, and later requests reuse the accumulated Skill
+set.
+
+This path is useful for methods that support interleaved reusable spans, such
+as `NaiveTransformer` and `CacheblendRepo`. `FullPrefill` intentionally ignores
+`PREPARE`, while suffix-only methods such as `CacheblendLmcache` cannot reuse a
+Skill that occurs after an unprepared system/task prefix without broadening the
+preparation target.
+
 ## Configuration
 
 The default configuration in `config.yaml` uses the pinned dataset source:
