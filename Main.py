@@ -46,13 +46,8 @@ MAX_NEW_TOKENS=64
 
 def Main() -> None:
     skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
-    # 3 reps per task for pass-rate measurement. Engine processes cases
-    # sequentially (batchSize=1) so each rep gets its own GPU allocation.
-    REPS = 3
-    task_ids = (
-        ['adaptive-cruise-control'] * REPS
-        + ['ada-bathroom-plan-repair'] * REPS
-    )
+    task_ids =['adaptive-cruise-control','ada-bathroom-plan-repair']
+    
     tasks = [
         AgentBenchFlowTask(
             source_mode="local",
@@ -75,9 +70,9 @@ def Main() -> None:
         # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
         # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
         FullPrefillVllm(
-            gpuNums=2, perfWeight=2, maxNewTokens=4096,
+            gpuNums=2, perfWeight=2, maxNewTokens=40960,
             gpuMemoryUtilization=0.85,
-            maxModelLen=32768,
+            maxModelLen=256000,
             enforceEager=True,
             languageModelOnly=True,
         ),
