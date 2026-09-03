@@ -207,6 +207,23 @@ def test_endpoint_logs_raw_request_and_response(endpoint, tmp_path):
     assert records[1]["raw_output"] == "raw output"
 
 
+def test_endpoint_finish_drains_queued_but_not_inflight(endpoint):
+    server, _calls = endpoint
+    inflight = server._MakeRequest({"model": "vllm/test", "messages": []})
+    queued = server._MakeRequest({"model": "vllm/test", "messages": []})
+    server._Enqueue(inflight)
+    server._Enqueue(queued)
+
+    assert server.wait_for_request(timeout=1) is inflight
+    server.finish("BenchFlow exited")
+
+    assert not inflight.responseFuture.done()
+    assert queued.responseFuture.done()
+
+    server.respond(inflight, "raw output")
+    assert server.wait_for_request(timeout=1) is None
+
+
 def test_runner_builds_real_benchflow_dataset_command(tmp_path):
     runner = BenchflowRunner(
         taskId="citation-check",

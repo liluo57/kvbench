@@ -19,7 +19,12 @@ Patches applied:
   3. benchflow/sandbox/docker.py: drop `--rmi all` from the
      `compose down` in `stop()`. The prebuilt task image is expensive to
      rebuild (~25 min on slow apt) and we want to reuse it across runs.
-  4. benchflow/agents/registry.py: prepend a `sed` step to the pi-acp
+  4. benchflow/agents/registry.py: configure Pi's provider request timeout
+     to 3 hours and disable SDK-level timeout retries. The OpenAI-compatible
+     client defaults to 10 minutes, while a single vLLM generation in KVBench
+     can legitimately take longer; retries create duplicate in-flight
+     requests against the endpoint.
+  5. benchflow/agents/registry.py: prepend a `sed` step to the pi-acp
      install_cmd that rewrites `/etc/apt/sources.list.d/*.sources` and
      `/etc/apt/sources.list` from `deb.debian.org` to
      `mirrors.tuna.tsinghua.edu.cn` before the bootstrap's
@@ -29,7 +34,7 @@ Patches applied:
      apt-get update finishes. Tuna serves the same files from a
      Tsinghua CDN mirror (~50 MB/s from China).
 
-All three patches are idempotent: each looks for a marker string (a comment
+All patches are idempotent: each looks for a marker string (a comment
 or a distinctive post-patch substring) first and aborts that step with a
 "[skip]" message if the marker is found.  Run again after a benchflow
 upgrade and the markers will be absent — the script re-applies everything
@@ -62,6 +67,7 @@ MARKER_PIACP_VERSION = "# Patched for KVBench smoke runs: pi-acp 0.0.32 pin"
 MARKER_AUTONOMY = "# Patched for KVBench smoke runs: pi autonomous directive"
 MARKER_NO_RMI = "# Patched for kvbench smoke runs: do NOT pass `--rmi all`"
 MARKER_APT_MIRROR = "# Patched for KVBench smoke runs: rewrite apt mirror to tuna"
+MARKER_PI_TIMEOUT = "# Patched for KVBench smoke runs: extend Pi provider timeout"
 
 # Belt-and-braces idempotency markers: post-patch substrings that are unique
 # to the patched state. The session's hand-edits left the actual code
@@ -70,6 +76,7 @@ MARKER_APT_MIRROR = "# Patched for KVBench smoke runs: rewrite apt mirror to tun
 POST_PATCH_PIACP = "pi-acp@0.0.32"
 POST_PATCH_AUTONOMY = "_PI_AUTONOMOUS_DIRECTIVE = ("
 POST_PATCH_NO_RMI = "--volumes"  # this string only appears in the patched block
+POST_PATCH_PI_TIMEOUT = '"timeoutMs": 10800000'
 
 # Source-of-truth for the autonomous-directive text.  Kept verbatim with
 # the user-supplied wording.
@@ -175,6 +182,36 @@ _PIACP_FIRST_LINE = (
     "            f\"{_js_agent_install('pi', '@mariozechner/pi-coding-agent')} && \""
 )
 
+# Anchor: the pinned pi-acp install command. The settings merge is placed
+# immediately after it so the generated launcher sees the setting at runtime.
+_PIACP_VERSIONED_LINE = (
+    "            f\"{_js_agent_install('pi-acp', 'pi-acp@0.0.32')} && \"\n"
+)
+
+
+def _has_pi_timeout_patch(text: str) -> bool:
+    """True iff the Pi provider timeout/retry setting is installed."""
+    return MARKER_PI_TIMEOUT in text or POST_PATCH_PI_TIMEOUT in text
+
+
+def _build_pi_timeout_block() -> str:
+    """Return the settings merge inserted after the pi-acp installation."""
+    mutator = (
+        'd.setdefault("retry", {}).setdefault("provider", {}).update('
+        '{"timeoutMs": 10800000, "maxRetries": 0})'
+    )
+    return (
+        "            # Pi/OpenAI defaults to a 10-minute request timeout. A "
+        "single KVBench generation can exceed that, and retrying it creates "
+        "a second live request against the endpoint.\n"
+        + "            "
+        + MARKER_PI_TIMEOUT
+        + "\n"
+        + "            f\"{_json_settings_merge('/home/agent/.pi/agent/settings.json', "
+        + repr(mutator)
+        + ")} && \"\n"
+    )
+
 # Post-patch fingerprint: the sed command we inject.
 POST_PATCH_APT_MIRROR = "mirrors.tuna.tsinghua.edu.cn"
 
@@ -261,6 +298,25 @@ def patch_registry() -> str:
             "writes directive file, sed-patches dist/index.js"
         )
 
+    # Sub-patch: make Pi's provider request longer than the default 10 minutes
+    if _has_pi_timeout_patch(text):
+        msgs.append("[registry.py] Pi provider timeout/retry setting already applied, skip")
+    else:
+        if _PIACP_VERSIONED_LINE not in text:
+            return (
+                "[registry.py] pinned pi-acp install line not found — "
+                "cannot place the Pi provider timeout setting"
+            )
+        text = text.replace(
+            _PIACP_VERSIONED_LINE,
+            _PIACP_VERSIONED_LINE + _build_pi_timeout_block(),
+            1,
+        )
+        msgs.append(
+            "[registry.py] extended Pi provider timeout to 3h and disabled "
+            "SDK timeout retries"
+        )
+
     # Sub-patch: prepend apt-mirror rewrite so apt-get update hits tuna
     if _has_apt_mirror_patch(text):
         msgs.append("[registry.py] apt-mirror rewrite already applied, skip")
@@ -292,6 +348,7 @@ def check_registry() -> bool:
     return (
         _has_autonomy_patch(text)
         and _has_piacp_pin(text)
+        and _has_pi_timeout_patch(text)
         and _has_apt_mirror_patch(text)
     )
 

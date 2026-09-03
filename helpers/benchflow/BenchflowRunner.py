@@ -126,6 +126,22 @@ class BenchflowRunner:
             self.endpoint.start()
             command = self.BuildCommand()
             env = dict(os.environ)
+            # LiteLLM exposes its boolean CLI debug flag through the generic
+            # DEBUG environment variable. KVBench's shell setup uses values
+            # such as DEBUG=release, which makes every BenchFlow LiteLLM
+            # proxy fail during argument parsing before the agent starts.
+            debugValue = env.get("DEBUG")
+            if debugValue is not None and debugValue.strip().lower() not in {
+                "0",
+                "1",
+                "false",
+                "true",
+                "no",
+                "yes",
+                "off",
+                "on",
+            }:
+                env.pop("DEBUG", None)
             logPath = self.jobsDir / "benchflow.log"
             log = logPath.open("ab")
             try:

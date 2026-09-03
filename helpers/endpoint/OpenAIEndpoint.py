@@ -258,6 +258,11 @@ class OpenAIEndpoint:
         self._stateLock = threading.Lock()
         self._accepting = False
         self._stopped = False
+        # ``finish`` is a graceful end-of-input signal.  A request remains
+        # active after it has been handed to vLLM, so the endpoint must not
+        # wake the workload until that request has produced a response.
+        self._finishRequested = False
+        self._doneQueued = False
 
     @property
     def is_running(self) -> bool:
@@ -282,6 +287,10 @@ class OpenAIEndpoint:
             self.port = int(server.server_address[1])
             self._accepting = True
             self._stopped = False
+            with self._activeLock:
+                self._queue = queue.Queue()
+                self._finishRequested = False
+                self._doneQueued = False
             self._serverThread = threading.Thread(
                 target=server.serve_forever,
                 name=f"kvbench-endpoint-{self.port}",
@@ -336,15 +345,31 @@ class OpenAIEndpoint:
         self._Forget(request)
 
     def finish(self, error: Optional[str] = None) -> None:
-        """Stop accepting new requests and wake the workload when drained."""
+        """Stop accepting requests and finish after in-flight work drains.
+
+        Requests that are still waiting in the endpoint queue cannot be
+        serviced after BenchFlow has exited, so they are failed immediately.
+        A request already returned by :meth:`wait_for_request` is owned by
+        the vLLM worker and must be allowed to complete; failing it here was
+        the source of the endpoint/vLLM lifecycle race.
+        """
         with self._stateLock:
+            if self._stopped:
+                return
             self._accepting = False
         failure = error or "endpoint finished before the request completed"
         with self._activeLock:
-            active = list(self._active)
-        for request in active:
-            self.fail(request, EndpointError(failure))
-        self._queue.put(_DONE)
+            self._finishRequested = True
+            activeCount = len(self._active)
+        self._Log(
+            {
+                "phase": "finish_requested",
+                "error": failure,
+                "active_requests": activeCount,
+            }
+        )
+        self._DrainQueue(failure)
+        self._QueueDoneIfDrained()
 
     def stop(self, error: str = "endpoint stopped") -> None:
         with self._stateLock:
@@ -357,7 +382,7 @@ class OpenAIEndpoint:
         for request in active:
             self.fail(request, EndpointError(error))
         self._DrainQueue(error)
-        self._queue.put(_DONE)
+        self._QueueDone()
         server = self._server
         if server is not None:
             server.shutdown()
@@ -505,6 +530,26 @@ class OpenAIEndpoint:
     def _Forget(self, request: OpenAIRequest) -> None:
         with self._activeLock:
             self._active.discard(request)
+        self._QueueDoneIfDrained()
+
+    def _QueueDone(self) -> None:
+        with self._activeLock:
+            if self._doneQueued:
+                return
+            self._doneQueued = True
+        self._queue.put(_DONE)
+
+    def _QueueDoneIfDrained(self) -> None:
+        with self._activeLock:
+            if (
+                not self._finishRequested
+                or self._active
+                or self._doneQueued
+            ):
+                return
+            self._doneQueued = True
+        self._Log({"phase": "finish_drained"})
+        self._queue.put(_DONE)
 
     def _DrainQueue(self, error: str) -> None:
         while True:

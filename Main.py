@@ -42,6 +42,7 @@ from tasks.FreshGap import FreshGapTask
 
 MAX_SAMPLES=64
 MAX_NEW_TOKENS=64
+BENCHFLOW_TIMEOUT_SEC = 10800
 
 
 def Main() -> None:
@@ -56,9 +57,15 @@ def Main() -> None:
             agent="pi-acp",
             skill_mode="with-skill",
             thinking=True,
+            result_json_timeout=BENCHFLOW_TIMEOUT_SEC,
             bench_extra_args=[
-                "--agent-idle-timeout", "3600",
-                "--config-override", '{"agent":{"timeout_sec":7200}}',
+                "--agent-idle-timeout", str(BENCHFLOW_TIMEOUT_SEC),
+                "--config-override",
+                '{"agent":{"timeout_sec":10800}}',
+                # LiteLLM's built-in completion fallback is 600s unless the
+                # proxy receives an explicit REQUEST_TIMEOUT. Agent turns in
+                # this benchmark can legitimately take longer than that.
+                "--agent-env", "REQUEST_TIMEOUT=10800",
             ],
         )
         for task_id in task_ids
@@ -100,7 +107,7 @@ def Main() -> None:
         gpuReleaseStableSeconds=1,
         gpuReleaseMemoryToleranceMiB=256,
         pairRetries=1,
-        tui=False,
+        tui=True,
         verbose=True,
     )
     report = engine.Evaluate(tasks=tasks, methods=methods, metrics=metrics)
