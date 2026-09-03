@@ -7,7 +7,7 @@ from core.Config import ModelPath
 from core.Result import Result
 from core.Workload import Action, ActionKind, ActionResult, Workload
 
-from helpers.benchflow import BenchflowRunner
+from helpers.benchflow import BenchflowRunner, RemoteBenchflowRunner
 
 
 @dataclass
@@ -32,6 +32,12 @@ class AgentBenchFlowInput:
     provider_api_key_env: str = "KVBENCH_PROVIDER_API_KEY"
     bench_command: str = "bench"
     bench_extra_args: Sequence[str] = field(default_factory=tuple)
+    remote_endpoint: Optional[str] = None
+    remote_advertise_host: Optional[str] = None
+    remote_auth_token_env: str = "KVBENCH_REMOTE_TOKEN"
+    remote_connect_timeout: float = 10.0
+    remote_poll_interval: float = 1.0
+    remote_artifact_download_retries: int = 3
     #: Filled after the runner starts; useful to callers and diagnostics.
     endpoint_url: str = field(default="", init=False)
 
@@ -59,7 +65,7 @@ class AgentBenchFlowWorkload(Workload):
             return None
         try:
             if self._runner is None:
-                self._runner = BenchflowRunner(
+                runnerArgs = dict(
                     taskId=self._data.task_id,
                     modelPath=ModelPath(),
                     sourceMode=self._data.source_mode,
@@ -80,6 +86,25 @@ class AgentBenchFlowWorkload(Workload):
                     benchCommand=self._data.bench_command,
                     extraArgs=self._data.bench_extra_args,
                 )
+                if self._data.sandbox == "remote-docker":
+                    if not self._data.remote_endpoint:
+                        raise ValueError(
+                            "AgentBenchFlow.RemoteDocker.Endpoint is required "
+                            "when Sandbox=remote-docker"
+                        )
+                    self._runner = RemoteBenchflowRunner(
+                        remoteEndpoint=self._data.remote_endpoint,
+                        advertiseHost=self._data.remote_advertise_host,
+                        remoteAuthTokenEnv=self._data.remote_auth_token_env,
+                        remoteConnectTimeout=self._data.remote_connect_timeout,
+                        remotePollInterval=self._data.remote_poll_interval,
+                        artifactDownloadRetries=(
+                            self._data.remote_artifact_download_retries
+                        ),
+                        **runnerArgs,
+                    )
+                else:
+                    self._runner = BenchflowRunner(**runnerArgs)
             self._runner.start()
             self._data.endpoint_url = getattr(self._runner, "endpointUrl", "")
             request = self._runner.wait_for_request()

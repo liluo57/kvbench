@@ -97,8 +97,30 @@ class AgentBenchFlowTask(Task):
         self.benchExtraArgs = list(
             bench_extra_args if bench_extra_args is not None else abf.get("BenchExtraArgs") or []
         )
+        remote = abf.get("RemoteDocker", {}) or {}
+        if not isinstance(remote, Mapping):
+            raise ValueError("AgentBenchFlow.RemoteDocker must be a mapping")
+        self.remoteEndpoint = remote.get("Endpoint")
+        self.remoteAdvertiseHost = remote.get("KVBenchAdvertiseHost")
+        self.remoteAuthTokenEnv = remote.get(
+            "AuthTokenEnv", "KVBENCH_REMOTE_TOKEN"
+        )
+        self.remoteConnectTimeout = float(remote.get("ConnectTimeoutSec", 10))
+        self.remotePollInterval = float(remote.get("PollIntervalSec", 1))
+        self.remoteArtifactDownloadRetries = int(
+            remote.get("ArtifactDownloadRetries", 3)
+        )
+        if self.sandbox == "remote-docker" and not self.remoteEndpoint:
+            raise ValueError(
+                "AgentBenchFlow.RemoteDocker.Endpoint is required when "
+                "Sandbox=remote-docker"
+            )
         self._resolvedTaskIds = self._ResolveTaskIds(task_ids)
-        if self.sourceMode == "local" and self.skillsbenchDir is not None:
+        if (
+            self.sourceMode == "local"
+            and self.skillsbenchDir is not None
+            and self.sandbox != "remote-docker"
+        ):
             AgentBenchFlowTask._EnsureLocalImages(
                 self.skillsbenchDir / "tasks", self._resolvedTaskIds
             )
@@ -247,6 +269,20 @@ class AgentBenchFlowTask(Task):
                 provider_api_key_env=self.providerApiKeyEnv,
                 bench_command=self.benchCommand,
                 bench_extra_args=self.benchExtraArgs,
+                remote_endpoint=(
+                    str(self.remoteEndpoint) if self.remoteEndpoint is not None else None
+                ),
+                remote_advertise_host=(
+                    str(self.remoteAdvertiseHost)
+                    if self.remoteAdvertiseHost is not None
+                    else None
+                ),
+                remote_auth_token_env=str(self.remoteAuthTokenEnv),
+                remote_connect_timeout=self.remoteConnectTimeout,
+                remote_poll_interval=self.remotePollInterval,
+                remote_artifact_download_retries=(
+                    self.remoteArtifactDownloadRetries
+                ),
             )
             yield Case(
                 input=data,
@@ -258,6 +294,7 @@ class AgentBenchFlowTask(Task):
                     "dataset": self.dataset,
                     "skill_mode": self.skillMode,
                     "agent": self.agent,
+                    "sandbox": self.sandbox,
                 },
             )
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import hmac
 import json
 import queue
 import threading
@@ -104,13 +105,23 @@ class _OpenAIRequestHandler(BaseHTTPRequestHandler):
             {"error": {"message": message, "type": errorType}},
         )
 
+    def _RequireAuthorization(self) -> bool:
+        if self.endpoint._IsAuthorized(self.headers.get("Authorization")):
+            return True
+        self._WriteError(401, "invalid or missing bearer token", "authentication_error")
+        return False
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib name
+        if not self._RequireAuthorization():
+            return
         if self.path == "/health":
             self._WriteJSON(200, {"status": "ok"})
             return
         self._WriteError(404, f"not found: {self.path}")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib name
+        if not self._RequireAuthorization():
+            return
         if self.path != "/v1/chat/completions":
             self._WriteError(404, f"not found: {self.path}")
             return
@@ -231,12 +242,14 @@ class OpenAIEndpoint:
         port: int = 0,
         thinking: Optional[bool] = None,
         debugLogPath: Optional[str | Path] = None,
+        apiKey: Optional[str] = None,
     ):
         self.modelPath = str(modelPath)
         self.host = host
         self.port = int(port)
         self.thinking = thinking
         self.debugLogPath = Path(debugLogPath) if debugLogPath else None
+        self.apiKey = str(apiKey) if apiKey else None
         self._server: Optional[_EndpointServer] = None
         self._serverThread: Optional[threading.Thread] = None
         self._queue: "queue.Queue[object]" = queue.Queue()
@@ -355,6 +368,15 @@ class OpenAIEndpoint:
         self._server = None
 
     # -------------------------------------------------------------- HTTP bridge
+    def _IsAuthorized(self, authorization: Optional[str]) -> bool:
+        """Validate an optional bearer token without weakening local defaults."""
+        if self.apiKey is None:
+            return True
+        prefix = "Bearer "
+        if not authorization or not authorization.startswith(prefix):
+            return False
+        return hmac.compare_digest(authorization[len(prefix) :], self.apiKey)
+
     def _MakeRequest(self, payload: Mapping[str, Any]) -> OpenAIRequest:
         messages = payload.get("messages")
         if not isinstance(messages, list):

@@ -98,6 +98,34 @@ def test_endpoint_health(endpoint):
     connection.close()
 
 
+def test_endpoint_optional_bearer_authentication(tmp_path):
+    server = KVBenchEndpoint(
+        modelPath="/models/test",
+        host="127.0.0.1",
+        apiKey="provider-secret",
+    ).start()
+    try:
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        assert response.status == 401
+        response.read()
+        connection.close()
+
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+        connection.request(
+            "GET",
+            "/health",
+            headers={"Authorization": "Bearer provider-secret"},
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {"status": "ok"}
+        connection.close()
+    finally:
+        server.stop()
+
+
 def test_endpoint_renders_and_queues_without_skill_prefix(endpoint):
     server, renderCalls = endpoint
     payload = {
@@ -202,7 +230,8 @@ def test_runner_builds_real_benchflow_dataset_command(tmp_path):
     assert ["--usage-tracking", "off"] == command[command.index("--usage-tracking"):command.index("--usage-tracking") + 2]
     assert f"BENCHFLOW_PROVIDER_BASE_URL=http://host.docker.internal:43123/v1" in command
     assert "BENCHFLOW_PROVIDER_API_KEY=dummy-from-test" in command
-    assert str(tmp_path / "case") in command
+    assert str(runner.jobsDir) in command
+    assert runner.jobsDir.parent == tmp_path / "case"
     assert "vllm/Qwen3.8-27B" in command
 
 
@@ -221,7 +250,12 @@ def test_runner_builds_local_tasks_dir_command(tmp_path):
 
 
 def test_runner_reads_official_result_shape(tmp_path):
-    resultPath = tmp_path / "case" / "job" / "citation-check" / "rollout" / "result.json"
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/model",
+        jobsDir=tmp_path / "case",
+    )
+    resultPath = runner.jobsDir / "job" / "citation-check" / "rollout" / "result.json"
     resultPath.parent.mkdir(parents=True)
     payload = {
         "task_name": "citation-check",
@@ -234,11 +268,6 @@ def test_runner_reads_official_result_shape(tmp_path):
         "final_metrics": {"reward": 1.0},
     }
     resultPath.write_text(json.dumps(payload), encoding="utf-8")
-    runner = BenchflowRunner(
-        taskId="citation-check",
-        modelPath="/models/model",
-        jobsDir=tmp_path / "case",
-    )
     assert runner.ReadOfficialResult() == payload
     assert runner.officialResultPath == resultPath
     assert runner.Diagnostics()["benchflow_n_tool_calls"] == 4
@@ -369,7 +398,10 @@ def test_workload_converts_runner_failure_to_zero_score():
     assert workload.final_result.output["reward"] == 0.0
 
 
-def test_task_filters_and_propagates_benchflow_configuration(fakeSkillsbench):
+def test_task_filters_and_propagates_benchflow_configuration(
+    monkeypatch, fakeSkillsbench
+):
+    monkeypatch.setattr(AgentBenchFlowTask, "_EnsureLocalImages", lambda *args: None)
     task = AgentBenchFlowTask(
         skillsbench_dir=fakeSkillsbench,
         source_mode="local",
@@ -385,6 +417,20 @@ def test_task_filters_and_propagates_benchflow_configuration(fakeSkillsbench):
     assert case.input.skill_mode == "no-skill"
     assert case.input.source_mode == "local"
     assert case.input.provider_host == "host.docker.internal"
+
+
+def test_task_selects_remote_runtime_without_local_docker_validation(fakeSkillsbench):
+    task = AgentBenchFlowTask(
+        skillsbench_dir=fakeSkillsbench,
+        source_mode="local",
+        task_ids=["citation-check"],
+        sandbox="remote-docker",
+    )
+    case = next(iter(task.Cases()))
+    assert case.input.sandbox == "remote-docker"
+    assert case.input.remote_endpoint == "http://127.0.0.1:8765"
+    assert case.input.remote_advertise_host is None
+    assert case.input.remote_poll_interval == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(

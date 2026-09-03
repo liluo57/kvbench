@@ -46,6 +46,7 @@ class BenchflowRunner:
         benchCommand: str | Sequence[str] = "bench",
         extraArgs: Sequence[str] = (),
         endpoint: Optional[KVBenchEndpoint] = None,
+        endpointApiKey: Optional[str] = None,
         popenFactory: Callable[..., subprocess.Popen] = subprocess.Popen,
     ):
         if sourceMode not in {"dataset", "local"}:
@@ -92,6 +93,7 @@ class BenchflowRunner:
             port=self.port,
             thinking=self.thinking,
             debugLogPath=self.jobsDir / "kvbench_llm_io.jsonl",
+            apiKey=endpointApiKey,
         )
         self.popenFactory = popenFactory
         self.process: Optional[subprocess.Popen] = None

@@ -87,6 +87,83 @@ BenchFlow release supports a direct agent-to-provider path, configure
 `host.docker.internal`) so the agent can reach the KVBench endpoint directly.
 In both cases the inference request must terminate at KVBench's endpoint.
 
+## Remote Docker runtime
+
+Set ``Sandbox: remote-docker`` to keep KVBench and model execution on machine
+A while moving the complete BenchFlow CLI + Docker runtime to machine B.  The
+value is interpreted by KVBench and is never passed to BenchFlow; B still runs
+the official command with ``--sandbox docker``.
+
+```yaml
+AgentBenchFlow:
+  Sandbox: remote-docker
+  RemoteDocker:
+    Endpoint: http://127.0.0.1:8765
+    # Required when B cannot reach an automatically detected address of A.
+    # KVBenchAdvertiseHost: 10.0.0.21
+    AuthTokenEnv: KVBENCH_REMOTE_TOKEN
+    ConnectTimeoutSec: 10
+    PollIntervalSec: 1
+    ArtifactDownloadRetries: 3
+```
+
+For a same-machine A/B check, start the runtime in one terminal and KVBench in
+another:
+
+```bash
+export KVBENCH_REMOTE_TOKEN='replace-with-a-random-shared-token'
+python scripts/RemoteDockerRuntimeServer.py \
+  --listen 127.0.0.1:8765 \
+  --work-root /var/tmp/kvbench-remote-docker
+
+# In the KVBench terminal, use the same token and Sandbox: remote-docker.
+export KVBENCH_REMOTE_TOKEN='replace-with-a-random-shared-token'
+python Main.py
+```
+
+The server is standalone and does not read ``config.yaml``. Its deployment
+defaults (listen endpoint, work root, BenchFlow command, auth-token env name,
+and concurrency limit) are at the top of
+``scripts/RemoteDockerRuntimeServer.py`` and may also be overridden on the
+command line.
+
+At run creation A opens an authenticated KVBench provider endpoint and sends
+its per-run URL to B. With BenchFlow 0.7.5 the traffic path is:
+
+```text
+B Docker agent -> B host LiteLLM proxy -> A KVBench endpoint -> KVBench Method
+```
+
+For two physical machines, A must bind its endpoint to a B-reachable interface
+(the default is ``0.0.0.0``), and A's firewall must admit B. Set
+``KVBenchAdvertiseHost`` explicitly when A is multi-homed or automatic route
+detection chooses the wrong interface. The provider endpoint uses a random
+per-run bearer token; the control API independently uses
+``KVBENCH_REMOTE_TOKEN``. On an untrusted network, place this HTTP traffic on a
+private network or encrypted tunnel.
+
+``SourceMode: dataset`` needs no source upload. For ``SourceMode: local``, A
+uploads only the selected ``tasks/<task-id>`` directory. B validates that the
+task's declared Docker image is already present there; prepare SkillsBench
+images on B before running. A does not need local Docker validation in remote
+mode.
+
+After BenchFlow exits, B packages its complete jobs directory. A downloads it,
+checks its SHA-256, rejects unsafe archive entries, and extracts it below the
+ordinary per-attempt output directory:
+
+```text
+<OutputDir>/<task-id>/run-.../
+├── kvbench_llm_io.jsonl
+└── remote-runtime/
+    ├── benchflow.log
+    └── .../result.json, agent/, verifier/, artifacts/, trajectory/
+```
+
+The existing recursive official-result lookup and scoring path are unchanged.
+This first implementation deliberately omits leases/heartbeats, live log
+tailing, resumable downloads, and scheduling across multiple B hosts.
+
 ## Results and manual checks
 
 Each case writes BenchFlow's official artifacts below `OutputDir`. KVBench
