@@ -38,8 +38,7 @@ Cacheblend:
     # The original CacheBlend repo clone (holds vllm_blend + .venv).
     RepoPath: /root/cache-blend/CacheBlend
 
-
-# SkillsBench via the installed BenchFlow runtime.
+# SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:
   # Dataset mode is the reproducible path. The local checkout below is used
   # only to enumerate task ids when task_ids is omitted.
@@ -53,6 +52,19 @@ AgentBenchFlow:
   Agent: pi-acp
   Sandbox: docker
   SkillMode: with-skill
+
+  # To move BenchFlow + Docker to another runtime host, change Sandbox above
+  # to remote-docker and start scripts/RemoteDockerRuntimeServer.py there.
+  # These loopback defaults let A and B be exercised on this same machine.
+  RemoteDocker:
+    Endpoint: http://127.0.0.1:8765
+    # Optional on one machine. For two machines, set this to an address of A
+    # that B can reach; if omitted KVBench detects A's outbound interface.
+    # KVBenchAdvertiseHost: 10.0.0.21
+    AuthTokenEnv: KVBENCH_REMOTE_TOKEN
+    ConnectTimeoutSec: 10
+    PollIntervalSec: 1
+    ArtifactDownloadRetries: 3
 
   # The endpoint binds to EndpointHost, while this host name is placed in the
   # provider URL. With BenchFlow 0.7.5's mandatory host LiteLLM proxy,

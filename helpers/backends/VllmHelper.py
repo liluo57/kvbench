@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -163,10 +164,26 @@ def CreateLlm(
     return LLM(**llm_kwargs)
 
 
+@dataclass(frozen=True)
+class VllmGeneration:
+    """One completed vLLM generation, including native stop metadata."""
+
+    text: str
+    ttft: float
+    numTokens: int
+    totalTime: float
+    numCached: int
+    # These values come directly from vLLM's CompletionOutput. They must not
+    # be inferred from the OpenAI endpoint response, which may map a parsed
+    # tool call to ``tool_calls`` and otherwise default to ``stop``.
+    finishReason: Optional[str]
+    stopReason: Optional[Union[int, str]]
+
+
 def Generate(
     llm, promptText: str, maxNewTokens: int
-) -> tuple[str, float, int, float, int]:
-    """Generate one prompt; return ``(text, ttft, numTokens, totalTime, numCached)``.
+) -> VllmGeneration:
+    """Generate one prompt and return its native vLLM stop metadata.
 
     TTFT is measured the way vLLM's own offline benchmark
     (``vllm/benchmarks/benchmark_offline.py``) does: drive the V1 engine
@@ -180,19 +197,21 @@ def Generate(
     - ``totalTime`` — seconds from ``add_request`` to completion.
     - ``numCached`` — prefix-cache blocks this request reused (0 for full
       prefill).
+    - ``finishReason`` / ``stopReason`` — copied from the final vLLM
+      :class:`CompletionOutput`, without going through the OpenAI endpoint.
     """
     return GenerateBatch(llm, [promptText], maxNewTokens)[0]
 
 
 def GenerateBatch(
     llm, promptTexts: List[str], maxNewTokens: int
-) -> List[tuple[str, float, int, float, int]]:
+) -> List[VllmGeneration]:
     """Generate a batch of prompts concurrently on the V1 engine.
 
     Each prompt is submitted via ``add_request`` and all are stepped together,
     so the V1 scheduler batches them natively (one shared ``step`` loop covers
-    every request). Returns one ``(text, ttft, numTokens, totalTime,
-    numCached)`` tuple per prompt, in the input order.
+    every request). Returns one :class:`VllmGeneration` per prompt, in the
+    input order.
 
     - ``ttft`` — per-request wall time to its first decoded token. Latency is
       never divided by batch size; doing that turns a real request latency into
@@ -220,6 +239,8 @@ def GenerateBatch(
     numCached: Dict[str, int] = {}
     texts: Dict[str, str] = {}
     tokenLens: Dict[str, int] = {}
+    finishReasons: Dict[str, Optional[str]] = {}
+    stopReasons: Dict[str, Optional[Union[int, str]]] = {}
     while engine.has_unfinished_requests():
         for out in engine.step():
             if out.request_id not in requestIds:
@@ -231,20 +252,32 @@ def GenerateBatch(
                 numCached.get(rid, 0),
                 int(getattr(out, "num_cached_tokens", 0) or 0),
             )
-            if out.finished and out.outputs:
-                texts[rid] = out.outputs[0].text
-                tokenLens[rid] = len(out.outputs[0].token_ids)
+            if out.finished:
+                outputs = getattr(out, "outputs", None) or []
+                if outputs:
+                    completion = outputs[0]
+                    texts[rid] = completion.text
+                    tokenLens[rid] = len(completion.token_ids)
+                    # CompletionOutput is the authoritative source. Keep
+                    # getattr() for compatibility with older vLLM versions
+                    # whose output objects may not expose stop_reason.
+                    finishReasons[rid] = getattr(
+                        completion, "finish_reason", None
+                    )
+                    stopReasons[rid] = getattr(completion, "stop_reason", None)
     totalTime = time.perf_counter() - t0
     n = len(requestIds) or 1
     amortized = totalTime / n
 
     return [
-        (
-            texts.get(rid, ""),
-            float(ttfts.get(rid, 0.0)),
-            tokenLens.get(rid, 0),
-            amortized,
-            numCached.get(rid, 0),
+        VllmGeneration(
+            text=texts.get(rid, ""),
+            ttft=float(ttfts.get(rid, 0.0)),
+            numTokens=tokenLens.get(rid, 0),
+            totalTime=amortized,
+            numCached=numCached.get(rid, 0),
+            finishReason=finishReasons.get(rid),
+            stopReason=stopReasons.get(rid),
         )
         for rid in requestIds
     ]

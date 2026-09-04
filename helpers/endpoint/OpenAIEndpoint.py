@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import hmac
 import json
 import queue
 import threading
@@ -19,7 +20,7 @@ import traceback
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 from helpers.backends import ModelAdapter
 
@@ -104,13 +105,23 @@ class _OpenAIRequestHandler(BaseHTTPRequestHandler):
             {"error": {"message": message, "type": errorType}},
         )
 
+    def _RequireAuthorization(self) -> bool:
+        if self.endpoint._IsAuthorized(self.headers.get("Authorization")):
+            return True
+        self._WriteError(401, "invalid or missing bearer token", "authentication_error")
+        return False
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib name
+        if not self._RequireAuthorization():
+            return
         if self.path == "/health":
             self._WriteJSON(200, {"status": "ok"})
             return
         self._WriteError(404, f"not found: {self.path}")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib name
+        if not self._RequireAuthorization():
+            return
         if self.path != "/v1/chat/completions":
             self._WriteError(404, f"not found: {self.path}")
             return
@@ -191,18 +202,19 @@ class _OpenAIRequestHandler(BaseHTTPRequestHandler):
             "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
         }
         self._SSEData(first)
+        finalChoice: Dict[str, Any] = {
+            "index": 0,
+            "delta": {},
+            "finish_reason": choice.get("finish_reason", "stop"),
+        }
+        if "stop_reason" in choice:
+            finalChoice["stop_reason"] = choice["stop_reason"]
         final = {
             "id": payload["id"],
             "object": "chat.completion.chunk",
             "created": payload["created"],
             "model": payload["model"],
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": choice.get("finish_reason", "stop"),
-                }
-            ],
+            "choices": [finalChoice],
         }
         self._SSEData(final)
         self.wfile.write(b"data: [DONE]\n\n")
@@ -231,12 +243,14 @@ class OpenAIEndpoint:
         port: int = 0,
         thinking: Optional[bool] = None,
         debugLogPath: Optional[str | Path] = None,
+        apiKey: Optional[str] = None,
     ):
         self.modelPath = str(modelPath)
         self.host = host
         self.port = int(port)
         self.thinking = thinking
         self.debugLogPath = Path(debugLogPath) if debugLogPath else None
+        self.apiKey = str(apiKey) if apiKey else None
         self._server: Optional[_EndpointServer] = None
         self._serverThread: Optional[threading.Thread] = None
         self._queue: "queue.Queue[object]" = queue.Queue()
@@ -245,6 +259,11 @@ class OpenAIEndpoint:
         self._stateLock = threading.Lock()
         self._accepting = False
         self._stopped = False
+        # ``finish`` is a graceful end-of-input signal.  A request remains
+        # active after it has been handed to vLLM, so the endpoint must not
+        # wake the workload until that request has produced a response.
+        self._finishRequested = False
+        self._doneQueued = False
 
     @property
     def is_running(self) -> bool:
@@ -269,6 +288,10 @@ class OpenAIEndpoint:
             self.port = int(server.server_address[1])
             self._accepting = True
             self._stopped = False
+            with self._activeLock:
+                self._queue = queue.Queue()
+                self._finishRequested = False
+                self._doneQueued = False
             self._serverThread = threading.Thread(
                 target=server.serve_forever,
                 name=f"kvbench-endpoint-{self.port}",
@@ -288,7 +311,14 @@ class OpenAIEndpoint:
             return None
         return item  # type: ignore[return-value]
 
-    def respond(self, request: OpenAIRequest, output: str) -> EndpointResponse:
+    def respond(
+        self,
+        request: OpenAIRequest,
+        output: str,
+        *,
+        finishReason: Optional[str] = None,
+        stopReason: Optional[Union[int, str]] = None,
+    ) -> EndpointResponse:
         """Parse one raw Method output and release the waiting HTTP client."""
         try:
             content, reasoning, toolCalls = ModelAdapter.parse_tool_calls(
@@ -302,6 +332,8 @@ class OpenAIEndpoint:
                 reasoning=reasoning,
                 toolCalls=toolCalls,
                 rawOutput=str(output),
+                finishReason=finishReason,
+                stopReason=stopReason,
             )
         except BaseException as exc:
             if not request.responseFuture.done():
@@ -323,15 +355,31 @@ class OpenAIEndpoint:
         self._Forget(request)
 
     def finish(self, error: Optional[str] = None) -> None:
-        """Stop accepting new requests and wake the workload when drained."""
+        """Stop accepting requests and finish after in-flight work drains.
+
+        Requests that are still waiting in the endpoint queue cannot be
+        serviced after BenchFlow has exited, so they are failed immediately.
+        A request already returned by :meth:`wait_for_request` is owned by
+        the vLLM worker and must be allowed to complete; failing it here was
+        the source of the endpoint/vLLM lifecycle race.
+        """
         with self._stateLock:
+            if self._stopped:
+                return
             self._accepting = False
         failure = error or "endpoint finished before the request completed"
         with self._activeLock:
-            active = list(self._active)
-        for request in active:
-            self.fail(request, EndpointError(failure))
-        self._queue.put(_DONE)
+            self._finishRequested = True
+            activeCount = len(self._active)
+        self._Log(
+            {
+                "phase": "finish_requested",
+                "error": failure,
+                "active_requests": activeCount,
+            }
+        )
+        self._DrainQueue(failure)
+        self._QueueDoneIfDrained()
 
     def stop(self, error: str = "endpoint stopped") -> None:
         with self._stateLock:
@@ -344,7 +392,7 @@ class OpenAIEndpoint:
         for request in active:
             self.fail(request, EndpointError(error))
         self._DrainQueue(error)
-        self._queue.put(_DONE)
+        self._QueueDone()
         server = self._server
         if server is not None:
             server.shutdown()
@@ -355,6 +403,15 @@ class OpenAIEndpoint:
         self._server = None
 
     # -------------------------------------------------------------- HTTP bridge
+    def _IsAuthorized(self, authorization: Optional[str]) -> bool:
+        """Validate an optional bearer token without weakening local defaults."""
+        if self.apiKey is None:
+            return True
+        prefix = "Bearer "
+        if not authorization or not authorization.startswith(prefix):
+            return False
+        return hmac.compare_digest(authorization[len(prefix) :], self.apiKey)
+
     def _MakeRequest(self, payload: Mapping[str, Any]) -> OpenAIRequest:
         messages = payload.get("messages")
         if not isinstance(messages, list):
@@ -405,23 +462,35 @@ class OpenAIEndpoint:
         reasoning: Optional[str],
         toolCalls: Sequence[Mapping[str, Any]],
         rawOutput: str,
+        finishReason: Optional[str],
+        stopReason: Optional[Union[int, str]],
     ) -> EndpointResponse:
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning:
             message["reasoning_content"] = reasoning
         if toolCalls:
             message["tool_calls"] = [dict(call) for call in toolCalls]
+        # ``tool_calls`` is the OpenAI protocol-level reason and must remain
+        # visible to the agent when the model emitted a parseable tool call.
+        # For ordinary completions, use the native vLLM reason instead of
+        # manufacturing ``stop``. ``stop_reason`` is vLLM's extra detail.
+        wireFinishReason = (
+            "tool_calls" if toolCalls else (finishReason or "stop")
+        )
+        choice: Dict[str, Any] = {
+            "index": 0,
+            "message": message,
+            "finish_reason": wireFinishReason,
+        }
+        if stopReason is not None:
+            choice["stop_reason"] = stopReason
         payload: Dict[str, Any] = {
             "id": request.requestId,
             "object": "chat.completion",
             "created": int(request.receivedAt),
             "model": str(request.payload.get("model", "")),
             "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": "tool_calls" if toolCalls else "stop",
-                }
+                choice
             ],
         }
         return EndpointResponse(
@@ -483,6 +552,26 @@ class OpenAIEndpoint:
     def _Forget(self, request: OpenAIRequest) -> None:
         with self._activeLock:
             self._active.discard(request)
+        self._QueueDoneIfDrained()
+
+    def _QueueDone(self) -> None:
+        with self._activeLock:
+            if self._doneQueued:
+                return
+            self._doneQueued = True
+        self._queue.put(_DONE)
+
+    def _QueueDoneIfDrained(self) -> None:
+        with self._activeLock:
+            if (
+                not self._finishRequested
+                or self._active
+                or self._doneQueued
+            ):
+                return
+            self._doneQueued = True
+        self._Log({"phase": "finish_drained"})
+        self._queue.put(_DONE)
 
     def _DrainQueue(self, error: str) -> None:
         while True:

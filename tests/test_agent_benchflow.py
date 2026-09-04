@@ -9,12 +9,16 @@ from pathlib import Path
 import pytest
 
 from core.Result import Result
-from core.Workload import ActionResult
+from core.Workload import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
 from helpers.benchflow import BenchflowRunner
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
-from workload.AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
+from workload.AgentBenchFlowWorkload import (
+    AgentBenchFlowInput,
+    AgentBenchFlowWorkload,
+    _ExtractSkillDocuments,
+)
 
 
 @pytest.fixture
@@ -98,6 +102,34 @@ def test_endpoint_health(endpoint):
     connection.close()
 
 
+def test_endpoint_optional_bearer_authentication(tmp_path):
+    server = KVBenchEndpoint(
+        modelPath="/models/test",
+        host="127.0.0.1",
+        apiKey="provider-secret",
+    ).start()
+    try:
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        assert response.status == 401
+        response.read()
+        connection.close()
+
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+        connection.request(
+            "GET",
+            "/health",
+            headers={"Authorization": "Bearer provider-secret"},
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {"status": "ok"}
+        connection.close()
+    finally:
+        server.stop()
+
+
 def test_endpoint_renders_and_queues_without_skill_prefix(endpoint):
     server, renderCalls = endpoint
     payload = {
@@ -132,6 +164,24 @@ def test_endpoint_tool_calls_and_reasoning(endpoint):
     assert message["reasoning_content"] == "internal reasoning"
     assert message["tool_calls"][0]["function"]["name"] == "bash"
     assert body["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_endpoint_uses_native_finish_and_stop_reason(endpoint):
+    server, _calls = endpoint
+    thread, request, result = _serve_one(
+        server,
+        {"model": "vllm/test", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    server.respond(
+        request,
+        "partial output",
+        finishReason="length",
+        stopReason=123,
+    )
+    thread.join(timeout=2)
+    body = json.loads(result["value"][2])
+    assert body["choices"][0]["finish_reason"] == "length"
+    assert body["choices"][0]["stop_reason"] == 123
 
 
 def test_endpoint_stream_true_returns_sse(endpoint):
@@ -179,6 +229,23 @@ def test_endpoint_logs_raw_request_and_response(endpoint, tmp_path):
     assert records[1]["raw_output"] == "raw output"
 
 
+def test_endpoint_finish_drains_queued_but_not_inflight(endpoint):
+    server, _calls = endpoint
+    inflight = server._MakeRequest({"model": "vllm/test", "messages": []})
+    queued = server._MakeRequest({"model": "vllm/test", "messages": []})
+    server._Enqueue(inflight)
+    server._Enqueue(queued)
+
+    assert server.wait_for_request(timeout=1) is inflight
+    server.finish("BenchFlow exited")
+
+    assert not inflight.responseFuture.done()
+    assert queued.responseFuture.done()
+
+    server.respond(inflight, "raw output")
+    assert server.wait_for_request(timeout=1) is None
+
+
 def test_runner_builds_real_benchflow_dataset_command(tmp_path):
     runner = BenchflowRunner(
         taskId="citation-check",
@@ -202,7 +269,8 @@ def test_runner_builds_real_benchflow_dataset_command(tmp_path):
     assert ["--usage-tracking", "off"] == command[command.index("--usage-tracking"):command.index("--usage-tracking") + 2]
     assert f"BENCHFLOW_PROVIDER_BASE_URL=http://host.docker.internal:43123/v1" in command
     assert "BENCHFLOW_PROVIDER_API_KEY=dummy-from-test" in command
-    assert str(tmp_path / "case") in command
+    assert str(runner.jobsDir) in command
+    assert runner.jobsDir.parent == tmp_path / "case"
     assert "vllm/Qwen3.8-27B" in command
 
 
@@ -221,7 +289,12 @@ def test_runner_builds_local_tasks_dir_command(tmp_path):
 
 
 def test_runner_reads_official_result_shape(tmp_path):
-    resultPath = tmp_path / "case" / "job" / "citation-check" / "rollout" / "result.json"
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/model",
+        jobsDir=tmp_path / "case",
+    )
+    resultPath = runner.jobsDir / "job" / "citation-check" / "rollout" / "result.json"
     resultPath.parent.mkdir(parents=True)
     payload = {
         "task_name": "citation-check",
@@ -234,11 +307,6 @@ def test_runner_reads_official_result_shape(tmp_path):
         "final_metrics": {"reward": 1.0},
     }
     resultPath.write_text(json.dumps(payload), encoding="utf-8")
-    runner = BenchflowRunner(
-        taskId="citation-check",
-        modelPath="/models/model",
-        jobsDir=tmp_path / "case",
-    )
     assert runner.ReadOfficialResult() == payload
     assert runner.officialResultPath == resultPath
     assert runner.Diagnostics()["benchflow_n_tool_calls"] == 4
@@ -320,16 +388,48 @@ class _FailingRunner(_FakeRunner):
         self.stopped = True
 
 
-def _request(prompt):
+def _request(prompt, messages=None):
+    messages = [] if messages is None else messages
     return OpenAIRequest(
         requestId="req",
-        payload={"model": "vllm/model", "messages": []},
-        messages=[],
+        payload={"model": "vllm/model", "messages": messages},
+        messages=messages,
         tools=None,
         prompt=prompt,
         stream=False,
         responseFuture=Future(),
     )
+
+
+def _skill_messages(skill_path, content, call_id="skill-call"):
+    return [
+        {
+            "role": "system",
+            "content": "available skills: " + skill_path,
+        },
+        {
+            "role": "user",
+            "content": "TASK: do not prepare this task description",
+        },
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "arguments": json.dumps({"path": skill_path}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": content,
+        },
+    ]
 
 
 def test_workload_bridges_multiple_turns_and_retains_output():
@@ -355,6 +455,105 @@ def test_workload_bridges_multiple_turns_and_retains_output():
     assert workload.final_result.output["rewards"]["reward"] == 0.75
 
 
+def test_skill_document_extraction_excludes_system_task_and_other_tool_output():
+    skill = "---\nname: demo-skill\n---\n\nUse the skill.\n"
+    messages = _skill_messages("/home/agent/.pi/agent/skills/demo/SKILL.md", skill)
+    messages[1]["content"] += " /tmp/fake/SKILL.md"
+    messages.extend(
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "other-call",
+                        "type": "function",
+                        "function": {
+                            "name": "read",
+                            "arguments": '{"path":"/tmp/notes.txt"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "other-call",
+                "content": "not a skill document",
+            },
+        ]
+    )
+
+    assert _ExtractSkillDocuments(messages) == [skill]
+
+
+def test_workload_prepares_only_skill_documents_before_the_original_run_prompt():
+    skill = "---\nname: demo-skill\n---\n\nUse the skill.\n"
+    first = _request("first rendered prompt")
+    second = _request(
+        "second rendered prompt",
+        _skill_messages("/home/agent/.pi/agent/skills/demo/SKILL.md", skill),
+    )
+    runner = _FakeRunner([first, second])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    firstAction = workload.next()[0]
+    assert firstAction.kind.value == "run"
+    workload.observe([ActionResult(3, Result(output="first output"))])
+
+    prepare = workload.next()[0]
+    assert prepare.kind == ActionKind.PREPARE
+    assert prepare.data == [skill]
+    assert "available skills" not in prepare.data[0]
+    assert "TASK:" not in prepare.data[0]
+
+    workload.observe([ActionResult(3, Result())])
+    secondAction = workload.next()[0]
+    assert secondAction.kind == ActionKind.RUN
+    assert secondAction.data == "second rendered prompt"
+    workload.observe([ActionResult(3, Result(output="second output"))])
+
+    assert runner.responses == [
+        (first, "first output"),
+        (second, "second output"),
+    ]
+
+
+def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
+    skillPath = (
+        tmp_path
+        / "tasks"
+        / "demo-task"
+        / "environment"
+        / "skills"
+        / "demo"
+        / "SKILL.md"
+    )
+    skillPath.parent.mkdir(parents=True)
+    skill = "---\nname: demo\n---\n\nLocal skill body\n"
+    skillPath.write_text(skill, encoding="utf-8")
+
+    request = _request("rendered prompt without a skill tool result")
+    runner = _FakeRunner([request])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(
+            task_id="demo-task",
+            source_mode="local",
+            skillsbench_dir=str(tmp_path),
+        ),
+        runner=runner,
+    )
+
+    prepare = workload.next()[0]
+    assert prepare.kind == ActionKind.PREPARE
+    assert prepare.data == [skill]
+    workload.observe([ActionResult(3, Result())])
+    assert workload.next()[0].kind == ActionKind.RUN
+
+
 def test_workload_converts_runner_failure_to_zero_score():
     runner = _FailingRunner()
     workload = AgentBenchFlowWorkload(
@@ -369,7 +568,10 @@ def test_workload_converts_runner_failure_to_zero_score():
     assert workload.final_result.output["reward"] == 0.0
 
 
-def test_task_filters_and_propagates_benchflow_configuration(fakeSkillsbench):
+def test_task_filters_and_propagates_benchflow_configuration(
+    monkeypatch, fakeSkillsbench
+):
+    monkeypatch.setattr(AgentBenchFlowTask, "_EnsureLocalImages", lambda *args: None)
     task = AgentBenchFlowTask(
         skillsbench_dir=fakeSkillsbench,
         source_mode="local",
@@ -385,6 +587,20 @@ def test_task_filters_and_propagates_benchflow_configuration(fakeSkillsbench):
     assert case.input.skill_mode == "no-skill"
     assert case.input.source_mode == "local"
     assert case.input.provider_host == "host.docker.internal"
+
+
+def test_task_selects_remote_runtime_without_local_docker_validation(fakeSkillsbench):
+    task = AgentBenchFlowTask(
+        skillsbench_dir=fakeSkillsbench,
+        source_mode="local",
+        task_ids=["citation-check"],
+        sandbox="remote-docker",
+    )
+    case = next(iter(task.Cases()))
+    assert case.input.sandbox == "remote-docker"
+    assert case.input.remote_endpoint == "http://127.0.0.1:8765"
+    assert case.input.remote_advertise_host is None
+    assert case.input.remote_poll_interval == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(

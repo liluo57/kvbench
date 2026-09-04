@@ -44,6 +44,7 @@ from tasks.FreshGap import FreshGapTask
 
 MAX_SAMPLES=64
 MAX_NEW_TOKENS=64
+BENCHFLOW_TIMEOUT_SEC = 18000
 
 
 def Main() -> None:
@@ -93,7 +94,7 @@ def Main() -> None:
         availableGpuIds='auto',
         batchSize=batchSize,
         initializeTimeout=1800,
-        taskTimeout=10800,
+        taskTimeout=18000,
         shutdownGracePeriod=30,
         gpuReleaseTimeout=30,
         gpuReleaseStableSeconds=1,

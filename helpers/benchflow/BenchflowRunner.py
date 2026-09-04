@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 
@@ -46,6 +46,7 @@ class BenchflowRunner:
         benchCommand: str | Sequence[str] = "bench",
         extraArgs: Sequence[str] = (),
         endpoint: Optional[KVBenchEndpoint] = None,
+        endpointApiKey: Optional[str] = None,
         popenFactory: Callable[..., subprocess.Popen] = subprocess.Popen,
     ):
         if sourceMode not in {"dataset", "local"}:
@@ -92,6 +93,7 @@ class BenchflowRunner:
             port=self.port,
             thinking=self.thinking,
             debugLogPath=self.jobsDir / "kvbench_llm_io.jsonl",
+            apiKey=endpointApiKey,
         )
         self.popenFactory = popenFactory
         self.process: Optional[subprocess.Popen] = None
@@ -124,6 +126,22 @@ class BenchflowRunner:
             self.endpoint.start()
             command = self.BuildCommand()
             env = dict(os.environ)
+            # LiteLLM exposes its boolean CLI debug flag through the generic
+            # DEBUG environment variable. KVBench's shell setup uses values
+            # such as DEBUG=release, which makes every BenchFlow LiteLLM
+            # proxy fail during argument parsing before the agent starts.
+            debugValue = env.get("DEBUG")
+            if debugValue is not None and debugValue.strip().lower() not in {
+                "0",
+                "1",
+                "false",
+                "true",
+                "no",
+                "yes",
+                "off",
+                "on",
+            }:
+                env.pop("DEBUG", None)
             logPath = self.jobsDir / "benchflow.log"
             log = logPath.open("ab")
             try:
@@ -155,8 +173,20 @@ class BenchflowRunner:
     ) -> Optional[OpenAIRequest]:
         return self.endpoint.wait_for_request(timeout=timeout)
 
-    def respond(self, request: OpenAIRequest, output: str) -> None:
-        self.endpoint.respond(request, output)
+    def respond(
+        self,
+        request: OpenAIRequest,
+        output: str,
+        *,
+        finishReason: Optional[str] = None,
+        stopReason: Optional[Union[int, str]] = None,
+    ) -> None:
+        self.endpoint.respond(
+            request,
+            output,
+            finishReason=finishReason,
+            stopReason=stopReason,
+        )
 
     def BuildCommand(self) -> List[str]:
         """Build the current installed BenchFlow command without executing it."""
