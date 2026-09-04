@@ -63,7 +63,7 @@ def Main() -> None:
     # ]
 
     skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
-    task_ids =['reserves-at-risk-calc', 'dapt-intrusion-detection', 'data-to-d3', 'debug-trl-grpo', 'dialogue-parser', 'drone-planning-control', 'dynamic-object-aware-egomotion', 'earthquake-phase-association', 'earthquake-plate-calculation', 'econ-detrending-correlation', 'edit-pdf', 'energy-ac-optimal-power-flow']
+    task_ids =['reserves-at-risk-calc', 'civ6-adjacency-optimizer', 'data-to-d3', 'debug-trl-grpo', 'dialogue-parser', 'drone-planning-control', 'dynamic-object-aware-egomotion', 'earthquake-phase-association', 'earthquake-plate-calculation', 'econ-detrending-correlation', 'edit-pdf', 'energy-ac-optimal-power-flow']
     
     tasks = [
         AgentBenchFlowTask(
@@ -125,7 +125,7 @@ def Main() -> None:
     sys.stdout.flush()
 
     engine = Engine(
-        availableGpuIds='auto',
+        availableGpuIds=[0,1],
         batchSize=batchSize,
         initializeTimeout=1800,
         taskTimeout=18000,

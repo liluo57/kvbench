@@ -1,5 +1,6 @@
 """Small Workload bridge between a real BenchFlow rollout and KVBench."""
 
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,7 @@ from core.Config import ModelPath
 from core.Result import Result
 from core.Workload import Action, ActionKind, ActionResult, Workload
 
+from helpers.backends import ModelAdapter
 from helpers.benchflow import BenchflowRunner, RemoteBenchflowRunner
 from helpers.endpoint import OpenAIRequest
 
@@ -87,6 +89,50 @@ def _ExtractSkillDocuments(messages: Sequence[Dict[str, Any]]) -> List[str]:
     return documents
 
 
+def _MessageContainsDocument(
+    messages: Sequence[Dict[str, Any]], document: str
+) -> bool:
+    """Return whether a message history already carries this exact document."""
+    return any(
+        isinstance(message, dict)
+        and _MessageText(message.get("content")) == document
+        for message in messages
+    )
+
+
+def _AugmentMessagesWithSkills(
+    messages: Sequence[Dict[str, Any]], documents: Sequence[str]
+) -> List[Dict[str, Any]]:
+    """Add Skill bodies to the first system turn without changing the input.
+
+    The bodies are kept verbatim inside the system content.  Besides giving
+    the model the Skill on turn one, this preserves each body as an exact
+    substring of the rendered prompt, which lets interleaved KV-reuse methods
+    match the corresponding PREPARE segment.
+    """
+    augmented = copy.deepcopy(list(messages))
+    skillText = "\n\n".join(document for document in documents if document)
+    if not skillText:
+        return augmented
+
+    for message in augmented:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            separator = "\n\n" if content else ""
+            message["content"] = content + separator + skillText
+            return augmented
+        if isinstance(content, list):
+            content.append({"type": "text", "text": "\n\n" + skillText})
+            return augmented
+        message["content"] = skillText
+        return augmented
+
+    augmented.insert(0, {"role": "system", "content": skillText})
+    return augmented
+
+
 @dataclass
 class AgentBenchFlowInput:
     """Per-case configuration passed to :class:`AgentBenchFlowWorkload`."""
@@ -141,15 +187,17 @@ class AgentBenchFlowWorkload(Workload):
         self._skillDocuments: List[str] = []
         self._skillDocumentSet = set()
         self._skillsPrepared = False
+        self._firstRunPromptBuilt = False
         self._RememberSkillDocuments(self._LoadBundledSkillDocuments())
 
     def _LoadBundledSkillDocuments(self) -> List[str]:
         """Load local task skills so they can be prepared before turn one.
 
-        Local runs have the exact SkillsBench source tree that BenchFlow
-        uploads into the sandbox.  Preparing these files up front avoids one
-        prepare/reset cycle per Skill as the agent progressively reads them.
-        Dataset-mode runs do not expose that tree here and use the request
+        A supplied SkillsBench checkout has the exact source tree that
+        BenchFlow uses for local runs (and that dataset-mode configurations
+        may retain for task enumeration). Preparing these files up front
+        avoids one prepare/reset cycle per Skill as the agent progressively
+        reads them. Without a checkout, dataset-mode runs use the request
         history fallback in :meth:`next` instead.
         """
         if self._data.skill_mode != "with-skill" or not self._data.skillsbench_dir:
@@ -185,13 +233,46 @@ class AgentBenchFlowWorkload(Workload):
         return newDocuments
 
     def _RunAction(self, request: OpenAIRequest) -> Action:
+        prompt = request.prompt
+        if not self._firstRunPromptBuilt:
+            self._firstRunPromptBuilt = True
+            prompt = self._BuildFirstRunPrompt(request)
         return Action(
             kind=ActionKind.RUN,
             case_id=self.case_id,
-            data=request.prompt,
+            data=prompt,
             tag="agent_turn",
             retainOutput=True,
         )
+
+    def _BuildFirstRunPrompt(self, request: OpenAIRequest) -> str:
+        """Return the initial provider prompt with bundled Skills included."""
+        if self._data.skill_mode != "with-skill" or not self._skillDocuments:
+            return request.prompt
+
+        documents = [
+            document
+            for document in self._skillDocuments
+            if not _MessageContainsDocument(request.messages, document)
+        ]
+        if not documents:
+            return request.prompt
+
+        augmentedMessages = _AugmentMessagesWithSkills(
+            request.messages, documents
+        )
+        if request.modelPath:
+            return ModelAdapter.render_chat(
+                augmentedMessages,
+                modelPath=request.modelPath,
+                tools=request.tools,
+                thinking=request.thinking,
+            )
+
+        # Directly-created fake requests do not carry endpoint rendering
+        # metadata. Keep those runners usable while retaining the same exact
+        # document substring expected by the reuse methods.
+        return "\n\n".join(documents) + "\n\n" + request.prompt
 
     def next(self) -> Optional[List[Action]]:
         if self._finished:
@@ -355,6 +436,7 @@ class AgentBenchFlowWorkload(Workload):
         self._pending = None
         self._pendingKind = None
         self._pendingActionSent = False
+        self._firstRunPromptBuilt = True
         self._finalResult = Result(
             output={"reward": 0.0, "error": message},
             performance={},

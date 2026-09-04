@@ -52,6 +52,12 @@ class OpenAIRequest:
         repr=False
     )
     receivedAt: float = field(default_factory=time.time)
+    # Keep the rendering inputs with the request so a workload can build a
+    # one-off augmented prompt without reaching back into the HTTP endpoint.
+    # Defaults preserve compatibility with lightweight test/custom runners
+    # that construct OpenAIRequest directly.
+    modelPath: str = ""
+    thinking: Optional[bool] = None
 
 
 _DONE = object()
@@ -546,6 +552,8 @@ class OpenAIEndpoint:
             prompt=prompt,
             stream=stream,
             responseFuture=concurrent.futures.Future(),
+            modelPath=self.modelPath,
+            thinking=self.thinking,
         )
 
     def _Enqueue(self, request: OpenAIRequest) -> None:

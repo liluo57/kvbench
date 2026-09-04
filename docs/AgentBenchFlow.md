@@ -41,23 +41,25 @@ task Skill's full document is not the system-level available-Skills index. It
 appears later, after the agent issues a tool call such as
 `read({"path":".../SKILL.md"})`, as the matching `tool` message body.
 
-`AgentBenchFlowWorkload` recognizes only those tool-call/response pairs. It
-sends the document bodies as a `PREPARE` action and then sends the unchanged,
-fully rendered provider prompt as a `RUN` action for the same request:
+`AgentBenchFlowWorkload` recognizes only those tool-call/response pairs. Local
+task-bundled documents are sent as a `PREPARE` action and are also inserted
+verbatim into the first provider prompt. The prompt is then rendered again
+with the model's native chat template:
 
 ```text
 provider request
   -> PREPARE([skill-document-1, skill-document-2, ...])
-  -> RUN(full rendered request)
+  -> RUN(first rendered request + skill documents)
   -> provider response
 ```
 
-The system prompt, task instruction, tool-call metadata, and multi-turn common
-prefix are therefore not preparation inputs. Local SkillsBench runs load the
-task-bundled `environment/skills/*/SKILL.md` files before the first turn;
-dataset runs discover documents from the provider history as the agent reads
-them. Bodies are deduplicated, and later requests reuse the accumulated Skill
-set.
+The system prompt's available-Skill index, task instruction, tool-call
+metadata, and multi-turn common prefix are therefore not preparation inputs.
+Local SkillsBench runs load the task-bundled
+`environment/skills/*/SKILL.md` files before the first turn; dataset runs with
+no local checkout discover documents from the provider history as the agent
+reads them, so those documents cannot be retroactively added to turn one.
+Bodies are deduplicated, and later requests reuse the accumulated Skill set.
 
 This path is useful for methods that support interleaved reusable spans, such
 as `NaiveTransformer` and `CacheblendRepo`. `FullPrefill` intentionally ignores
