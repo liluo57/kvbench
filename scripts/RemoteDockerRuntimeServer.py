@@ -56,7 +56,19 @@ _RESERVED_EXTRA_OPTIONS = frozenset(
         "--usage-tracking",
         "--jobs-dir",
         "--concurrency",
-        "--agent-env",
+        # ``--agent-env`` is intentionally NOT reserved. The server accepts
+        # ``--agent-env KEY=VALUE`` pairs from the client and routes them into
+        # ``bench`` alongside the server's own reserved ``--agent-env`` lines
+        # (see ``_BuildCommand``). Keys that the server itself injects to wire
+        # the agent to KVBench (``_AGENT_ENV_RESERVED_KEYS``) are still
+        # rejected so the control plane cannot be repointed by the client.
+    }
+)
+_AGENT_ENV_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.+$")
+_AGENT_ENV_RESERVED_KEYS = frozenset(
+    {
+        "BENCHFLOW_PROVIDER_BASE_URL",
+        "BENCHFLOW_PROVIDER_API_KEY",
     }
 )
 
@@ -330,7 +342,29 @@ class RemoteRunManager:
             raise ApiError(400, "bench_extra_args must be a list of strings")
         if len(extraArgs) > 100 or any(len(arg) > 4096 for arg in extraArgs):
             raise ApiError(400, "bench_extra_args exceeds the protocol limit")
-        for arg in extraArgs:
+        for index, arg in enumerate(extraArgs):
+            if arg == "--agent-env" or arg.startswith("--agent-env="):
+                pair = (
+                    arg[len("--agent-env="):]
+                    if arg.startswith("--agent-env=")
+                    else (
+                        extraArgs[index + 1]
+                        if index + 1 < len(extraArgs)
+                        else None
+                    )
+                )
+                if pair is None:
+                    raise ApiError(400, "--agent-env requires KEY=VALUE")
+                if not _AGENT_ENV_PATTERN.match(pair):
+                    raise ApiError(
+                        400, f"--agent-env value must match KEY=VALUE: {pair!r}"
+                    )
+                key = pair.split("=", 1)[0]
+                if key in _AGENT_ENV_RESERVED_KEYS:
+                    raise ApiError(
+                        400, f"--agent-env may not override reserved key {key}"
+                    )
+                continue
             option = arg.split("=", 1)[0]
             if option in _RESERVED_EXTRA_OPTIONS:
                 raise ApiError(400, f"bench_extra_args may not override {option}")
@@ -440,9 +474,10 @@ class RemoteRunManager:
                 400, f"could not read remote task configuration: {exc}"
             ) from exc
         if not image:
-            raise ApiError(
-                400, f"task {record.spec['task_id']} does not declare a Docker image"
-            )
+            # task.md 没有钉死镜像，让 bench 自己按任务/skill 的默认规则
+            # 解析。SkillsBench 的任务普遍不带 docker_image；只有当任务
+            # 显式声明了镜像、并且 B 上确实缺失时才报错。
+            return
         if not shutil.which("docker"):
             raise ApiError(500, "docker is not on PATH on the remote runtime host")
         try:
