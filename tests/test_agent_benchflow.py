@@ -203,6 +203,37 @@ def test_endpoint_stream_true_returns_sse(endpoint):
     assert body.endswith(b"data: [DONE]\n\n")
 
 
+def test_endpoint_stream_sends_heartbeat_while_generation_is_pending(endpoint):
+    server, _calls = endpoint
+    server.sseHeartbeatSec = 0.05
+    connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+    connection.request(
+        "POST",
+        "/v1/chat/completions",
+        body=json.dumps(
+            {
+                "model": "vllm/test",
+                "messages": [{"role": "user", "content": "wait"}],
+                "stream": True,
+            }
+        ),
+        headers={"Content-Type": "application/json"},
+    )
+    response = connection.getresponse()
+    assert response.status == 200
+    assert response.getheader("X-Accel-Buffering") == "no"
+    assert response.fp.readline().startswith(b": kvbench keep-alive")
+    assert response.fp.readline() == b"\n"
+
+    request = server.wait_for_request(timeout=2)
+    assert request is not None
+    server.respond(request, "hello")
+    body = response.read()
+    connection.close()
+    assert b"chat.completion.chunk" in body
+    assert body.endswith(b"data: [DONE]\n\n")
+
+
 def test_endpoint_malformed_request_is_4xx(endpoint):
     server, _calls = endpoint
     status, _contentType, body = _post(server, {"model": "vllm/test"})
@@ -224,9 +255,14 @@ def test_endpoint_logs_raw_request_and_response(endpoint, tmp_path):
     thread.join(timeout=2)
     assert result["value"][0] == 200
     records = [json.loads(line) for line in (tmp_path / "llm.jsonl").read_text().splitlines()]
-    assert [record["phase"] for record in records] == ["request", "response"]
+    assert [record["phase"] for record in records] == [
+        "request",
+        "response_wait_started",
+        "response_wait_finished",
+        "response",
+    ]
     assert records[0]["unsupported_generation_fields"] == ["temperature"]
-    assert records[1]["raw_output"] == "raw output"
+    assert records[3]["raw_output"] == "raw output"
 
 
 def test_endpoint_finish_drains_queued_but_not_inflight(endpoint):
@@ -344,6 +380,7 @@ def test_runner_subprocess_is_mockable_and_lifecycle_is_explicit(tmp_path):
     runner.start()
     runner._monitorThread.join(timeout=2)
     assert calls and calls[0][0][0:3] == ["bench", "eval", "run"]
+    assert calls[0][1]["env"]["REQUEST_TIMEOUT"] == "3600.000"
     assert runner.is_done
     runner.stop()
 

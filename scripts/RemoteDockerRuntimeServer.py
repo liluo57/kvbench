@@ -247,10 +247,16 @@ class RemoteRunManager:
             logPath = record.jobsDir / "benchflow.log"
             log = logPath.open("ab")
             try:
+                runEnv = dict(os.environ)
+                providerTimeout = f"{record.spec['result_json_timeout']:.3f}"
+                # The agent's --agent-env values do not configure the
+                # host-side LiteLLM process. Export the same deadline here so
+                # the OpenAI-compatible client cannot fall back to 600s.
+                runEnv["REQUEST_TIMEOUT"] = providerTimeout
                 record.process = subprocess.Popen(
                     command,
                     cwd=str(record.runDir),
-                    env=dict(os.environ),
+                    env=runEnv,
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
