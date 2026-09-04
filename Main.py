@@ -23,6 +23,7 @@ from methods import (
     CacheblendRepo,
     FullPrefillVllm,
     FullPrefillTransformer,
+    HypicMethod,
     NaiveTransformer,
     Qwen38TestMethod
 )
@@ -47,31 +48,38 @@ MAX_NEW_TOKENS=64
 
 def Main() -> None:
     tasks = [
-        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        VTShuffleTask(maxSamples=MAX_SAMPLES),
-        MusiqueTask(maxSamples=MAX_SAMPLES),
-        SamsumTask(maxSamples=MAX_SAMPLES),
-        WikimQATask(maxSamples=MAX_SAMPLES),
-        FreshGapTask(nCases=MAX_SAMPLES),
-        # KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        # KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-        # KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        # VTShuffleTask(maxSamples=MAX_SAMPLES),
+        # MusiqueTask(maxSamples=MAX_SAMPLES),
+        # SamsumTask(maxSamples=MAX_SAMPLES),
+        # WikimQATask(maxSamples=MAX_SAMPLES),
+        # FreshGapTask(nCases=MAX_SAMPLES),
+        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
     ]
 
     methods = [
-        FullPrefillVllm(maxNewTokens=512,
-            gpuMemoryUtilization=0.85,
+        HypicMethod(
+            maxNewTokens=64,
             maxModelLen=25600,
-            languageModelOnly=True,
-            maxNumSeqs=256,
+            memFractionStatic=0.80,
+            picMode="addition",
+        ),
+        HypicMethod(
+            maxNewTokens=64,
+            maxModelLen=25600,
+            memFractionStatic=0.80,
+            fullPrefill=True,
+            tag="full_prefill",
         ),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
 
-    batchSize = 16
+    batchSize = 1
 
     print(
         f"[main] model={ModelPath()}\n"

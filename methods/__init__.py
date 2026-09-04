@@ -20,11 +20,14 @@ Each constructor declares the strict ``gpuNums`` requirement and a relative
 - :class:`NaiveTransformer` — plain KV reuse without repair: cache the shared
   context once and answer every query against that cache (per-chunk KV concat
   over transformers).
+- :class:`HypicMethod` — position-independent segment reuse through the HYPIC
+  SGLang fork, including hybrid linear/full-attention state composition.
 """
 
 from .CacheblendLmcache import CacheblendLmcache
 from .CacheblendRepo import CacheblendRepo, NaiveCacheblendRepo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
+from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
 from .Qwen38Test import Qwen38TestMethod
 
@@ -34,6 +37,7 @@ __all__ = [
     "NaiveCacheblendRepo",
     "FullPrefillTransformer",
     "FullPrefillVllm",
+    "HypicMethod",
     "NaiveTransformer",
     "Qwen38TestMethod",
 ]

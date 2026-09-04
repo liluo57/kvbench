@@ -358,6 +358,49 @@ engine = Engine(
 report = engine.Evaluate(tasks, methods, metrics)
 ```
 
+## HYPIC with Qwen3.8
+
+`HypicMethod` drives the HYPIC SGLang fork configured by `Hypic.RepoPath` and
+uses the global `ModelPath`. Qwen3.8-27B reports the Qwen3.5 dense runtime
+architecture and a hybrid 3-linear/1-full attention layer pattern, so the
+adapter uses HYPIC's native PIC path:
+
+```python
+from methods import HypicMethod
+
+methods = [
+    HypicMethod(
+        gpuNums=1,
+        maxNewTokens=64,
+        maxModelLen=25600,
+        memFractionStatic=0.80,
+        picMode="addition",
+    ),
+    HypicMethod(
+        gpuNums=1,
+        maxNewTokens=64,
+        maxModelLen=25600,
+        memFractionStatic=0.80,
+        fullPrefill=True,
+        tag="full_prefill",
+    ),
+]
+```
+
+`Prepare` caches the declared text segments; `Run` detects them even when they
+are reordered or separated by fresh text. Results expose actual
+`num_cached_tokens` and `reuse_ratio` reported by HYPIC. HYPIC v1 accepts one
+text request at a time, so this method declares `maxCaseBatchSize = 1` even if
+the Engine is configured with a larger batch. A direct and an end-to-end worker
+smoke test are available through `scripts/SmokeHypic.py`.
+HYPIC's last PIC segment is reserved for the fresh query row that seeds decode;
+therefore `FreshGap` represents the scenario as `A + B + C + Q`, with `A` and
+`C` prepared, `B` fresh, and the small `Q` tail intentionally unprepared. This
+is what allows the benchmark to measure reuse of C without invalidating the
+generation query.
+The `hypic(full_prefill)` control uses the same HYPIC runtime and model but
+disables both PIC and the ordinary radix prefix cache, and skips `Prepare`.
+
 Within one `(method, task)` pair, `Task.Cases()` is split into batches of at
 most that method's effective Case batch size. The simplified inner loop is:
 
@@ -499,6 +542,7 @@ KVBench/
 │   ├── CacheblendLmcache.py
 │   ├── CacheblendRepo.py
 │   ├── FullPrefill.py
+│   ├── Hypic.py
 │   └── Naive.py
 │
 ├── tasks/

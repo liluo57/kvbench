@@ -3,7 +3,12 @@
 Structure:
 
     Prepare: [A, C]
-    Run:      A + [fresh B] + C
+    Run:      A + [fresh B] + C + Q
+
+``Q`` is the fresh assistant-generation suffix.  It is intentionally not part
+of C: HYPIC reserves the final PIC segment for the query whose logits seed
+decode. Keeping Q separate lets the benchmark test reuse of the *final
+prepared segment* C without bypassing that runtime contract.
 
 A and C are both long and roughly equal in size. B is only a few tokens.
 
@@ -49,7 +54,10 @@ class FreshGapTask(Task):
 
         # Keep A / C identical across cases. Only the tiny fresh B changes.
         # This makes the performance comparison less noisy.
-        self._a = user_turn_prefix(modelPath) + (
+        # This is an exact-answer microbenchmark; disable the model's optional
+        # chain-of-thought preamble so the answer fits in the smoke budget.
+        thinking = False
+        self._a = user_turn_prefix(modelPath, thinking=thinking) + (
             "Read the following context and answer the final question. "
             "Return only the requested numeric code.\n\n"
             + self._Filler("A")
@@ -57,10 +65,14 @@ class FreshGapTask(Task):
 
         self._c = (
             self._Filler("C")
-            + assistant_turn_suffix(modelPath)
             + "\nWhat is the transient code? "
             "Answer with the numeric code only.\n"
         )
+        # HYPIC's last segment is the query segment and is deliberately not
+        # cached. Keep the model's assistant-generation suffix outside C so C
+        # can be a true final prepared hit while Q supplies the final forward
+        # row used for next-token sampling.
+        self._query_tail = assistant_turn_suffix(modelPath, thinking=thinking)
 
     def Cases(self) -> Iterator[Case]:
         for i in range(self.nCases):
@@ -70,7 +82,7 @@ class FreshGapTask(Task):
 
             data = RAGInput(
                 prepare_input=[self._a, self._c],
-                run_input=self._a + fresh + self._c,
+                run_input=self._a + fresh + self._c + self._query_tail,
             )
 
             yield Case(

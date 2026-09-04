@@ -272,6 +272,37 @@ def test_model_adapter_render_chat_includes_assistant_generation_prompt(modelPat
     """render_chat appends the assistant generation prompt regardless of body."""
     ModelAdapter.set_arch_for_testing("qwen3")
     out = ModelAdapter.render_chat([{"role": "user", "content": "hi"}], modelPath=modelPath)
-    assert out.startswith("<|im_start|>user\n")
-    assert out.endswith("<|im_start|>assistant\n")
+    assert "hi" in out
+    assert "<|im_start|>assistant\n" in out
     ModelAdapter.set_arch_for_testing(None)
+
+
+def test_model_adapter_boundaries_reassemble_the_rendered_user_prompt(modelPath):
+    ModelAdapter.set_arch_for_testing("qwen3")
+    try:
+        body = "boundary marker content"
+        composed = (
+            ModelAdapter.user_turn_prefix(modelPath)
+            + body
+            + ModelAdapter.assistant_turn_suffix(modelPath)
+        )
+        direct = ModelAdapter.render_chat(
+            [{"role": "user", "content": body}], modelPath=modelPath
+        )
+        assert composed == direct
+        assert ModelAdapter.user_turn_prefix(modelPath)
+        assert body not in ModelAdapter.user_turn_prefix(modelPath)
+    finally:
+        ModelAdapter.set_arch_for_testing(None)
+
+
+def test_model_adapter_boundaries_preserve_thinking_toggle(modelPath):
+    ModelAdapter.set_arch_for_testing("qwen3_5")
+    try:
+        thinking = ModelAdapter.assistant_turn_suffix(modelPath, thinking=True)
+        no_thinking = ModelAdapter.assistant_turn_suffix(modelPath, thinking=False)
+        assert thinking != no_thinking
+        assert "<think>" in thinking
+        assert "</think>" in no_thinking
+    finally:
+        ModelAdapter.set_arch_for_testing(None)

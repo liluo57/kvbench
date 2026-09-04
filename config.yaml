@@ -23,6 +23,11 @@ DatasetPath: /root/kvbench/data
 # Default model used by the methods when none is passed explicitly.
 ModelPath: /root/autodl-tmp/models/Qwen3.8-27b
 
+# HYPIC's SGLang fork used by methods/Hypic.py. The model itself still comes
+# from the global ModelPath above.
+Hypic:
+  RepoPath: /root/hypic
+
 # The CacheblendRepo method (methods/CacheblendRepo.py) runs the *original*
 # CacheBlend repo (YaoJiayi/CacheBlend): a patched vLLM 0.4.1 whose collect /
 # check / fusion machinery lives in <RepoPath>/vllm_blend. The method launches a

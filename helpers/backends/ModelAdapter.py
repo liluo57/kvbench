@@ -119,6 +119,12 @@ def set_arch_for_testing(arch: Optional[str]) -> None:
     global _ArchOverrideForTesting
     _ArchOverrideForTesting = arch
     arch_family.cache_clear()
+    # Prompt boundaries depend on the selected chat template as well. Clear
+    # their lazy caches when tests switch the synthetic architecture.
+    for name in ("_chat_boundary_parts", "user_turn_prefix", "assistant_turn_suffix"):
+        cached = globals().get(name)
+        if cached is not None:
+            cached.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +304,39 @@ def render_user_prompt(
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=8)
-def user_turn_prefix(modelPath: str) -> str:
+_BOUNDARY_MARKER = "KVBENCH_CHAT_BOUNDARY_MARKER_7f3a"
+
+
+@lru_cache(maxsize=16)
+def _chat_boundary_parts(
+    modelPath: str, thinking: Optional[bool]
+) -> Tuple[str, str]:
+    """Return ``(prefix, assistant_suffix)`` for one user message.
+
+    Splitting a rendered message around a marker is robust across ChatML,
+    ATEM, ``[INST]`` and similar templates. In particular, an empty string is
+    a valid ``str.find`` match at offset zero, so it must never be used as a
+    boundary sentinel here.
+    """
+    rendered = render_chat(
+        [{"role": "user", "content": _BOUNDARY_MARKER}],
+        modelPath=modelPath,
+        thinking=thinking,
+    )
+    idx = rendered.find(_BOUNDARY_MARKER)
+    if idx < 0:
+        raise RuntimeError(
+            "could not locate chat boundary marker in rendered prompt: "
+            f"{rendered!r}"
+        )
+    end = idx + len(_BOUNDARY_MARKER)
+    return rendered[:idx], rendered[end:]
+
+
+@lru_cache(maxsize=16)
+def user_turn_prefix(
+    modelPath: str, thinking: Optional[bool] = None
+) -> str:
     """The literal prefix that opens a user turn in the configured model.
 
     Derived by rendering an empty user message: the jinja emits the user
@@ -309,18 +346,13 @@ def user_turn_prefix(modelPath: str) -> str:
     instead of literal ``user\\n`` — the boundary stays correct
     for every supported chat format without per-arch code.
     """
-    rendered = render_chat([{"role": "user", "content": ""}], modelPath=modelPath)
-    for closer in ("", "<|eot|>"):
-        idx = rendered.find(closer)
-        if idx >= 0:
-            return rendered[:idx]
-    raise RuntimeError(
-        f"could not locate user-turn closer in rendered prompt: {rendered!r}"
-    )
+    return _chat_boundary_parts(modelPath, thinking)[0]
 
 
-@lru_cache(maxsize=8)
-def assistant_turn_suffix(modelPath: str) -> str:
+@lru_cache(maxsize=16)
+def assistant_turn_suffix(
+    modelPath: str, thinking: Optional[bool] = None
+) -> str:
     """The literal suffix that closes the user turn and opens the assistant
     turn.
 
@@ -336,14 +368,7 @@ def assistant_turn_suffix(modelPath: str) -> str:
     boundary when chunk-concatenated, and the model predicts EOS on the
     trailing text. The fix is the prompt structure, not this boundary.
     """
-    rendered = render_chat([{"role": "user", "content": ""}], modelPath=modelPath)
-    for closer in ("", "<|eot|>"):
-        idx = rendered.find(closer)
-        if idx >= 0:
-            return rendered[idx:]
-    raise RuntimeError(
-        f"could not locate user-turn closer in rendered prompt: {rendered!r}"
-    )
+    return _chat_boundary_parts(modelPath, thinking)[1]
 
 
 # ---------------------------------------------------------------------------
