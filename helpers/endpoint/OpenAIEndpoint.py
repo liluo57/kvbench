@@ -20,7 +20,7 @@ import traceback
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 from helpers.backends import ModelAdapter
 
@@ -202,18 +202,19 @@ class _OpenAIRequestHandler(BaseHTTPRequestHandler):
             "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
         }
         self._SSEData(first)
+        finalChoice: Dict[str, Any] = {
+            "index": 0,
+            "delta": {},
+            "finish_reason": choice.get("finish_reason", "stop"),
+        }
+        if "stop_reason" in choice:
+            finalChoice["stop_reason"] = choice["stop_reason"]
         final = {
             "id": payload["id"],
             "object": "chat.completion.chunk",
             "created": payload["created"],
             "model": payload["model"],
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": choice.get("finish_reason", "stop"),
-                }
-            ],
+            "choices": [finalChoice],
         }
         self._SSEData(final)
         self.wfile.write(b"data: [DONE]\n\n")
@@ -310,7 +311,14 @@ class OpenAIEndpoint:
             return None
         return item  # type: ignore[return-value]
 
-    def respond(self, request: OpenAIRequest, output: str) -> EndpointResponse:
+    def respond(
+        self,
+        request: OpenAIRequest,
+        output: str,
+        *,
+        finishReason: Optional[str] = None,
+        stopReason: Optional[Union[int, str]] = None,
+    ) -> EndpointResponse:
         """Parse one raw Method output and release the waiting HTTP client."""
         try:
             content, reasoning, toolCalls = ModelAdapter.parse_tool_calls(
@@ -324,6 +332,8 @@ class OpenAIEndpoint:
                 reasoning=reasoning,
                 toolCalls=toolCalls,
                 rawOutput=str(output),
+                finishReason=finishReason,
+                stopReason=stopReason,
             )
         except BaseException as exc:
             if not request.responseFuture.done():
@@ -452,23 +462,35 @@ class OpenAIEndpoint:
         reasoning: Optional[str],
         toolCalls: Sequence[Mapping[str, Any]],
         rawOutput: str,
+        finishReason: Optional[str],
+        stopReason: Optional[Union[int, str]],
     ) -> EndpointResponse:
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if reasoning:
             message["reasoning_content"] = reasoning
         if toolCalls:
             message["tool_calls"] = [dict(call) for call in toolCalls]
+        # ``tool_calls`` is the OpenAI protocol-level reason and must remain
+        # visible to the agent when the model emitted a parseable tool call.
+        # For ordinary completions, use the native vLLM reason instead of
+        # manufacturing ``stop``. ``stop_reason`` is vLLM's extra detail.
+        wireFinishReason = (
+            "tool_calls" if toolCalls else (finishReason or "stop")
+        )
+        choice: Dict[str, Any] = {
+            "index": 0,
+            "message": message,
+            "finish_reason": wireFinishReason,
+        }
+        if stopReason is not None:
+            choice["stop_reason"] = stopReason
         payload: Dict[str, Any] = {
             "id": request.requestId,
             "object": "chat.completion",
             "created": int(request.receivedAt),
             "model": str(request.payload.get("model", "")),
             "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": "tool_calls" if toolCalls else "stop",
-                }
+                choice
             ],
         }
         return EndpointResponse(

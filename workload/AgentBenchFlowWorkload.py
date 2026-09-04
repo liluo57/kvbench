@@ -310,7 +310,15 @@ class AgentBenchFlowWorkload(Workload):
         if self._runner is None:
             raise RuntimeError("AgentBenchFlowWorkload has no BenchFlow runner")
         try:
-            self._runner.respond(request, output)
+            # Keep compatibility with lightweight/custom runners that expose
+            # the original respond(request, output) contract. The native
+            # stop fields are present only on the vLLM Result metadata.
+            stopMetadata = {}
+            if "finish_reason" in result.metadata:
+                stopMetadata["finishReason"] = result.metadata["finish_reason"]
+            if "stop_reason" in result.metadata:
+                stopMetadata["stopReason"] = result.metadata["stop_reason"]
+            self._runner.respond(request, output, **stopMetadata)
         except BaseException as exc:
             self.fail(exc)
 

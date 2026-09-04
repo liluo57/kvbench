@@ -33,6 +33,16 @@ Patches applied:
      ~8 KB/s and the 900 s install timeout can be hit before
      apt-get update finishes. Tuna serves the same files from a
      Tsinghua CDN mirror (~50 MB/s from China).
+  6. benchflow/providers/litellm_config.py + litellm_runtime.py: add a
+     `BENCHFLOW_LITELLM_NO_AUTH=1` opt-in that forces the LiteLLM
+     proxy master_key to empty, disabling the per-request API-key
+     check. With no master_key, the auth path's `master_key is None`
+     branch returns a UserAPIKeyAuth(INTERNAL_USER) immediately and
+     never queries the prisma DB. KVBench's smoke runs use a vLLM
+     endpoint that does not ship the `prisma` Python wheel, so any
+     request whose auth cache expires (or was never warmed) hits
+     `import prisma` → ModuleNotFoundError → 500 Internal Server
+     Error, freezing the agent mid-turn until taskTimeout fires.
 
 All patches are idempotent: each looks for a marker string (a comment
 or a distinctive post-patch substring) first and aborts that step with a
@@ -60,6 +70,8 @@ BENCHFLOW_ROOT = Path(
 )
 REGISTRY_PATH = BENCHFLOW_ROOT / "agents" / "registry.py"
 DOCKER_PATH = BENCHFLOW_ROOT / "sandbox" / "docker.py"
+LITELLM_CONFIG_PATH = BENCHFLOW_ROOT / "providers" / "litellm_config.py"
+LITELLM_RUNTIME_PATH = BENCHFLOW_ROOT / "providers" / "litellm_runtime.py"
 
 # Marker comments — also serve as the patch "fingerprint" for idempotency.
 # Re-applying the patch on a file that already has the marker is a no-op.
@@ -77,6 +89,12 @@ POST_PATCH_PIACP = "pi-acp@0.0.32"
 POST_PATCH_AUTONOMY = "_PI_AUTONOMOUS_DIRECTIVE = ("
 POST_PATCH_NO_RMI = "--volumes"  # this string only appears in the patched block
 POST_PATCH_PI_TIMEOUT = '"timeoutMs": 10800000'
+POST_PATCH_LITELLM_NO_AUTH_CONFIG = (
+    '"general_settings": ({"master_key": master_key} if master_key else {})'
+)
+POST_PATCH_LITELLM_NO_AUTH_RUNTIME = (
+    'os.environ.get("BENCHFLOW_LITELLM_NO_AUTH")'
+)
 
 # Source-of-truth for the autonomous-directive text.  Kept verbatim with
 # the user-supplied wording.
@@ -417,6 +435,181 @@ def check_docker() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Patch 6: litellm_config.py + litellm_runtime.py — disable LiteLLM proxy auth
+# ---------------------------------------------------------------------------
+#
+# Symptom: ~30 min into a smoke run the agent's chat-completion requests
+# start returning 500 Internal Server Error. LiteLLM stderr shows:
+#
+#     ModuleNotFoundError: No module named 'prisma'
+#
+# Root cause: the LiteLLM env used by benchflow's smoke runs does not ship
+# the `prisma` Python wheel. When the per-request API-key auth cache
+# expires (cache TTL = ~30 min in newer LiteLLM), `_user_api_key_auth`
+# re-runs the auth check. master_key check fails (the agent sends the
+# BENCHFLOW_PROVIDER_API_KEY the caller set, which is usually NOT the
+# auto-generated `sk-benchflow-...` value), so auth falls through to the
+# DB-lookup path, which calls `PrismaDBExceptionHandler.is_database_*`
+# which does `import prisma` → ModuleNotFoundError → 500.
+#
+# Fix: opt-in via `BENCHFLOW_LITELLM_NO_AUTH=1` (set in Main.py's engine
+# config or the shell). When set, benchflow passes master_key="" all the
+# way down: (a) litellm_proxy_config writes an empty general_settings
+# (no master_key at all → LiteLLM hits the `master_key is None` branch
+# and returns UserAPIKeyAuth(INTERNAL_USER) immediately); (b) the
+# `_host_litellm_executable` spawn step skips `LITELLM_MASTER_KEY` in the
+# child env (so the env var can't re-enable auth).
+#
+# Idempotency: each anchor matches a single line in the source. The
+# post-patch fingerprints `POST_PATCH_LITELLM_NO_AUTH_CONFIG` /
+# `_RUNTIME` are unique substrings of the rewritten blocks. Re-running
+# the script after a benchflow upgrade that rewrote the anchor lines
+# will print "anchor not found" and exit with the failed step noted.
+
+# Anchor 1 (litellm_config.py:465) — the line that writes master_key
+# into general_settings unconditionally.
+_LITELLM_CONFIG_OLD = (
+    '        "general_settings": {"master_key": master_key},\n'
+)
+_LITELLM_CONFIG_NEW = (
+    "        # Patched for KVBench smoke runs: empty master_key disables auth.\n"
+    '        "general_settings": ({"master_key": master_key} if master_key else {}),\n'
+)
+
+
+def _has_litellm_no_auth_config_patch(text: str) -> bool:
+    return (
+        POST_PATCH_LITELLM_NO_AUTH_CONFIG in text
+        or "Patched for KVBench smoke runs: empty master_key disables auth"
+        in text
+    )
+
+
+def _has_litellm_no_auth_runtime_patch(text: str) -> bool:
+    return (
+        POST_PATCH_LITELLM_NO_AUTH_RUNTIME in text
+        or "Patched for KVBench smoke runs: BENCHFLOW_LITELLM_NO_AUTH"
+        in text
+    )
+
+
+# Anchor 2 (litellm_runtime.py:1645-1648) — the master_key generator.
+# We rewrite the whole `master_key = (...)` expression so it short-circuits
+# to "" when BENCHFLOW_LITELLM_NO_AUTH is set.
+_LITELLM_RUNTIME_MASTER_KEY_OLD = (
+    "    master_key = (\n"
+    "        agent_env.get(LITELLM_MASTER_KEY_ENV)\n"
+    '        or f"sk-benchflow-{secrets.token_urlsafe(24)}"\n'
+    "    )\n"
+)
+_LITELLM_RUNTIME_MASTER_KEY_NEW = (
+    "    # Patched for KVBench smoke runs: BENCHFLOW_LITELLM_NO_AUTH=1 forces\n"
+    "    # master_key to '' so the proxy's auth bypass branch fires and\n"
+    "    # never tries to import prisma (which is missing from this venv).\n"
+    '    master_key = (\n'
+    "        \"\"\n"
+    '        if os.environ.get("BENCHFLOW_LITELLM_NO_AUTH")\n'
+    "        else (\n"
+    "            agent_env.get(LITELLM_MASTER_KEY_ENV)\n"
+    '            or f"sk-benchflow-{secrets.token_urlsafe(24)}"\n'
+    "        )\n"
+    "    )\n"
+)
+
+
+# Anchor 3 (litellm_runtime.py — three sites): the proxy's `LITELLM_MASTER_KEY`
+# env-var line. There are three call sites (host proxy, sandbox proxy, agent
+# env wire-up); the line is identical in all three, so replace_all=True.
+_LITELLM_RUNTIME_ENV_OLD = '            "LITELLM_MASTER_KEY": master_key,\n'
+_LITELLM_RUNTIME_ENV_NEW = (
+    "            # Patched for KVBench smoke runs: skip env var when no-auth.\n"
+    '            **({"LITELLM_MASTER_KEY": master_key} if master_key else {}),\n'
+)
+
+
+def patch_litellm() -> str:
+    """Apply patch 6 (LiteLLM no-auth) to litellm_config.py + litellm_runtime.py.
+    Idempotent."""
+    msgs: list[str] = []
+
+    # --- litellm_config.py: rewrite the master_key writer ---
+    if not LITELLM_CONFIG_PATH.exists():
+        msgs.append(f"[litellm_config.py] not found at {LITELLM_CONFIG_PATH}")
+    else:
+        text = LITELLM_CONFIG_PATH.read_text()
+        if _has_litellm_no_auth_config_patch(text):
+            msgs.append(
+                "[litellm_config.py] no-auth general_settings already applied, skip"
+            )
+        else:
+            if _LITELLM_CONFIG_OLD not in text:
+                msgs.append(
+                    "[litellm_config.py] anchor not found — upstream may have "
+                    "rewritten the general_settings line; manual patch needed"
+                )
+            else:
+                text = text.replace(_LITELLM_CONFIG_OLD, _LITELLM_CONFIG_NEW, 1)
+                LITELLM_CONFIG_PATH.write_text(text)
+                msgs.append(
+                    "[litellm_config.py] rewrote general_settings to skip master_key "
+                    "when empty (no-auth mode)"
+                )
+
+    # --- litellm_runtime.py: master_key generator + env-var lines ---
+    if not LITELLM_RUNTIME_PATH.exists():
+        msgs.append(f"[litellm_runtime.py] not found at {LITELLM_RUNTIME_PATH}")
+    else:
+        text = LITELLM_RUNTIME_PATH.read_text()
+        if _has_litellm_no_auth_runtime_patch(text):
+            msgs.append(
+                "[litellm_runtime.py] BENCHFLOW_LITELLM_NO_AUTH guard already applied, skip"
+            )
+        else:
+            if _LITELLM_RUNTIME_MASTER_KEY_OLD not in text:
+                msgs.append(
+                    "[litellm_runtime.py] master_key generator anchor not found — "
+                    "upstream may have rewritten the block; manual patch needed"
+                )
+            else:
+                text = text.replace(
+                    _LITELLM_RUNTIME_MASTER_KEY_OLD,
+                    _LITELLM_RUNTIME_MASTER_KEY_NEW,
+                    1,
+                )
+                LITELLM_RUNTIME_PATH.write_text(text)
+                msgs.append(
+                    "[litellm_runtime.py] rewrote master_key generator to honor "
+                    "BENCHFLOW_LITELLM_NO_AUTH=1"
+                )
+
+        # Env-var line patch — replace_all (3 sites in same file).
+        text = LITELLM_RUNTIME_PATH.read_text()
+        if '"LITELLM_MASTER_KEY": master_key' in text:
+            new_text = text.replace(_LITELLM_RUNTIME_ENV_OLD, _LITELLM_RUNTIME_ENV_NEW)
+            if new_text != text:
+                LITELLM_RUNTIME_PATH.write_text(new_text)
+                msgs.append(
+                    "[litellm_runtime.py] gated LITELLM_MASTER_KEY env-var assignment "
+                    "behind master_key truthiness (3 sites)"
+                )
+        else:
+            msgs.append(
+                "[litellm_runtime.py] LITELLM_MASTER_KEY env-var line already gated, skip"
+            )
+
+    return "\n".join(msgs)
+
+
+def check_litellm() -> bool:
+    if not (LITELLM_CONFIG_PATH.exists() and LITELLM_RUNTIME_PATH.exists()):
+        return False
+    return (
+        _has_litellm_no_auth_config_patch(LITELLM_CONFIG_PATH.read_text())
+        and _has_litellm_no_auth_runtime_patch(LITELLM_RUNTIME_PATH.read_text())
+    )
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -438,6 +631,10 @@ def main(argv: list[str] | None = None) -> int:
             missing.append("registry.py: pi-acp pin + autonomous directive + apt mirror")
         if not check_docker():
             missing.append("docker.py: --rmi all removal")
+        if not check_litellm():
+            missing.append(
+                "litellm_config.py + litellm_runtime.py: BENCHFLOW_LITELLM_NO_AUTH gate"
+            )
         if missing:
             print("Missing patches:", file=sys.stderr)
             for m in missing:
@@ -449,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
     # Apply path
     print(patch_registry())
     print(patch_docker())
+    print(patch_litellm())
     return 0
 
 

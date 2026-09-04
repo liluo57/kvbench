@@ -194,18 +194,22 @@ class FullPrefillVllm(_FullPrefillBase):
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
         batchOut = GenerateBatch(self.llm, data, self.maxNewTokens)
         results = []
-        for (text, ttft, nTokens, total, numCached), prompt in zip(batchOut, data):
+        for generation, prompt in zip(batchOut, data):
             nInput = len(EncodeIds(self.llm, prompt))
             results.append(
                 self._Result(
-                    text,
-                    ttft,
-                    total,
-                    nTokens,
+                    generation.text,
+                    generation.ttft,
+                    generation.totalTime,
+                    generation.numTokens,
                     metadata={
                         "n_input": nInput,
-                        "num_cached_tokens": numCached,
-                        "reuse_ratio": (numCached / nInput) if nInput else 0.0,
+                        "num_cached_tokens": generation.numCached,
+                        "reuse_ratio": (
+                            generation.numCached / nInput if nInput else 0.0
+                        ),
+                        "finish_reason": generation.finishReason,
+                        "stop_reason": generation.stopReason,
                     },
                 )
             )

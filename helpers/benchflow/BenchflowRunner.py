@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 
@@ -173,8 +173,20 @@ class BenchflowRunner:
     ) -> Optional[OpenAIRequest]:
         return self.endpoint.wait_for_request(timeout=timeout)
 
-    def respond(self, request: OpenAIRequest, output: str) -> None:
-        self.endpoint.respond(request, output)
+    def respond(
+        self,
+        request: OpenAIRequest,
+        output: str,
+        *,
+        finishReason: Optional[str] = None,
+        stopReason: Optional[Union[int, str]] = None,
+    ) -> None:
+        self.endpoint.respond(
+            request,
+            output,
+            finishReason=finishReason,
+            stopReason=stopReason,
+        )
 
     def BuildCommand(self) -> List[str]:
         """Build the current installed BenchFlow command without executing it."""

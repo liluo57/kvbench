@@ -42,12 +42,13 @@ from tasks.FreshGap import FreshGapTask
 
 MAX_SAMPLES=64
 MAX_NEW_TOKENS=64
-BENCHFLOW_TIMEOUT_SEC = 10800
+BENCHFLOW_TIMEOUT_SEC = 18000
 
 
 def Main() -> None:
     skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
-    task_ids =['adaptive-cruise-control','ada-bathroom-plan-repair']
+    task_ids =['azure-bgp-oscillation-route-leak','ada-bathroom-plan-repair',
+    'bike-rebalance','citation-check','civ6-adjacency-optimizer','court-form-filling']
     
     tasks = [
         AgentBenchFlowTask(
@@ -61,11 +62,11 @@ def Main() -> None:
             bench_extra_args=[
                 "--agent-idle-timeout", str(BENCHFLOW_TIMEOUT_SEC),
                 "--config-override",
-                '{"agent":{"timeout_sec":10800}}',
+                '{"agent":{"timeout_sec":18000}}',
                 # LiteLLM's built-in completion fallback is 600s unless the
                 # proxy receives an explicit REQUEST_TIMEOUT. Agent turns in
                 # this benchmark can legitimately take longer than that.
-                "--agent-env", "REQUEST_TIMEOUT=10800",
+                "--agent-env", "REQUEST_TIMEOUT=18000",
             ],
         )
         for task_id in task_ids
@@ -101,7 +102,7 @@ def Main() -> None:
         availableGpuIds='auto',
         batchSize=batchSize,
         initializeTimeout=1800,
-        taskTimeout=10800,
+        taskTimeout=18000,
         shutdownGracePeriod=30,
         gpuReleaseTimeout=30,
         gpuReleaseStableSeconds=1,

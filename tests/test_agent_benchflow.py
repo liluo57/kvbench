@@ -166,6 +166,24 @@ def test_endpoint_tool_calls_and_reasoning(endpoint):
     assert body["choices"][0]["finish_reason"] == "tool_calls"
 
 
+def test_endpoint_uses_native_finish_and_stop_reason(endpoint):
+    server, _calls = endpoint
+    thread, request, result = _serve_one(
+        server,
+        {"model": "vllm/test", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    server.respond(
+        request,
+        "partial output",
+        finishReason="length",
+        stopReason=123,
+    )
+    thread.join(timeout=2)
+    body = json.loads(result["value"][2])
+    assert body["choices"][0]["finish_reason"] == "length"
+    assert body["choices"][0]["stop_reason"] == 123
+
+
 def test_endpoint_stream_true_returns_sse(endpoint):
     server, _calls = endpoint
     thread, request, result = _serve_one(
