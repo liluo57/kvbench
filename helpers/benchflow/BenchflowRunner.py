@@ -82,6 +82,10 @@ class BenchflowRunner:
         self.jobsDir = Path(jobsDir) if jobsDir else Path.cwd() / "jobs" / taskId
         self.jobsDir = self.jobsDir / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
         self.resultJsonTimeout = float(resultJsonTimeout)
+        # The provider request must not outlive the task-level deadline, but
+        # it also must not silently fall back to LiteLLM's short default. This
+        # value is exported to the BenchFlow/LiteLLM host process in start().
+        self.providerRequestTimeout = self.resultJsonTimeout
         self.thinking = thinking
         self.providerApiKey = providerApiKey
         self.providerApiKeyEnv = providerApiKeyEnv
@@ -142,6 +146,12 @@ class BenchflowRunner:
                 "on",
             }:
                 env.pop("DEBUG", None)
+            providerTimeout = f"{self.providerRequestTimeout:.3f}"
+            # --agent-env only reaches the sandboxed agent. LiteLLM is started
+            # by the BenchFlow host process, so it needs the timeout in this
+            # environment too; otherwise its OpenAI-compatible client can
+            # retain a 600-second fallback timeout.
+            env["REQUEST_TIMEOUT"] = providerTimeout
             logPath = self.jobsDir / "benchflow.log"
             log = logPath.open("ab")
             try:
@@ -274,6 +284,7 @@ class BenchflowRunner:
             "endpoint_url": self.endpointUrl,
             "benchflow_returncode": self.processReturnCode,
             "benchflow_error": self.benchflowError,
+            "provider_request_timeout_sec": self.providerRequestTimeout,
         }
         for key in (
             "task_name",

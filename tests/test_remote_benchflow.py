@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import sys
 import tarfile
 import threading
@@ -204,6 +205,7 @@ def test_remote_runner_same_host_round_trip(monkeypatch, tmp_path):
     fakeBench.write_text(
         """
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -238,6 +240,7 @@ rollout = jobs_dir / 'fake-job' / (task_id + '__remote')
     'task_name': task_id,
     'rewards': {'reward': 1.0},
     'agent_result': model_response['choices'][0]['message']['content'],
+    'provider_request_timeout': os.environ.get('REQUEST_TIMEOUT'),
 }), encoding='utf-8')
 """,
         encoding="utf-8",
@@ -285,6 +288,7 @@ rollout = jobs_dir / 'fake-job' / (task_id + '__remote')
             "task_name": taskId,
             "rewards": {"reward": 1.0},
             "agent_result": "answer from A",
+            "provider_request_timeout": "10.000",
         }
         assert runner.officialResultPath is not None
         assert "remote-runtime" in runner.officialResultPath.parts

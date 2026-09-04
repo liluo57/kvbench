@@ -55,6 +55,7 @@ class OpenAIRequest:
 
 
 _DONE = object()
+_DEFAULT_SSE_HEARTBEAT_SEC = 15.0
 _UNSUPPORTED_FIELDS = (
     "temperature",
     "top_p",
@@ -157,8 +158,19 @@ class _OpenAIRequestHandler(BaseHTTPRequestHandler):
         except EndpointError as exc:
             self._WriteError(503, str(exc), "server_error")
             return
+
+        if request.stream:
+            # Send the response headers before waiting for vLLM. Generation
+            # is synchronous in the KVBench worker, so otherwise every HTTP
+            # hop stays silent until the complete response is ready.
+            try:
+                self._WriteStreamingResponse(request)
+            except (BrokenPipeError, ConnectionResetError):
+                self.endpoint._LogClientDisconnect(request)
+            return
+
         try:
-            response = request.responseFuture.result()
+            response = self._WaitForResponse(request, sendHeartbeats=False)
         except Exception as exc:  # noqa: BLE001 - convert generation errors to HTTP
             self.endpoint._LogError(request, exc)
             self._WriteError(502, f"generation failed: {exc}", "server_error")
@@ -166,24 +178,98 @@ class _OpenAIRequestHandler(BaseHTTPRequestHandler):
 
         try:
             self.endpoint._LogResponse(request, response)
-            if response.stream:
-                self._WriteSSE(response.payload)
-            else:
-                self._WriteJSON(200, response.payload)
+            self._WriteJSON(200, response.payload)
         except (BrokenPipeError, ConnectionResetError):
+            self.endpoint._LogClientDisconnect(request)
+
+    def _WaitForResponse(
+        self, request: OpenAIRequest, *, sendHeartbeats: bool
+    ) -> EndpointResponse:
+        started = time.monotonic()
+        heartbeatSec = self.endpoint.sseHeartbeatSec
+        self.endpoint._Log(
+            {
+                "phase": "response_wait_started",
+                "request_id": request.requestId,
+                "stream": request.stream,
+                "heartbeat_sec": heartbeatSec if sendHeartbeats else None,
+            }
+        )
+        try:
+            if not sendHeartbeats:
+                response = request.responseFuture.result()
+            else:
+                while True:
+                    try:
+                        response = request.responseFuture.result(timeout=heartbeatSec)
+                        break
+                    except concurrent.futures.TimeoutError:
+                        # A worker may itself fail with TimeoutError. Do not
+                        # mistake that completed future for a polling timeout.
+                        if request.responseFuture.done():
+                            raise
+                        elapsed = time.monotonic() - started
+                        self._SSEComment(
+                            f"kvbench keep-alive request_id={request.requestId} "
+                            f"elapsed_sec={elapsed:.1f}"
+                        )
+                        self.endpoint._Log(
+                            {
+                                "phase": "response_wait_heartbeat",
+                                "request_id": request.requestId,
+                                "elapsed_sec": round(elapsed, 3),
+                            }
+                        )
+            elapsed = time.monotonic() - started
+            self.endpoint._Log(
+                {
+                    "phase": "response_wait_finished",
+                    "request_id": request.requestId,
+                    "elapsed_sec": round(elapsed, 3),
+                }
+            )
+            return response
+        except BaseException as exc:
+            self.endpoint._Log(
+                {
+                    "phase": "response_wait_failed",
+                    "request_id": request.requestId,
+                    "elapsed_sec": round(time.monotonic() - started, 3),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            raise
+
+    def _WriteStreamingResponse(self, request: OpenAIRequest) -> None:
+        self._WriteSSEHeaders()
+        try:
+            response = self._WaitForResponse(request, sendHeartbeats=True)
+        except Exception as exc:  # noqa: BLE001 - report after SSE headers
+            self.endpoint._LogError(request, exc)
+            self._WriteSSEError(f"generation failed: {exc}")
             return
+        self.endpoint._LogResponse(request, response)
+        self._WriteSSEPayload(response.payload)
 
     def _WriteSSE(self, payload: Mapping[str, Any]) -> None:
+        self._WriteSSEHeaders()
+        self._WriteSSEPayload(payload)
+
+    def _WriteSSEHeaders(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
         # This implementation emits a complete response in one/few chunks,
         # rather than holding an HTTP connection open for token streaming.
+        # The streaming path still sends comment heartbeats while waiting for
+        # the complete response, so long prefill/reasoning stays observable.
         # Closing after [DONE] lets ordinary OpenAI clients finish reading an
         # SSE body without requiring a token-count/content-length trailer.
         self.send_header("Connection", "close")
         self.end_headers()
 
+    def _WriteSSEPayload(self, payload: Mapping[str, Any]) -> None:
         choice = payload["choices"][0]
         message = choice.get("message") or {}
         delta: Dict[str, Any] = {"role": "assistant"}
@@ -221,6 +307,18 @@ class _OpenAIRequestHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
         self.close_connection = True
 
+    def _WriteSSEError(self, message: str) -> None:
+        self._SSEData(
+            {"error": {"message": message, "type": "server_error"}}
+        )
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+    def _SSEComment(self, message: str) -> None:
+        self.wfile.write(f": {message}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
     def _SSEData(self, payload: Mapping[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.wfile.write(b"data: " + body + b"\n\n")
@@ -244,6 +342,7 @@ class OpenAIEndpoint:
         thinking: Optional[bool] = None,
         debugLogPath: Optional[str | Path] = None,
         apiKey: Optional[str] = None,
+        sseHeartbeatSec: float = _DEFAULT_SSE_HEARTBEAT_SEC,
     ):
         self.modelPath = str(modelPath)
         self.host = host
@@ -251,6 +350,12 @@ class OpenAIEndpoint:
         self.thinking = thinking
         self.debugLogPath = Path(debugLogPath) if debugLogPath else None
         self.apiKey = str(apiKey) if apiKey else None
+        try:
+            self.sseHeartbeatSec = float(sseHeartbeatSec)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sseHeartbeatSec must be a positive number") from exc
+        if self.sseHeartbeatSec <= 0:
+            raise ValueError("sseHeartbeatSec must be a positive number")
         self._server: Optional[_EndpointServer] = None
         self._serverThread: Optional[threading.Thread] = None
         self._queue: "queue.Queue[object]" = queue.Queue()
@@ -534,6 +639,15 @@ class OpenAIEndpoint:
                 "request_id": request.requestId,
                 "error": f"{type(error).__name__}: {error}",
                 "traceback": traceback.format_exc(),
+            }
+        )
+
+    def _LogClientDisconnect(self, request: OpenAIRequest) -> None:
+        self._Log(
+            {
+                "phase": "client_disconnect",
+                "request_id": request.requestId,
+                "elapsed_sec": round(time.time() - request.receivedAt, 3),
             }
         )
 
