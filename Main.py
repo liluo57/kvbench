@@ -48,30 +48,64 @@ BENCHFLOW_TIMEOUT_SEC = 18000
 
 
 def Main() -> None:
+    # tasks = [
+    #     # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+    #     # CWEShuffleTask(maxSamples=MAX_SAMPLES),
+    #     # VTShuffleTask(maxSamples=MAX_SAMPLES),
+    #     # MusiqueTask(maxSamples=MAX_SAMPLES),
+    #     # SamsumTask(maxSamples=MAX_SAMPLES),
+    #     # WikimQATask(maxSamples=MAX_SAMPLES),
+    #     # FreshGapTask(nCases=MAX_SAMPLES),
+    #     KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+    #     KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+    #     KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+    #     KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+    # ]
+
+    skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
+    task_ids =['reserves-at-risk-calc', 'dapt-intrusion-detection', 'data-to-d3', 'debug-trl-grpo', 'dialogue-parser', 'drone-planning-control', 'dynamic-object-aware-egomotion', 'earthquake-phase-association', 'earthquake-plate-calculation', 'econ-detrending-correlation', 'edit-pdf', 'energy-ac-optimal-power-flow']
+    
     tasks = [
-        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        # VTShuffleTask(maxSamples=MAX_SAMPLES),
-        # MusiqueTask(maxSamples=MAX_SAMPLES),
-        # SamsumTask(maxSamples=MAX_SAMPLES),
-        # WikimQATask(maxSamples=MAX_SAMPLES),
-        # FreshGapTask(nCases=MAX_SAMPLES),
-        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+        AgentBenchFlowTask(
+            source_mode="local",
+            skillsbench_dir=skillsbench_root,
+            task_ids=[task_id],
+            agent="pi-acp",
+            skill_mode="with-skill",
+            port=8000,
+            thinking=True,
+            result_json_timeout=BENCHFLOW_TIMEOUT_SEC,
+            bench_extra_args=[
+                "--agent-idle-timeout", str(BENCHFLOW_TIMEOUT_SEC),
+                "--config-override",
+                '{"agent":{"timeout_sec":18000}}',
+                # LiteLLM's built-in completion fallback is 600s unless the
+                # proxy receives an explicit REQUEST_TIMEOUT. Agent turns in
+                # this benchmark can legitimately take longer than that.
+                "--agent-env", "REQUEST_TIMEOUT=18000",
+            ],
+        )
+        for task_id in task_ids
     ]
 
     methods = [
+        # HypicMethod(
+        #     maxNewTokens=512,
+        #     maxModelLen=25600,
+        #     memFractionStatic=0.80,
+        #     picMode="addition",
+        # ),
+        # HypicMethod(
+        #     maxNewTokens=512,
+        #     maxModelLen=25600,
+        #     memFractionStatic=0.80,
+        #     fullPrefill=True,
+        #     tag="full_prefill",
+        # ),
         HypicMethod(
-            maxNewTokens=64,
-            maxModelLen=25600,
-            memFractionStatic=0.80,
-            picMode="addition",
-        ),
-        HypicMethod(
-            maxNewTokens=64,
-            maxModelLen=25600,
+            gpuNums=2,
+            maxNewTokens=40960,
+            maxModelLen=256000,
             memFractionStatic=0.80,
             fullPrefill=True,
             tag="full_prefill",
