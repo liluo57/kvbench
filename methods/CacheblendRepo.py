@@ -138,7 +138,7 @@ class CacheblendRepo(Method):
 
     def _startWorker(self) -> None:
         self._stderrTail.clear()
-        helperScript = Path(__file__).resolve().parent.parent / "helpers" / "CacheblendRepoHelper.py"
+        helperScript = Path(__file__).resolve().parent.parent / "helpers" / "cacheblend_repo" / "CacheblendRepoHelper.py"
         env = dict(os.environ)
         # Keep the subprocess clean: the repo's venv must resolve its own vllm,
         # and a login shell's LD_PRELOAD / PYTHONPATH must not leak in.
