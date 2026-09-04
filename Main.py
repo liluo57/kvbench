@@ -24,6 +24,7 @@ from methods import (
     FullPrefillVllm,
     FullPrefillTransformer,
     NaiveTransformer,
+    Qwen38TestMethod
 )
 from tasks import (
     AgentBenchFlowTask,
@@ -45,47 +46,32 @@ MAX_NEW_TOKENS=64
 
 
 def Main() -> None:
-    skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
-    # 3 reps per task for pass-rate measurement. Engine processes cases
-    # sequentially (batchSize=1) so each rep gets its own GPU allocation.
-    REPS = 3
-    task_ids = (
-        ['adaptive-cruise-control'] * REPS
-        + ['ada-bathroom-plan-repair'] * REPS
-    )
     tasks = [
-        AgentBenchFlowTask(
-            source_mode="local",
-            skillsbench_dir=skillsbench_root,
-            task_ids=[task_id],
-            agent="pi-acp",
-            skill_mode="with-skill",
-            thinking=True,
-            bench_extra_args=[
-                "--agent-idle-timeout", "3600",
-                "--config-override", '{"agent":{"timeout_sec":7200}}',
-            ],
-        )
-        for task_id in task_ids
+        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        VTShuffleTask(maxSamples=MAX_SAMPLES),
+        MusiqueTask(maxSamples=MAX_SAMPLES),
+        SamsumTask(maxSamples=MAX_SAMPLES),
+        WikimQATask(maxSamples=MAX_SAMPLES),
+        FreshGapTask(nCases=MAX_SAMPLES),
+        # KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        # KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
     ]
 
     methods = [
-        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
-        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
-        # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
-        # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
-        FullPrefillVllm(
-            gpuNums=2, perfWeight=2, maxNewTokens=4096,
+        FullPrefillVllm(maxNewTokens=512,
             gpuMemoryUtilization=0.85,
-            maxModelLen=32768,
-            enforceEager=True,
+            maxModelLen=25600,
             languageModelOnly=True,
+            maxNumSeqs=256,
         ),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
 
-    batchSize = 1
+    batchSize = 16
 
     print(
         f"[main] model={ModelPath()}\n"
@@ -105,7 +91,7 @@ def Main() -> None:
         gpuReleaseStableSeconds=1,
         gpuReleaseMemoryToleranceMiB=256,
         pairRetries=1,
-        tui=False,
+        tui=True,
         verbose=True,
     )
     report = engine.Evaluate(tasks=tasks, methods=methods, metrics=metrics)

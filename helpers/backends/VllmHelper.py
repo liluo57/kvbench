@@ -113,6 +113,7 @@ def CreateLlm(
     enforceEager: bool = False,
     chatTemplate: Optional[str] = None,
     languageModelOnly: bool = False,
+    maxNumSeqs: Optional[int] = None,
 ):
     """Build the system vLLM ``LLM`` for ``modelPath`` on ``gpuIds``.
 
@@ -155,6 +156,8 @@ def CreateLlm(
         # honours this kwarg via EngineArgs; see vllm/config/model.py.
         language_model_only=languageModelOnly,
     )
+    if maxNumSeqs is not None:
+        llm_kwargs["max_num_seqs"] = maxNumSeqs
     if chatTemplate is not None:
         llm_kwargs["chat_template"] = chatTemplate
     return LLM(**llm_kwargs)

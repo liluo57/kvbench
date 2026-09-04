@@ -160,6 +160,7 @@ class FullPrefillVllm(_FullPrefillBase):
         # only the language model will be exercised. Saves the vision encoder
         # weights + mm_profiler scratch on each rank.
         languageModelOnly: bool = False,
+        maxNumSeqs: Optional[int] = None,
         tag: Optional[str] = None,
     ):
         super().__init__(
@@ -176,6 +177,7 @@ class FullPrefillVllm(_FullPrefillBase):
         # None -> CreateLlm auto-detects ``<model>/chat_template.jinja``.
         self.chatTemplate = chatTemplate
         self.languageModelOnly = languageModelOnly
+        self.maxNumSeqs = maxNumSeqs
         self.llm = None
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
@@ -189,6 +191,7 @@ class FullPrefillVllm(_FullPrefillBase):
             enforceEager=self.enforceEager,
             chatTemplate=self.chatTemplate,
             languageModelOnly=self.languageModelOnly,
+            maxNumSeqs=self.maxNumSeqs,
         )
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
