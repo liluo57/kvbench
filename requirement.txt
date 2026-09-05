@@ -1,0 +1,6 @@
+pyyaml
+nvidia-ml-py
+rich
+torch
+transformers
+pytest
