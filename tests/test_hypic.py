@@ -62,7 +62,12 @@ def test_prepare_makes_every_user_chunk_non_final_and_run_marks_reordered_hits()
 
     warmPrompt, warmParams, warmStream = method.engine.calls[0]
     assert warmPrompt == method.separator.join(["A", "B", _WARMUP_TAIL])
-    assert warmParams == {"temperature": 0, "max_new_tokens": 1}
+    assert warmParams == {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "max_new_tokens": 1,
+    }
     assert warmStream is True
 
     result = method.Run(["head-B-middle-A-tail"])[0]
@@ -104,6 +109,55 @@ def test_run_without_a_match_preserves_the_original_prompt():
     assert method.engine.calls[-1][0] == "plain prompt"
     assert result.metadata["n_pic_segments"] == 1
     assert result.metadata["matched_prepared_segments"] == 0
+
+
+def test_run_retains_output_as_a_segment_for_a_later_run():
+    method = _method()
+    method.Prepare([["cached"]])
+
+    method.Run(["cached prompt"], retainOutput=[True])
+
+    retentionPrompt, retentionParams, retentionStream = method.engine.calls[2]
+    assert retentionPrompt == method.separator.join(["answer", _WARMUP_TAIL])
+    assert retentionParams["max_new_tokens"] == 1
+    assert retentionStream is True
+    assert method._states[0]["prepare"] == ["cached", "answer"]
+
+    method.Run(["prefix answer suffix"])
+    assert method.engine.calls[3][0] == method.separator.join(
+        ["prefix ", "answer", " suffix"]
+    )
+
+
+def test_run_retains_output_even_without_a_prepare_action():
+    method = _method()
+
+    method.Run(["prompt"], retainOutput=[True])
+
+    assert method._states[0]["prepare"] == ["answer"]
+
+
+def test_run_does_not_retain_output_containing_the_pic_separator():
+    method = _method()
+    method.Prepare([["cached"]])
+
+    def generate(prompt, sampling_params, stream):
+        method.engine.calls.append((prompt, sampling_params, stream))
+        yield {
+            "text": "answer" + method.separator,
+            "output_ids": [31],
+            "meta_info": {
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "cached_tokens": 7,
+            },
+        }
+
+    method.engine.generate = generate
+    method.Run(["cached prompt"], retainOutput=[True])
+
+    assert method._states[0]["prepare"] == ["cached"]
+    assert len(method.engine.calls) == 2
 
 
 def test_full_prefill_baseline_skips_prepare_and_disables_reuse_metadata():

@@ -48,68 +48,68 @@ BENCHFLOW_TIMEOUT_SEC = 18000
 
 
 def Main() -> None:
-    # tasks = [
-    #     # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-    #     # CWEShuffleTask(maxSamples=MAX_SAMPLES),
-    #     # VTShuffleTask(maxSamples=MAX_SAMPLES),
-    #     # MusiqueTask(maxSamples=MAX_SAMPLES),
-    #     # SamsumTask(maxSamples=MAX_SAMPLES),
-    #     # WikimQATask(maxSamples=MAX_SAMPLES),
-    #     # FreshGapTask(nCases=MAX_SAMPLES),
-    #     KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-    #     KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-    #     KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
-    #     KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
-    # ]
-
-    skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
-    task_ids =['reserves-at-risk-calc', 'civ6-adjacency-optimizer', 'data-to-d3', 'debug-trl-grpo', 'dialogue-parser', 'drone-planning-control', 'dynamic-object-aware-egomotion', 'earthquake-phase-association', 'earthquake-plate-calculation', 'econ-detrending-correlation', 'edit-pdf', 'energy-ac-optimal-power-flow']
-    
     tasks = [
-        AgentBenchFlowTask(
-            source_mode="local",
-            skillsbench_dir=skillsbench_root,
-            task_ids=[task_id],
-            agent="pi-acp",
-            skill_mode="with-skill",
-            port=8000,
-            thinking=True,
-            result_json_timeout=BENCHFLOW_TIMEOUT_SEC,
-            bench_extra_args=[
-                "--agent-idle-timeout", str(BENCHFLOW_TIMEOUT_SEC),
-                "--config-override",
-                '{"agent":{"timeout_sec":18000}}',
-                # LiteLLM's built-in completion fallback is 600s unless the
-                # proxy receives an explicit REQUEST_TIMEOUT. Agent turns in
-                # this benchmark can legitimately take longer than that.
-                "--agent-env", "REQUEST_TIMEOUT=18000",
-            ],
-        )
-        for task_id in task_ids
+        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        # VTShuffleTask(maxSamples=MAX_SAMPLES),
+        # MusiqueTask(maxSamples=MAX_SAMPLES),
+        # SamsumTask(maxSamples=MAX_SAMPLES),
+        # WikimQATask(maxSamples=MAX_SAMPLES),
+        # FreshGapTask(nCases=MAX_SAMPLES),
+        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
     ]
 
+    # skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
+    # task_ids =['financial-modeling-qa', 'fix-build-agentops', 'fix-erlang-ssh-cve', 'flink-query', 'flood-risk-analysis', 'glm-lake-mendota', 'gravitational-wave-detection', 'grid-dispatch-operator', 'hvac-control', 'invoice-fraud-detection', 'jax-computing-basics', 'jpg-ocr-stat', 'lab-unit-harmonization', 'lake-warming-attribution', 'latex-formula-extraction', 'lean4-proof', 'llm-prefix-cache-replay', 'manufacturing-codebook-normalization', 'manufacturing-equipment-maintenance', 'manufacturing-fjsp-optimization', 'mario-coin-counting', 'mars-clouds-clustering', 'offer-letter-generator', 'organize-messy-files', 'paper-anonymizer', 'parallel-tfidf-search', 'paratransit-routing', 'pddl-airport-planning', 'pddl-tpp-planning', 'pdf-excel-diff', 'powerlifting-coef-calc', 'pptx-reference-formatting', 'protein-expression-analysis', 'python-scala-translation', 'quantum-numerical-simulation', 'r2r-mpc-control', 'radar-vital-signs', 'react-performance-debugging', 'reserves-at-risk-calc', 'sales-pivot-analysis', 'sec-financial-report', 'seismic-phase-picking', 'setup-fuzzing-py', 'shock-analysis-demand', 'shock-analysis-supply', 'simpo-code-reproduction', 'software-dependency-audit', 'syzkaller-ppdev-syzlang', 'threejs-structure-parser', 'threejs-to-obj', 'tictoc-unnecessary-abort-detection', 'travel-planning', 'video-silence-remover', 'weighted-gdp-calc', 'xlsx-recover-data', 'fix-build-google-auto', 'fix-visual-stability']
+    
+    # tasks = [
+    #     AgentBenchFlowTask(
+    #         source_mode="local",
+    #         skillsbench_dir=skillsbench_root,
+    #         task_ids=[task_id],
+    #         agent="pi-acp",
+    #         skill_mode="with-skill",
+    #         port=8000,
+    #         thinking=True,
+    #         result_json_timeout=BENCHFLOW_TIMEOUT_SEC,
+    #         bench_extra_args=[
+    #             "--agent-idle-timeout", str(BENCHFLOW_TIMEOUT_SEC),
+    #             "--config-override",
+    #             '{"agent":{"timeout_sec":18000}}',
+    #             # LiteLLM's built-in completion fallback is 600s unless the
+    #             # proxy receives an explicit REQUEST_TIMEOUT. Agent turns in
+    #             # this benchmark can legitimately take longer than that.
+    #             "--agent-env", "REQUEST_TIMEOUT=18000",
+    #         ],
+    #     )
+    #     for task_id in task_ids
+    # ]
+
     methods = [
-        # HypicMethod(
-        #     maxNewTokens=512,
-        #     maxModelLen=25600,
-        #     memFractionStatic=0.80,
-        #     picMode="addition",
-        # ),
-        # HypicMethod(
-        #     maxNewTokens=512,
-        #     maxModelLen=25600,
-        #     memFractionStatic=0.80,
-        #     fullPrefill=True,
-        #     tag="full_prefill",
-        # ),
         HypicMethod(
-            gpuNums=2,
-            maxNewTokens=40960,
-            maxModelLen=256000,
+            maxNewTokens=512,
+            maxModelLen=25600,
+            memFractionStatic=0.80,
+            picMode="addition",
+        ),
+        HypicMethod(
+            maxNewTokens=512,
+            maxModelLen=25600,
             memFractionStatic=0.80,
             fullPrefill=True,
             tag="full_prefill",
         ),
+        # HypicMethod(
+        #     gpuNums=1,
+        #     maxNewTokens=40960,
+        #     maxModelLen=256000,
+        #     memFractionStatic=0.80,
+        #     fullPrefill=True,
+        #     tag="full_prefill",
+        # ),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
@@ -125,7 +125,7 @@ def Main() -> None:
     sys.stdout.flush()
 
     engine = Engine(
-        availableGpuIds=[0,1],
+        availableGpuIds=[0,1,2,3],
         batchSize=batchSize,
         initializeTimeout=1800,
         taskTimeout=18000,

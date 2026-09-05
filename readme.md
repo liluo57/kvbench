@@ -393,6 +393,9 @@ are reordered or separated by fresh text. Results expose actual
 text request at a time, so this method declares `maxCaseBatchSize = 1` even if
 the Engine is configured with a larger batch. A direct and an end-to-end worker
 smoke test are available through `scripts/SmokeHypic.py`.
+When a RUN sets `retainOutput=True`, the adapter registers the generated text
+as another PIC segment for later RUN steps using an unmeasured one-token
+warmup; the `fullPrefill` control intentionally keeps retention disabled.
 HYPIC's last PIC segment is reserved for the fresh query row that seeds decode;
 therefore `FreshGap` represents the scenario as `A + B + C + Q`, with `A` and
 `C` prepared, `B` fresh, and the small `Q` tail intentionally unprepared. This

@@ -7,6 +7,11 @@ inserts HYPIC's out-of-band separator between spans, and generates from the
 resulting position-independent cache composition.  HYPIC removes the separator
 before tokenization, so it is never visible to the model.
 
+When a RUN asks to retain its output, the adapter performs an unmeasured,
+one-token warmup using the output as a segment.  HYPIC does not expose the
+decode KV through ``Engine.generate`` after a request finishes, so this
+warmup is the portable way to register the generated text in PICache.
+
 HYPIC v1 deliberately never caches the last segment of a request.  Prepare
 therefore appends a small throwaway tail so every user-provided segment is
 eligible for caching.
@@ -229,11 +234,16 @@ class HypicMethod(Method):
         data: List[str],
         retainOutput: Optional[List[bool]] = None,
     ) -> List[Result]:
-        # HYPIC owns cache lifetime; generated-output retention is not exposed
-        # by PICache yet.
-        _ = retainOutput
+        if len(self._states) != len(data):
+            self._states = [{"prepare": []} for _ in data]
+
         results: List[Result] = []
         for index, runInput in enumerate(data):
+            retain = (
+                bool(retainOutput[index])
+                if retainOutput is not None and index < len(retainOutput)
+                else False
+            )
             if self.fullPrefill:
                 output, ttft, total, nTokens, meta = self._Generate(
                     runInput, maxNewTokens=self.maxNewTokens
@@ -273,6 +283,9 @@ class HypicMethod(Method):
                 prompt, maxNewTokens=self.maxNewTokens
             )
 
+            if retain:
+                self._RetainOutput(prepare, output)
+
             results.append(
                 self._Result(
                     output,
@@ -285,6 +298,31 @@ class HypicMethod(Method):
                 )
             )
         return results
+
+    def _RetainOutput(self, prepare: List[str], output: str) -> None:
+        """Register generated text as a PIC segment for later RUN steps.
+
+        ``Engine.generate`` releases decode-allocated KV when a request ends,
+        and its public API has no ``return_cache`` equivalent.  Re-prefilling
+        the output outside the measured RUN is therefore necessary to give
+        HYPIC a cache entry it can match later.  The throwaway tail is required
+        because HYPIC intentionally does not cache the final request segment.
+
+        A generated separator cannot be retained safely: HYPIC treats it as a
+        control delimiter and removes it before tokenization.  In that rare
+        case the hint is best-effort and the output is left out of the index.
+        """
+        if (
+            self.fullPrefill
+            or not output
+            or output in prepare
+            or self.separator in output
+        ):
+            return
+
+        warmup = _SegmentedPrompt([output, _WARMUP_TAIL], self.separator)
+        self._Generate(warmup, maxNewTokens=1)
+        prepare.append(output)
 
     def _Result(
         self,
@@ -344,7 +382,12 @@ class HypicMethod(Method):
 
         stream = self.engine.generate(
             prompt,
-            sampling_params={"temperature": 0, "max_new_tokens": maxNewTokens},
+            sampling_params={
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 20,
+                "max_new_tokens": maxNewTokens,
+            },
             stream=True,
         )
         for chunk in stream:
