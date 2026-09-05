@@ -168,7 +168,7 @@ class Engine:
                 {
                     "index": index,
                     "class": f"{type(task).__module__}.{type(task).__qualname__}",
-                    "name": task.name,
+                    "name": task.Label,
                 }
                 for index, task in enumerate(tasks)
             ],

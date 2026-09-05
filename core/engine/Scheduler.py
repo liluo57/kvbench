@@ -121,7 +121,7 @@ class Scheduler:
         methodDir = Path(worker.instanceLog).parent
         logPaths = {
             attempt: str((methodDir / (
-                f"{worker.workerId}-t{taskIndex:03d}-{Slug(self.ctx.tasks[taskIndex].name)}-"
+                f"{worker.workerId}-t{taskIndex:03d}-{Slug(self.ctx.tasks[taskIndex].Label)}-"
                 f"attempt{attempt}.log"
             )).resolve())
             for attempt in range(startAttempt, self.ctx.maxAttempts + 1)
@@ -130,7 +130,7 @@ class Scheduler:
             self.reporter.addLog(
                 path,
                 f"{self.ctx.methods[worker.methodIndex].Label} / "
-                f"{self.ctx.tasks[taskIndex].name} attempt {attempt}",
+                f"{self.ctx.tasks[taskIndex].Label} attempt {attempt}",
             )
         worker.connection.send({
             "op": "task", "task_index": taskIndex, "task": self.ctx.tasks[taskIndex],
@@ -140,7 +140,7 @@ class Scheduler:
         self.ctx.pairStatus[pair] = "running"
         worker.state = "busy"
         worker.taskIndex = taskIndex
-        worker.taskName = self.ctx.tasks[taskIndex].name
+        worker.taskName = self.ctx.tasks[taskIndex].Label
         worker.attempt = startAttempt
         worker.logPath = logPaths[startAttempt]
         worker.deadline = time.monotonic() + self.engine.taskTimeout
@@ -151,7 +151,7 @@ class Scheduler:
             "method_index": worker.methodIndex,
             "task_index": taskIndex,
             "method": self.ctx.methods[worker.methodIndex].Label,
-            "task": self.ctx.tasks[taskIndex].name,
+            "task": self.ctx.tasks[taskIndex].Label,
             "attempt": startAttempt,
             "log_path": logPaths[startAttempt],
         })

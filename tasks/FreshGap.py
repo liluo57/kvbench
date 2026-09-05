@@ -30,7 +30,7 @@ method that reuses C without correctly blending the fresh B can also be caught
 by the accuracy metric.
 """
 
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Optional
 
 from core.Config import ModelPath
 from core.Result import Result
@@ -47,7 +47,9 @@ class FreshGapTask(Task):
         self,
         nCases: int = 4,
         linesPerChunk: int = 192,
+        tag: Optional[str] = None,
     ):
+        super().__init__(tag=tag)
         self.nCases = nCases
         self.linesPerChunk = linesPerChunk
         modelPath = ModelPath()

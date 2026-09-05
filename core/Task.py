@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 
 from .Result import Result
 
@@ -48,6 +48,24 @@ class Task(ABC):
 
     #: Short identifier used in reports. Override in subclasses.
     name: str = "task"
+
+    #: Optional distinguishing label appended to :attr:`name` in reports, e.g.
+    #: a knob's value: ``name="niah"`` + ``tag="shuffle"`` renders as
+    #: ``niah(shuffle)``. Set via the constructor's ``tag`` argument.
+    tag: Optional[str] = None
+
+    def __init__(self, *, tag: Optional[str] = None):
+        """Create a lightweight task configuration.
+
+        Subclasses must chain through ``super().__init__()`` (passing
+        ``tag``) so :attr:`tag` is set uniformly on every subclass.
+        """
+        self.tag = tag
+
+    @property
+    def Label(self) -> str:
+        """Report name: :attr:`name`, or ``name(tag)`` when a tag is set."""
+        return f"{self.name}({self.tag})" if self.tag else self.name
 
     @abstractmethod
     def Cases(self) -> Iterator[Case]:

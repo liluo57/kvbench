@@ -58,7 +58,9 @@ class AgentBenchFlowTask(Task):
         provider_api_key_env: Optional[str] = None,
         bench_command: Optional[str] = None,
         bench_extra_args: Optional[Sequence[str]] = None,
+        tag: Optional[str] = None,
     ):
+        super().__init__(tag=tag)
         abf = Get("AgentBenchFlow", {}) or {}
         self.sourceMode = source_mode or abf.get("SourceMode", "dataset")
         if self.sourceMode not in {"dataset", "local"}:

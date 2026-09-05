@@ -92,7 +92,7 @@ def Main() -> None:
 
     print(
         f"[main] model={ModelPath()}\n"
-        f"[main] tasks={[t.name for t in tasks]} "
+        f"[main] tasks={[t.Label for t in tasks]} "
         f"methods={[(m.Label, m.gpuNums, m.perfWeight) for m in methods]} "
         f"batchSize={batchSize}"
     )

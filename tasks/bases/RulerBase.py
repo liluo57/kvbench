@@ -112,7 +112,9 @@ class RulerBase(Task):
         maxSamples: int = -1,
         startIdx: int = 0,
         dataDir: Optional[str] = None,
+        tag: Optional[str] = None,
     ):
+        super().__init__(tag=tag)
         self.dataset = dataset or self.defaultDataset
         self.maxSeqLength = maxSeqLength
         self.maxSamples = maxSamples

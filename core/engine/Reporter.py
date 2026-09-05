@@ -93,7 +93,7 @@ class Reporter:
             "method_index": methodIndex,
             "task_index": taskIndex,
             "method": self.ctx.methods[methodIndex].Label,
-            "task": self.ctx.tasks[taskIndex].name,
+            "task": self.ctx.tasks[taskIndex].Label,
             "kind": kind,
             "attempts": self.ctx.attempts[pair],
             "error": error,
@@ -116,14 +116,14 @@ class Reporter:
         path = (
             self.ctx.outputDir / "pairs"
             / f"{methodIndex:02d}-{Slug(self.ctx.methods[methodIndex].Label)}"
-            / f"{taskIndex:03d}-{Slug(self.ctx.tasks[taskIndex].name)}.json"
+            / f"{taskIndex:03d}-{Slug(self.ctx.tasks[taskIndex].Label)}.json"
         )
         payload = {
             "status": "success" if report is not None else "failed",
             "method_index": methodIndex,
             "task_index": taskIndex,
             "method": self.ctx.methods[methodIndex].Label,
-            "task": self.ctx.tasks[taskIndex].name,
+            "task": self.ctx.tasks[taskIndex].Label,
         }
         if report is not None:
             payload["report"] = report
