@@ -715,7 +715,7 @@ def test_task_evaluate_keeps_infrastructure_diagnostics_available():
     assert result.metadata["benchflow_error"] == "Docker environment failed"
 
 
-def test_workload_captures_first_run_ttft_and_reuse_ratio_only_once():
+def test_workload_captures_first_run_stats_only_once():
     first = _request("first rendered prompt")
     second = _request("second rendered prompt")
     runner = _FakeRunner([first, second])
@@ -725,7 +725,7 @@ def test_workload_captures_first_run_ttft_and_reuse_ratio_only_once():
         runner=runner,
     )
 
-    # First RUN: capture ttft + reuse_ratio.
+    # First RUN: capture ttft + reuse_ratio + prompt length.
     workload.next()
     workload.observe(
         [
@@ -734,7 +734,7 @@ def test_workload_captures_first_run_ttft_and_reuse_ratio_only_once():
                 Result(
                     output="first output",
                     performance={TtftKey: 0.42},
-                    metadata={"reuse_ratio": 0.85},
+                    metadata={"reuse_ratio": 0.85, "n_input": 12000},
                 ),
             )
         ]
@@ -750,7 +750,7 @@ def test_workload_captures_first_run_ttft_and_reuse_ratio_only_once():
                 Result(
                     output="second output",
                     performance={TtftKey: 0.99},
-                    metadata={"reuse_ratio": 0.10},
+                    metadata={"reuse_ratio": 0.10, "n_input": 400},
                 ),
             )
         ]
@@ -760,6 +760,39 @@ def test_workload_captures_first_run_ttft_and_reuse_ratio_only_once():
     final = workload.final_result
     assert final.metadata["first_run_ttft"] == pytest.approx(0.42)
     assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
+    assert final.metadata["first_run_prompt_length"] == 12000
+
+
+def test_workload_first_run_prompt_length_is_absent_without_n_input():
+    first = _request("first rendered prompt")
+    runner = _FakeRunner([first])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    # A Method that does not report n_input must still contribute the other
+    # two first-RUN readings.
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="first output",
+                    performance={TtftKey: 0.42},
+                    metadata={"reuse_ratio": 0.85},
+                ),
+            )
+        ]
+    )
+    workload.next()
+
+    final = workload.final_result
+    assert final.metadata["first_run_ttft"] == pytest.approx(0.42)
+    assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
+    assert "first_run_prompt_length" not in final.metadata
 
 
 def test_workload_first_run_capture_is_absent_when_no_run_completes():
@@ -775,6 +808,7 @@ def test_workload_first_run_capture_is_absent_when_no_run_completes():
     final = workload.final_result
     assert final.metadata.get("first_run_ttft") is None
     assert final.metadata.get("first_run_reuse_ratio") is None
+    assert final.metadata.get("first_run_prompt_length") is None
     assert final.output["error"]
 
 
@@ -800,7 +834,7 @@ def test_workload_first_run_metadata_is_attached_even_after_a_mid_run_failure():
                 Result(
                     output="first output",
                     performance={TtftKey: 0.21},
-                    metadata={"reuse_ratio": 0.73},
+                    metadata={"reuse_ratio": 0.73, "n_input": 8192},
                 ),
             )
         ]
@@ -810,6 +844,7 @@ def test_workload_first_run_metadata_is_attached_even_after_a_mid_run_failure():
     final = workload.final_result
     assert final.metadata["first_run_ttft"] == pytest.approx(0.21)
     assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.73)
+    assert final.metadata["first_run_prompt_length"] == 8192
 
 
 def test_task_evaluate_surfaces_first_run_task_scores_when_present():
@@ -819,6 +854,7 @@ def test_task_evaluate_surfaces_first_run_task_scores_when_present():
         metadata={
             "first_run_ttft": 0.38,
             "first_run_reuse_ratio": 0.83,
+            "first_run_prompt_length": 12000,
         },
     )
     assert task.Evaluate(result, {}) == {
@@ -826,6 +862,7 @@ def test_task_evaluate_surfaces_first_run_task_scores_when_present():
         "accuracy": 1.0,
         "first_run_ttft": pytest.approx(0.38),
         "first_run_reuse_ratio": pytest.approx(0.83),
+        "first_run_prompt_length": pytest.approx(12000.0),
     }
 
 
@@ -838,3 +875,4 @@ def test_task_evaluate_omits_first_run_scores_when_unavailable():
     scores = task.Evaluate(result, {})
     assert "first_run_ttft" not in scores
     assert "first_run_reuse_ratio" not in scores
+    assert "first_run_prompt_length" not in scores

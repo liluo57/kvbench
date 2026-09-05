@@ -327,16 +327,20 @@ class AgentBenchFlowTask(Task):
             "reward": float(reward),
             "accuracy": float(reward),
         }
-        # The workload records one TTFT / reuse_ratio reading per case, taken
-        # from that case's first inference result (the Skill-inlined turn).
-        # A case that failed before its first RUN completes simply omits
-        # these keys, so the per-case mean in the report excludes it.
+        # The workload records one TTFT / reuse_ratio / prompt length reading
+        # per case, taken from that case's first inference result (the
+        # Skill-inlined turn). A case that failed before its first RUN
+        # completes simply omits these keys, so the per-case mean in the
+        # report excludes it.
         firstTtft = result.metadata.get("first_run_ttft")
         if firstTtft is not None:
             scores["first_run_ttft"] = float(firstTtft)
         firstReuse = result.metadata.get("first_run_reuse_ratio")
         if firstReuse is not None:
             scores["first_run_reuse_ratio"] = float(firstReuse)
+        firstPromptLength = result.metadata.get("first_run_prompt_length")
+        if firstPromptLength is not None:
+            scores["first_run_prompt_length"] = float(firstPromptLength)
         return scores
 
     def CaseFailureScores(

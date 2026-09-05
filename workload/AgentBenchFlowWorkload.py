@@ -190,13 +190,16 @@ class AgentBenchFlowWorkload(Workload):
         self._skillsPrepared = False
         self._firstRunPromptBuilt = False
         #: Captured from the first RUN Action's Result so the final report can
-        #: surface a per-case first-RUN TTFT and reuse ratio. The agent often
-        #: runs many turns after the first one; the inlined-Skill first turn is
-        #: the one whose TTFT and cache hit ratio best reflect the prepared
-        #: state. ``None`` until observe() has seen that result.
+        #: surface a per-case first-RUN TTFT, reuse ratio and prompt length.
+        #: The agent often runs many turns after the first one; the
+        #: inlined-Skill first turn is the one whose TTFT and cache hit ratio
+        #: best reflect the prepared state, and its prompt length is what makes
+        #: that reuse ratio interpretable. ``None`` until observe() has seen
+        #: that result.
         self._firstRunObserved = False
         self._firstRunTtft: Optional[float] = None
         self._firstRunReuseRatio: Optional[float] = None
+        self._firstRunPromptLength: Optional[int] = None
         self._RememberSkillDocuments(self._LoadBundledSkillDocuments())
 
     def _LoadBundledSkillDocuments(self) -> List[str]:
@@ -395,9 +398,10 @@ class AgentBenchFlowWorkload(Workload):
         self._lastResult = result
         if not self._firstRunObserved:
             # Capture the agent's first inference result so the task can
-            # report first-RUN TTFT and reuse ratio. The first RUN carries
-            # the inlined Skill documents, so its TTFT and cache hit ratio
-            # are the most representative single observation per case.
+            # report first-RUN TTFT, reuse ratio and prompt length. The first
+            # RUN carries the inlined Skill documents, so its TTFT and cache
+            # hit ratio are the most representative single observation per
+            # case, and its input token count is the scale they apply to.
             self._firstRunObserved = True
             ttftValue = result.performance.get(TtftKey)
             if ttftValue is not None:
@@ -405,6 +409,9 @@ class AgentBenchFlowWorkload(Workload):
             reuseValue = result.metadata.get("reuse_ratio")
             if reuseValue is not None:
                 self._firstRunReuseRatio = float(reuseValue)
+            promptLength = result.metadata.get("n_input")
+            if promptLength is not None:
+                self._firstRunPromptLength = int(promptLength)
         request = self._pending
         self._pending = None
         self._pendingKind = None
@@ -480,12 +487,14 @@ class AgentBenchFlowWorkload(Workload):
         return Result(output=payload, performance={}, metadata=metadata)
 
     def _AttachFirstRunStats(self, metadata: Dict[str, Any]) -> None:
-        """Surface the captured first-RUN TTFT / reuse ratio on ``metadata``.
+        """Surface the captured first-RUN statistics on ``metadata``.
 
         Only writes keys that were actually observed. A case that fails before
-        its first inference result returns to the workload leaves both
+        its first inference result returns to the workload leaves the
         attributes at ``None`` and contributes no entry, so the per-case
-        mean in the report simply excludes it.
+        mean in the report simply excludes it. The same holds per key: a
+        Method that does not report ``n_input`` omits the prompt length while
+        still contributing its TTFT and reuse ratio.
         """
         if not self._firstRunObserved:
             return
@@ -493,6 +502,8 @@ class AgentBenchFlowWorkload(Workload):
             metadata["first_run_ttft"] = self._firstRunTtft
         if self._firstRunReuseRatio is not None:
             metadata["first_run_reuse_ratio"] = self._firstRunReuseRatio
+        if self._firstRunPromptLength is not None:
+            metadata["first_run_prompt_length"] = self._firstRunPromptLength
 
     def close(self) -> None:
         if self._runner is not None:
