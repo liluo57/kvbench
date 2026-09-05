@@ -685,8 +685,9 @@ def test_task_selects_remote_runtime_without_local_docker_validation(fakeSkillsb
     )
     case = next(iter(task.Cases()))
     assert case.input.sandbox == "remote-docker"
-    assert case.input.remote_endpoint == "http://127.0.0.1:8765"
+    assert case.input.remote_endpoint == "http://127.0.0.1:9000"
     assert case.input.remote_advertise_host is None
+    assert case.input.endpoint_port_range == (8000, 8015)
     assert case.input.remote_poll_interval == pytest.approx(1.0)
 
 

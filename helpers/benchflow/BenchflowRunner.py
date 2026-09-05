@@ -37,6 +37,7 @@ class BenchflowRunner:
         providerHost: str = "127.0.0.1",
         endpointHost: str = "0.0.0.0",
         port: int = 0,
+        portRange: Optional[Sequence[int]] = None,
         modelId: Optional[str] = None,
         jobsDir: Optional[str | Path] = None,
         resultJsonTimeout: float = 3600.0,
@@ -71,6 +72,11 @@ class BenchflowRunner:
         self.providerHost = providerHost
         self.endpointHost = endpointHost
         self.port = int(port)
+        self.portRange = (
+            tuple(int(value) for value in portRange)
+            if portRange is not None
+            else None
+        )
         self.modelId = modelId or Path(self.modelPath).name or "model"
         # ``bench eval run --jobs-dir <dir>`` reuses any pre-existing
         # ``result.json`` under ``<dir>`` ("resuming" the job), so a fresh
@@ -95,6 +101,7 @@ class BenchflowRunner:
             modelPath=self.modelPath,
             host=self.endpointHost,
             port=self.port,
+            portRange=self.portRange,
             thinking=self.thinking,
             debugLogPath=self.jobsDir / "kvbench_llm_io.jsonl",
             apiKey=endpointApiKey,

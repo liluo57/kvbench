@@ -49,6 +49,7 @@ class AgentBenchFlowTask(Task):
         provider_host: Optional[str] = None,
         endpoint_host: Optional[str] = None,
         port: Optional[int] = None,
+        endpoint_port_range: Optional[Sequence[int]] = None,
         model_id: Optional[str] = None,
         output_dir: Optional[Union[str, Path]] = None,
         result_json_timeout: Optional[float] = None,
@@ -80,6 +81,25 @@ class AgentBenchFlowTask(Task):
         self.providerHost = provider_host or abf.get("ProviderHost", "127.0.0.1")
         self.endpointHost = endpoint_host or abf.get("EndpointHost", "0.0.0.0")
         self.port = 0 if port is None else int(port)
+        configuredPortRange = (
+            endpoint_port_range
+            if endpoint_port_range is not None
+            else abf.get("EndpointPortRange")
+        )
+        if configuredPortRange is None:
+            self.endpointPortRange = None
+        else:
+            values = tuple(int(value) for value in configuredPortRange)
+            if len(values) != 2:
+                raise ValueError(
+                    "endpoint_port_range must contain [first_port, last_port]"
+                )
+            firstPort, lastPort = values
+            if not (1 <= firstPort <= lastPort <= 65535):
+                raise ValueError(
+                    "endpoint_port_range must be an inclusive range within ports 1-65535"
+                )
+            self.endpointPortRange = (firstPort, lastPort)
         self.modelId = model_id if model_id is not None else abf.get("ModelId")
         configuredOutput = output_dir if output_dir is not None else abf.get("OutputDir")
         self.outputDir = Path(configuredOutput) if configuredOutput else None
@@ -261,6 +281,7 @@ class AgentBenchFlowTask(Task):
                 provider_host=self.providerHost,
                 endpoint_host=self.endpointHost,
                 port=self.port,
+                endpoint_port_range=self.endpointPortRange,
                 model_id=self.modelId,
                 output_dir=str(caseOutputDir) if caseOutputDir is not None else None,
                 result_json_timeout=self.resultJsonTimeout,

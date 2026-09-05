@@ -73,6 +73,9 @@ AgentBenchFlow:
   # host-gateway alias instead.
   ProviderHost: 127.0.0.1
   EndpointHost: 0.0.0.0
+  # Remote-Docker over SSH needs every possible provider port forwarded. Each
+  # concurrent worker claims one free port from this inclusive range.
+  EndpointPortRange: [8000, 8015]
   ProviderApiKeyEnv: KVBENCH_PROVIDER_API_KEY
 
   # BenchFlow writes the official result.json and all rollout artifacts here.

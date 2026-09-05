@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import errno
 import hmac
 import json
 import queue
@@ -345,6 +346,7 @@ class OpenAIEndpoint:
         modelPath: str,
         host: str = "0.0.0.0",
         port: int = 0,
+        portRange: Optional[Sequence[int]] = None,
         thinking: Optional[bool] = None,
         debugLogPath: Optional[str | Path] = None,
         apiKey: Optional[str] = None,
@@ -353,6 +355,18 @@ class OpenAIEndpoint:
         self.modelPath = str(modelPath)
         self.host = host
         self.port = int(port)
+        if portRange is None:
+            self.portRange = None
+        else:
+            values = tuple(int(value) for value in portRange)
+            if len(values) != 2:
+                raise ValueError("portRange must contain [first_port, last_port]")
+            firstPort, lastPort = values
+            if not (1 <= firstPort <= lastPort <= 65535):
+                raise ValueError(
+                    "portRange must be an inclusive range within ports 1-65535"
+                )
+            self.portRange = (firstPort, lastPort)
         self.thinking = thinking
         self.debugLogPath = Path(debugLogPath) if debugLogPath else None
         self.apiKey = str(apiKey) if apiKey else None
@@ -393,7 +407,29 @@ class OpenAIEndpoint:
         with self._stateLock:
             if self._server is not None:
                 return self
-            server = _EndpointServer((self.host, self.port), _OpenAIRequestHandler)
+            if self.port == 0 and self.portRange is not None:
+                firstPort, lastPort = self.portRange
+                candidates = range(firstPort, lastPort + 1)
+            else:
+                candidates = (self.port,)
+            server = None
+            lastPortError: Optional[OSError] = None
+            for candidate in candidates:
+                try:
+                    server = _EndpointServer(
+                        (self.host, candidate), _OpenAIRequestHandler
+                    )
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EADDRINUSE:
+                        raise
+                    lastPortError = exc
+            if server is None:
+                firstPort, lastPort = self.portRange or (self.port, self.port)
+                raise OSError(
+                    errno.EADDRINUSE,
+                    f"no free KVBench endpoint port in {firstPort}-{lastPort}",
+                ) from lastPortError
             server.endpoint = self  # type: ignore[attr-defined]
             self._server = server
             self.port = int(server.server_address[1])

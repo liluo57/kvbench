@@ -4,7 +4,7 @@ import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.Config import ModelPath
 from core.Result import Result, TtftKey
@@ -147,6 +147,7 @@ class AgentBenchFlowInput:
     provider_host: str = "127.0.0.1"
     endpoint_host: str = "0.0.0.0"
     port: int = 0
+    endpoint_port_range: Optional[Tuple[int, int]] = None
     model_id: Optional[str] = None
     output_dir: Optional[str] = None
     result_json_timeout: float = 3600.0
@@ -307,6 +308,7 @@ class AgentBenchFlowWorkload(Workload):
                     providerHost=self._data.provider_host,
                     endpointHost=self._data.endpoint_host,
                     port=self._data.port,
+                    portRange=self._data.endpoint_port_range,
                     modelId=self._data.model_id,
                     jobsDir=self._data.output_dir,
                     resultJsonTimeout=self._data.result_json_timeout,
