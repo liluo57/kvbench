@@ -253,6 +253,14 @@ class RemoteRunManager:
                 # host-side LiteLLM process. Export the same deadline here so
                 # the OpenAI-compatible client cannot fall back to 600s.
                 runEnv["REQUEST_TIMEOUT"] = providerTimeout
+                # Lift bench's host-side hard-deadline backstop.  Without
+                # this, the benchflow rollout is abandoned after ~5400s
+                # (sum of task.md agent/verifier/build/install timeouts + a
+                # 30min margin), which kills long-running optimization
+                # agents before the task-level timeout (18000s in
+                # KVBench's config-override) can elapse.  18000s = 5h is
+                # well above any single task's worst-case duration.
+                runEnv["BENCHFLOW_ROLLOUT_HARD_DEADLINE"] = "18000"
                 record.process = subprocess.Popen(
                     command,
                     cwd=str(record.runDir),

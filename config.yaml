@@ -21,7 +21,7 @@
 DatasetPath: /data/lyh/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3.8-27B
+ModelPath: /data/lyh/.cache/modelscope/hub/models/mistralai/Mistral-7B-Instruct-v0___2 #Qwen/Qwen3-8B
 
 # The CacheblendRepo method (methods/CacheblendRepo.py) runs the *original*
 # CacheBlend repo (YaoJiayi/CacheBlend): a patched vLLM 0.4.1 whose collect /
