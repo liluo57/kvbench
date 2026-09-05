@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from core.Result import Result
+from core.Result import Result, TtftKey
 from core.Workload import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
 from helpers.benchflow import BenchflowRunner
@@ -712,3 +712,128 @@ def test_task_evaluate_keeps_infrastructure_diagnostics_available():
     )
     assert task.Evaluate(result, {}) == {"reward": 0.0, "accuracy": 0.0}
     assert result.metadata["benchflow_error"] == "Docker environment failed"
+
+
+def test_workload_captures_first_run_ttft_and_reuse_ratio_only_once():
+    first = _request("first rendered prompt")
+    second = _request("second rendered prompt")
+    runner = _FakeRunner([first, second])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    # First RUN: capture ttft + reuse_ratio.
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="first output",
+                    performance={TtftKey: 0.42},
+                    metadata={"reuse_ratio": 0.85},
+                ),
+            )
+        ]
+    )
+
+    # Second RUN: very different numbers — must NOT overwrite the first-run
+    # capture, since the report is per-case first-RUN.
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="second output",
+                    performance={TtftKey: 0.99},
+                    metadata={"reuse_ratio": 0.10},
+                ),
+            )
+        ]
+    )
+    workload.next()  # returns None, finishes the workload
+
+    final = workload.final_result
+    assert final.metadata["first_run_ttft"] == pytest.approx(0.42)
+    assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
+
+
+def test_workload_first_run_capture_is_absent_when_no_run_completes():
+    runner = _FailingRunner()
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    workload.next()  # runner.start() raises -> fail() runs
+
+    final = workload.final_result
+    assert final.metadata.get("first_run_ttft") is None
+    assert final.metadata.get("first_run_reuse_ratio") is None
+    assert final.output["error"]
+
+
+def test_workload_first_run_metadata_is_attached_even_after_a_mid_run_failure():
+    first = _request("first rendered prompt")
+    runner = _FakeRunner([first])
+
+    def boom(_request, _output):
+        raise RuntimeError("model crashed mid-rollout")
+
+    runner.respond = boom
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="first output",
+                    performance={TtftKey: 0.21},
+                    metadata={"reuse_ratio": 0.73},
+                ),
+            )
+        ]
+    )
+    # observe()'s respond() raises -> fail() is called, which must keep the
+    # already-captured first-RUN stats.
+    final = workload.final_result
+    assert final.metadata["first_run_ttft"] == pytest.approx(0.21)
+    assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.73)
+
+
+def test_task_evaluate_surfaces_first_run_task_scores_when_present():
+    task = AgentBenchFlowTask(skillsbench_dir=Path("/tmp"), task_ids=["citation-check"])
+    result = Result(
+        output={"rewards": {"reward": 1.0}},
+        metadata={
+            "first_run_ttft": 0.38,
+            "first_run_reuse_ratio": 0.83,
+        },
+    )
+    assert task.Evaluate(result, {}) == {
+        "reward": 1.0,
+        "accuracy": 1.0,
+        "first_run_ttft": pytest.approx(0.38),
+        "first_run_reuse_ratio": pytest.approx(0.83),
+    }
+
+
+def test_task_evaluate_omits_first_run_scores_when_unavailable():
+    task = AgentBenchFlowTask(skillsbench_dir=Path("/tmp"), task_ids=["citation-check"])
+    result = Result(
+        output={"rewards": {"reward": 0.0}, "error": "no provider reachable"},
+        metadata={"benchflow_error": "no provider reachable"},
+    )
+    scores = task.Evaluate(result, {})
+    assert "first_run_ttft" not in scores
+    assert "first_run_reuse_ratio" not in scores

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.Config import ModelPath
-from core.Result import Result
+from core.Result import Result, TtftKey
 from core.Workload import Action, ActionKind, ActionResult, Workload
 
 from helpers.backends import ModelAdapter
@@ -188,6 +188,14 @@ class AgentBenchFlowWorkload(Workload):
         self._skillDocumentSet = set()
         self._skillsPrepared = False
         self._firstRunPromptBuilt = False
+        #: Captured from the first RUN Action's Result so the final report can
+        #: surface a per-case first-RUN TTFT and reuse ratio. The agent often
+        #: runs many turns after the first one; the inlined-Skill first turn is
+        #: the one whose TTFT and cache hit ratio best reflect the prepared
+        #: state. ``None`` until observe() has seen that result.
+        self._firstRunObserved = False
+        self._firstRunTtft: Optional[float] = None
+        self._firstRunReuseRatio: Optional[float] = None
         self._RememberSkillDocuments(self._LoadBundledSkillDocuments())
 
     def _LoadBundledSkillDocuments(self) -> List[str]:
@@ -383,6 +391,18 @@ class AgentBenchFlowWorkload(Workload):
             raise RuntimeError("AgentBenchFlowWorkload has an invalid pending action")
         result = results[0].result
         self._lastResult = result
+        if not self._firstRunObserved:
+            # Capture the agent's first inference result so the task can
+            # report first-RUN TTFT and reuse ratio. The first RUN carries
+            # the inlined Skill documents, so its TTFT and cache hit ratio
+            # are the most representative single observation per case.
+            self._firstRunObserved = True
+            ttftValue = result.performance.get(TtftKey)
+            if ttftValue is not None:
+                self._firstRunTtft = float(ttftValue)
+            reuseValue = result.metadata.get("reuse_ratio")
+            if reuseValue is not None:
+                self._firstRunReuseRatio = float(reuseValue)
         request = self._pending
         self._pending = None
         self._pendingKind = None
@@ -437,6 +457,7 @@ class AgentBenchFlowWorkload(Workload):
         self._pendingKind = None
         self._pendingActionSent = False
         self._firstRunPromptBuilt = True
+        self._AttachFirstRunStats(metadata)
         self._finalResult = Result(
             output={"reward": 0.0, "error": message},
             performance={},
@@ -453,7 +474,23 @@ class AgentBenchFlowWorkload(Workload):
             # The monitor has already collected BenchFlow's result. Close the
             # listening endpoint before the case is handed to Task.Evaluate.
             self._runner.stop()
+        self._AttachFirstRunStats(metadata)
         return Result(output=payload, performance={}, metadata=metadata)
+
+    def _AttachFirstRunStats(self, metadata: Dict[str, Any]) -> None:
+        """Surface the captured first-RUN TTFT / reuse ratio on ``metadata``.
+
+        Only writes keys that were actually observed. A case that fails before
+        its first inference result returns to the workload leaves both
+        attributes at ``None`` and contributes no entry, so the per-case
+        mean in the report simply excludes it.
+        """
+        if not self._firstRunObserved:
+            return
+        if self._firstRunTtft is not None:
+            metadata["first_run_ttft"] = self._firstRunTtft
+        if self._firstRunReuseRatio is not None:
+            metadata["first_run_reuse_ratio"] = self._firstRunReuseRatio
 
     def close(self) -> None:
         if self._runner is not None:
