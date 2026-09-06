@@ -254,7 +254,7 @@ class AgentBenchFlowWorkload(Workload):
             case_id=self.case_id,
             data=prompt,
             tag="agent_turn",
-            retainOutput=True,
+            retainOutput=False,
         )
 
     def _BuildFirstRunPrompt(self, request: OpenAIRequest) -> str:

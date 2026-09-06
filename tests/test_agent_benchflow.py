@@ -482,7 +482,7 @@ def test_workload_bridges_multiple_turns_and_retains_output():
     assert runner.started
     assert action.kind.value == "run"
     assert action.data == "first rendered prompt"
-    assert action.retainOutput is True
+    assert action.retainOutput is False
     workload.observe([ActionResult(3, Result(output="first output"))])
     assert runner.responses == [(first, "first output")]
     assert workload.next()[0].data == "second rendered prompt"
