@@ -25,7 +25,6 @@ from methods import (
     FullPrefillTransformer,
     HypicMethod,
     NaiveTransformer,
-    Qwen38TestMethod
 )
 from tasks import (
     AgentBenchFlowTask,

@@ -29,8 +29,6 @@ from .CacheblendRepo import CacheblendRepo, NaiveCacheblendRepo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
-from .Qwen38Test import Qwen38TestMethod
-
 __all__ = [
     "CacheblendLmcache",
     "CacheblendRepo",
@@ -39,5 +37,4 @@ __all__ = [
     "FullPrefillVllm",
     "HypicMethod",
     "NaiveTransformer",
-    "Qwen38TestMethod",
 ]
