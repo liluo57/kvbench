@@ -115,6 +115,9 @@ class BenchflowRunner:
         self._monitorThread: Optional[threading.Thread] = None
         self._stopLock = threading.Lock()
         self._stopped = False
+        self._externalCleanupCallback: Optional[
+            Callable[[Dict[str, Any]], None]
+        ] = None
 
     @property
     def endpointUrl(self) -> str:
@@ -310,6 +313,25 @@ class BenchflowRunner:
         return diagnostics
 
     diagnostics = Diagnostics
+
+    def ExternalCleanupDescriptor(self) -> Optional[Dict[str, Any]]:
+        """Return coordinator cleanup data for an external runner, if any."""
+        return None
+
+    external_cleanup_descriptor = ExternalCleanupDescriptor
+
+    def SetExternalCleanupCallback(
+        self, callback: Optional[Callable[[Dict[str, Any]], None]]
+    ) -> None:
+        """Register a callback for coordinator-side external cleanup."""
+        self._externalCleanupCallback = callback
+
+    def _NotifyExternalCleanup(self) -> None:
+        if self._externalCleanupCallback is None:
+            return
+        descriptor = self.ExternalCleanupDescriptor()
+        if descriptor is not None:
+            self._externalCleanupCallback(descriptor)
 
     def stop(self) -> None:
         with self._stopLock:

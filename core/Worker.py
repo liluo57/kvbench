@@ -5,7 +5,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .Metrics import AggregateStats, Metric
 from .Method import Method
@@ -19,6 +19,7 @@ def EvaluatePair(
     method: Method,
     metrics: List[Metric],
     batchSize: int,
+    externalRunCallback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Evaluate one pair entirely inside its method worker."""
     for metric in metrics:
@@ -43,12 +44,14 @@ def EvaluatePair(
         batch.append(case)
         if len(batch) >= effectiveBatchSize:
             nCases += _ProcessCaseBatch(
-                task, method, metrics, batch, taskScores, methodScores, methodWeights
+                task, method, metrics, batch, taskScores, methodScores,
+                methodWeights, externalRunCallback=externalRunCallback,
             )
             batch = []
     if batch:
         nCases += _ProcessCaseBatch(
-            task, method, metrics, batch, taskScores, methodScores, methodWeights
+            task, method, metrics, batch, taskScores, methodScores, methodWeights,
+            externalRunCallback=externalRunCallback,
         )
 
     report: Dict[str, Any] = {
@@ -81,6 +84,7 @@ def _ProcessCaseBatch(
     taskScores: Dict[str, List[float]],
     methodScores: Dict[str, List[float]],
     methodWeights: Dict[str, List[float]],
+    externalRunCallback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
 ) -> int:
     """Process a batch, isolating failures for tasks that opt in.
 
@@ -98,6 +102,7 @@ def _ProcessCaseBatch(
             taskScores,
             methodScores,
             methodWeights,
+            externalRunCallback=externalRunCallback,
         )
     except BaseException as exc:
         if not getattr(task, "continueOnCaseFailure", False) or len(batch) != 1:
@@ -110,6 +115,13 @@ def _ProcessCaseBatch(
                 fail(exc)
             except BaseException:
                 traceback.print_exc()
+
+        # A BenchFlow case may be scored as zero only after it has completed
+        # at least one model RUN.  Before that point, a zero Result is a
+        # startup/control-plane failure and must reach the pair-level retry
+        # and failures.json path instead of masquerading as a valid score.
+        if _HasUnsuccessfulExternalRun(batch):
+            raise
 
         failureScorer = getattr(task, "CaseFailureScores", None)
         if not callable(failureScorer):
@@ -132,9 +144,32 @@ def _ProcessBatch(
     taskScores: Dict[str, List[float]],
     methodScores: Dict[str, List[float]],
     methodWeights: Dict[str, List[float]],
+    externalRunCallback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
 ) -> int:
     workloads = [case.workload for case in batch]
     finalResults: Dict[int, Result] = {}
+    reportedExternalRuns: Dict[int, Dict[str, Any]] = {}
+
+    def reportExternalRun(caseId: int, descriptor: Any) -> None:
+        if externalRunCallback is None or not isinstance(descriptor, dict):
+            return
+        if reportedExternalRuns.get(caseId) == descriptor:
+            return
+        reportedExternalRuns[caseId] = descriptor
+        externalRunCallback(caseId, descriptor)
+
+    # Register a runner as soon as it starts, including the interval while
+    # it is waiting for its first provider request.  The post-next() probe is
+    # retained for lightweight/custom workloads that do not implement the
+    # setter but expose a descriptor directly.
+    for workload in workloads:
+        setter = getattr(workload, "SetExternalCleanupCallback", None)
+        if callable(setter):
+            setter(
+                lambda descriptor, caseId=workload.case_id: reportExternalRun(
+                    caseId, descriptor
+                )
+            )
 
     while True:
         stepActions: List[Action] = []
@@ -143,6 +178,11 @@ def _ProcessBatch(
             if workload.finished:
                 continue
             actions = workload.next()
+            descriptorGetter = getattr(
+                workload, "ExternalCleanupDescriptor", None
+            )
+            if callable(descriptorGetter):
+                reportExternalRun(workload.case_id, descriptorGetter())
             if actions is None:
                 if not workload.finished:
                     raise RuntimeError(
@@ -243,6 +283,15 @@ def _ProcessBatch(
     return len(batch)
 
 
+def _HasUnsuccessfulExternalRun(batch: List[Case]) -> bool:
+    """Return whether a case explicitly failed before its first model RUN."""
+    for case in batch:
+        checker = getattr(case.workload, "HasSuccessfulRun", None)
+        if callable(checker) and not checker():
+            return True
+    return False
+
+
 def _Redirect(path: str) -> None:
     """Redirect Python and native stdout/stderr at the file-descriptor level."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -330,6 +379,7 @@ def _RunOneAttempt(
     batchSize: int,
     eventQueue,
     workerId: str,
+    controlConnection=None,
 ) -> bool:
     """Run :func:`EvaluatePair` once, emitting one of the matching events.
 
@@ -353,7 +403,36 @@ def _RunOneAttempt(
         log_path=logPath,
     )
     try:
-        report = EvaluatePair(task, method, metrics, batchSize)
+        def reportExternalRun(caseId: int, descriptor: Dict[str, Any]) -> None:
+            fields = {
+                "type": "external_run_started",
+                "worker_id": workerId,
+                "time": time.time(),
+                "method_index": methodIndex,
+                "task_index": taskIndex,
+                "method": methodLabel,
+                "task": task.Label,
+                "attempt": attempt,
+                "case_id": caseId,
+                "cleanup": descriptor,
+            }
+            if controlConnection is None:
+                _Emit(eventQueue, workerId, fields.pop("type"), **fields)
+                return
+            try:
+                # Pipe.send reaches the coordinator without a feeder thread,
+                # so a subsequent SIGKILL cannot discard this registration.
+                controlConnection.send(fields)
+            except (BrokenPipeError, EOFError, OSError):
+                _Emit(eventQueue, workerId, fields.pop("type"), **fields)
+
+        report = EvaluatePair(
+            task,
+            method,
+            metrics,
+            batchSize,
+            externalRunCallback=reportExternalRun,
+        )
     except BaseException as exc:  # keep this worker alive by design
         duration = time.perf_counter() - attemptStart
         error = f"{type(exc).__name__}: {exc}"
@@ -450,7 +529,7 @@ def _RunCommandLoop(
             if _RunOneAttempt(
                 method, task, taskIndex, methodIndex,
                 attempt, maxAttempts, logPath, metrics, batchSize,
-                eventQueue, workerId,
+                eventQueue, workerId, connection,
             ):
                 completed = True
                 break

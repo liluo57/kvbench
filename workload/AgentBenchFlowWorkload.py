@@ -4,7 +4,7 @@ import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from core.Config import ModelPath
 from core.Result import Result, TtftKey
@@ -13,6 +13,10 @@ from core.Workload import Action, ActionKind, ActionResult, Workload
 from helpers.backends import ModelAdapter
 from helpers.benchflow import BenchflowRunner, RemoteBenchflowRunner
 from helpers.endpoint import OpenAIRequest
+
+
+class AgentBenchFlowPreRunError(RuntimeError):
+    """BenchFlow failed before KVBench completed its first model RUN."""
 
 
 def _ToolCallArguments(toolCall: Any) -> Optional[Dict[str, Any]]:
@@ -218,6 +222,9 @@ class AgentBenchFlowWorkload(Workload):
         self._firstRunTtft: Optional[float] = None
         self._firstRunReuseRatio: Optional[float] = None
         self._firstRunPromptLength: Optional[int] = None
+        self._externalCleanupCallback: Optional[
+            Callable[[Dict[str, Any]], None]
+        ] = None
         self._RememberSkillDocuments(self._LoadBundledSkillDocuments())
 
     def _LoadBundledSkillDocuments(self) -> List[str]:
@@ -360,15 +367,30 @@ class AgentBenchFlowWorkload(Workload):
                     )
                 else:
                     self._runner = BenchflowRunner(**runnerArgs)
+                self._SetRunnerExternalCleanupCallback()
             self._runner.start()
             self._data.endpoint_url = getattr(self._runner, "endpointUrl", "")
+            self._NotifyExternalCleanup()
             request = self._runner.wait_for_request()
         except BaseException as exc:
             self.fail(exc)
-            return None
+            if not self._firstRunObserved:
+                raise AgentBenchFlowPreRunError(
+                    f"BenchFlow task {self._data.task_id!r} failed before its "
+                    f"first RUN: {type(exc).__name__}: {exc}"
+                ) from exc
+            raise
         if request is None:
             self._finalResult = self._BuildFinalResult()
             self._finished = True
+            if not self._firstRunObserved:
+                diagnostics = self._finalResult.metadata
+                benchflowError = diagnostics.get("benchflow_error")
+                detail = benchflowError or "BenchFlow finished without a model request"
+                raise AgentBenchFlowPreRunError(
+                    f"BenchFlow task {self._data.task_id!r} finished before its "
+                    f"first RUN: {detail}"
+                )
             return None
 
         self._pending = request
@@ -456,6 +478,40 @@ class AgentBenchFlowWorkload(Workload):
     def finished(self) -> bool:
         return self._finished
 
+    def HasSuccessfulRun(self) -> bool:
+        """Whether this case has produced at least one completed model RUN."""
+        return self._firstRunObserved
+
+    def SetExternalCleanupCallback(
+        self, callback: Optional[Callable[[Dict[str, Any]], None]]
+    ) -> None:
+        """Let the worker register a live runner with its coordinator."""
+        self._externalCleanupCallback = callback
+        self._SetRunnerExternalCleanupCallback()
+
+    def _SetRunnerExternalCleanupCallback(self) -> None:
+        if self._runner is None:
+            return
+        setter = getattr(self._runner, "SetExternalCleanupCallback", None)
+        if callable(setter):
+            setter(self._externalCleanupCallback)
+
+    def _NotifyExternalCleanup(self) -> None:
+        if self._externalCleanupCallback is None:
+            return
+        descriptor = self.ExternalCleanupDescriptor()
+        if descriptor is not None:
+            self._externalCleanupCallback(descriptor)
+
+    def ExternalCleanupDescriptor(self) -> Optional[Dict[str, Any]]:
+        """Return coordinator-safe cleanup data for a live external runner."""
+        if self._runner is None:
+            return None
+        descriptor = getattr(self._runner, "ExternalCleanupDescriptor", None)
+        if not callable(descriptor):
+            return None
+        return descriptor()
+
     @property
     def final_result(self) -> Optional[Result]:
         if self._finalResult is not None:
@@ -536,4 +592,8 @@ class AgentBenchFlowWorkload(Workload):
             pass
 
 
-__all__ = ["AgentBenchFlowInput", "AgentBenchFlowWorkload"]
+__all__ = [
+    "AgentBenchFlowInput",
+    "AgentBenchFlowPreRunError",
+    "AgentBenchFlowWorkload",
+]

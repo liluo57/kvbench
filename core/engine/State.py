@@ -59,6 +59,7 @@ class _WorkerState:
     logPath: str = ""
     initDuration: Optional[float] = None
     startedAt: float = field(default_factory=time.time)
+    externalCleanups: List[Dict[str, Any]] = field(default_factory=list)
 
     def Snapshot(self) -> Dict[str, Any]:
         return {
@@ -70,6 +71,7 @@ class _WorkerState:
             "task": self.taskName,
             "attempt": self.attempt,
             "log_path": self.logPath or self.instanceLog,
+            "external_cleanup_count": len(self.externalCleanups),
         }
 
 

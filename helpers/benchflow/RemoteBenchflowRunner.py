@@ -105,6 +105,9 @@ class RemoteBenchflowRunner(BenchflowRunner):
             created = self._RequestJSON("POST", "/v1/runs", self._RunSpec())
             self.remoteRunId = self._StatusRunId(created)
             self.remoteState = str(created.get("state") or "")
+            # Notify the coordinator immediately after the remote resource
+            # exists, before source upload / start can block or fail.
+            self._NotifyExternalCleanup()
             if self.sourceMode == "local":
                 sourceArchive = self._BuildSourceArchive()
                 try:
@@ -162,6 +165,25 @@ class RemoteBenchflowRunner(BenchflowRunner):
         return diagnostics
 
     diagnostics = Diagnostics
+
+    def ExternalCleanupDescriptor(self) -> Optional[Dict[str, Any]]:
+        """Describe a remote run that must be cancelled if the worker dies.
+
+        The auth token itself is deliberately not put in the descriptor: the
+        descriptor is persisted in ``events.jsonl``.  The coordinator reads
+        the configured token from the same environment variable as the
+        worker.
+        """
+        if self.remoteRunId is None or self.remoteState in _TERMINAL_STATES:
+            return None
+        return {
+            "kind": "remote_benchflow",
+            "endpoint": self.remoteEndpoint,
+            "run_id": self.remoteRunId,
+            "auth_token_env": self.remoteAuthTokenEnv,
+        }
+
+    external_cleanup_descriptor = ExternalCleanupDescriptor
 
     def _RunSpec(self) -> dict[str, Any]:
         return {
@@ -490,4 +512,48 @@ class RemoteBenchflowRunner(BenchflowRunner):
         return runId
 
 
-__all__ = ["RemoteBenchflowError", "RemoteBenchflowRunner"]
+def CancelRemoteRun(
+    descriptor: Mapping[str, Any], *, timeout: float = 10.0
+) -> Optional[str]:
+    """Cancel a remote run from the coordinator after its worker is gone.
+
+    Returns ``None`` on success (including an already-removed run), or a
+    short diagnostic string.  The descriptor intentionally carries only the
+    name of the auth-token environment variable, never the token itself.
+    """
+    if not isinstance(descriptor, Mapping):
+        return "invalid external cleanup descriptor"
+    endpoint = descriptor.get("endpoint")
+    runId = descriptor.get("run_id")
+    if not isinstance(endpoint, str) or not endpoint:
+        return "external cleanup descriptor has no endpoint"
+    if not isinstance(runId, str) or not runId:
+        return "external cleanup descriptor has no run_id"
+
+    tokenEnv = descriptor.get("auth_token_env", "KVBENCH_REMOTE_TOKEN")
+    token = os.environ.get(str(tokenEnv))
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = Request(
+        f"{endpoint.rstrip('/')}/v1/runs/{runId}",
+        headers=headers,
+        method="DELETE",
+    )
+    try:
+        with urlopen(request, timeout=float(timeout)) as response:
+            response.read()
+    except HTTPError as exc:
+        body = exc.read()
+        if exc.code == 404:
+            return None
+        return (
+            f"remote runtime DELETE /v1/runs/{runId} returned {exc.code}: "
+            f"{RemoteBenchflowRunner._ErrorMessage(body)}"
+        )
+    except (OSError, URLError) as exc:
+        return f"remote runtime DELETE /v1/runs/{runId} failed: {exc}"
+    return None
+
+
+__all__ = ["CancelRemoteRun", "RemoteBenchflowError", "RemoteBenchflowRunner"]

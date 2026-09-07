@@ -17,6 +17,7 @@ from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
 from workload.AgentBenchFlowWorkload import (
     AgentBenchFlowInput,
+    AgentBenchFlowPreRunError,
     AgentBenchFlowWorkload,
     _CanonicalSkillDocument,
     _ExtractSkillDocuments,
@@ -693,7 +694,7 @@ def test_first_run_skill_segment_matches_after_chat_template_moves_terminal_newl
     )
 
 
-def test_workload_converts_runner_failure_to_zero_score():
+def test_workload_surfaces_runner_failure_before_first_run():
     runner = _FailingRunner()
     workload = AgentBenchFlowWorkload(
         case_id=3,
@@ -701,7 +702,8 @@ def test_workload_converts_runner_failure_to_zero_score():
         runner=runner,
     )
 
-    assert workload.next() is None
+    with pytest.raises(AgentBenchFlowPreRunError, match="before its first RUN"):
+        workload.next()
     assert workload.finished
     assert runner.stopped
     assert workload.final_result.output["reward"] == 0.0
@@ -870,7 +872,8 @@ def test_workload_first_run_capture_is_absent_when_no_run_completes():
         runner=runner,
     )
 
-    workload.next()  # runner.start() raises -> fail() runs
+    with pytest.raises(AgentBenchFlowPreRunError, match="before its first RUN"):
+        workload.next()  # runner.start() raises -> fail() runs
 
     final = workload.final_result
     assert final.metadata.get("first_run_ttft") is None
