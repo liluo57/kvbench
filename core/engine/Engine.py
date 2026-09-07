@@ -17,8 +17,9 @@ import signal
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from ..Config import Get
 from ..Method import Method
 from ..Metrics import Metric
 from ..Task import Task
@@ -40,22 +41,34 @@ from .State import (
 class Engine:
     """Schedule method instances over a strict GPU pool and aggregate results."""
 
-    def __init__(
-        self,
-        *,
-        availableGpuIds: Union[str, Iterable[int]] = "auto",
-        batchSize: int = 1,
-        initializeTimeout: float = 1800.0,
-        taskTimeout: float = 3600.0,
-        shutdownGracePeriod: float = 30.0,
-        gpuReleaseTimeout: float = 30.0,
-        gpuReleaseStableSeconds: float = 1.0,
-        gpuReleaseMemoryToleranceMiB: int = 256,
-        pairRetries: int = 1,
-        outputRoot: Union[str, Path] = "outputs",
-        tui: bool = True,
-        verbose: bool = True,
-    ):
+    def __init__(self):
+        engineConfig = Get("Engine", {}) or {}
+        if not isinstance(engineConfig, Mapping):
+            raise ValueError("Engine config must be a mapping")
+
+        availableGpuIds = engineConfig.get("AvailableGpuIds", "auto")
+        batchSize = int(engineConfig.get("BatchSize", 1))
+        initializeTimeout = float(
+            engineConfig.get("InitializeTimeoutSec", 1800)
+        )
+        taskTimeout = float(engineConfig.get("TaskTimeoutSec", 3600))
+        shutdownGracePeriod = float(
+            engineConfig.get("ShutdownGracePeriodSec", 30)
+        )
+        gpuReleaseTimeout = float(
+            engineConfig.get("GpuReleaseTimeoutSec", 30)
+        )
+        gpuReleaseStableSeconds = float(
+            engineConfig.get("GpuReleaseStableSeconds", 1)
+        )
+        gpuReleaseMemoryToleranceMiB = int(
+            engineConfig.get("GpuReleaseMemoryToleranceMiB", 256)
+        )
+        pairRetries = int(engineConfig.get("PairRetries", 1))
+        outputRoot = engineConfig.get("OutputRoot", "outputs")
+        tui = bool(engineConfig.get("Tui", True))
+        verbose = bool(engineConfig.get("Verbose", True))
+
         if batchSize < 1:
             raise ValueError("batchSize must be at least 1")
         if (
@@ -168,7 +181,7 @@ class Engine:
                 {
                     "index": index,
                     "class": f"{type(task).__module__}.{type(task).__qualname__}",
-                    "name": task.name,
+                    "name": task.Label,
                 }
                 for index, task in enumerate(tasks)
             ],

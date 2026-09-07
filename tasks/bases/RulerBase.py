@@ -112,7 +112,9 @@ class RulerBase(Task):
         maxSamples: int = -1,
         startIdx: int = 0,
         dataDir: Optional[str] = None,
+        tag: Optional[str] = None,
     ):
+        super().__init__(tag=tag)
         self.dataset = dataset or self.defaultDataset
         self.maxSeqLength = maxSeqLength
         self.maxSamples = maxSamples
@@ -230,15 +232,19 @@ class RulerBase(Task):
 
         Returns the segments in the new order (the caller joins them).
         """
-        if len(parts) < 2 or len(set(parts)) < 2:
+        if len(parts) < 2 or len(set(parts)) < 2 or any(not part for part in parts):
             return list(parts)
         original = "".join(parts)
         rng = random.Random(seed)
         order = list(range(len(parts)))
-        while True:
+        # Different chunks can still commute (e.g. ``"a"`` and ``"aa"``),
+        # making every permutation join to the original text. Never spin
+        # forever searching for a permutation that cannot exist.
+        for _ in range(max(16, len(parts) * 4)):
             rng.shuffle(order)
             if "".join(parts[i] for i in order) != original:
                 return [parts[i] for i in order]
+        return list(parts)
 
     # ------------------------------------------------------------- metadata
     def _Metadata(self, i: int, s: Dict[str, Any], fullPrompt: str) -> Dict[str, Any]:

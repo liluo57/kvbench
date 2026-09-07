@@ -1,20 +1,13 @@
-"""KVBench entry point / configuration.
+"""KVBench entry point.
 
-This file doubles as the configuration: edit the ``tasks`` / ``methods``
-lists below and run from the project root::
-
-    python Main.py
-
-The model path comes from ``config.yaml`` (``ModelPath``);
-datasets resolve by name against ``DatasetPath``.
+Task selection and method parameters live here. Shared runtime settings live in
+``config.yaml``.
 """
 
 import json
 import sys
-from pathlib import Path
 
 from core import ModelPath
-from core.Config import Get
 from core.engine import Engine
 from metrics import ThroughputMetric, TTFTMetric
 
@@ -23,6 +16,7 @@ from methods import (
     CacheblendRepo,
     FullPrefillVllm,
     FullPrefillTransformer,
+    HypicMethod,
     NaiveTransformer,
 )
 from tasks import (
@@ -38,10 +32,6 @@ from tasks import (
     KVCommHumanEvalTask,
     KVCommCopyTask,
 )
-from tasks.FreshGap import FreshGapTask
-
-MAX_SAMPLES=64
-MAX_NEW_TOKENS=512
 
 
 def Main() -> None:
@@ -84,6 +74,7 @@ def Main() -> None:
         )
         for task_id in task_ids
     ]
+    tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
     methods = [
         # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
@@ -100,30 +91,14 @@ def Main() -> None:
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
-
-    batchSize = 1
-
     print(
         f"[main] model={ModelPath()}\n"
-        f"[main] tasks={[t.name for t in tasks]} "
-        f"methods={[(m.Label, m.gpuNums, m.perfWeight) for m in methods]} "
-        f"batchSize={batchSize}"
+        f"[main] tasks={[task.Label for task in tasks]} "
+        f"methods={[(method.Label, method.gpuNums, method.perfWeight) for method in methods]}"
     )
     sys.stdout.flush()
 
-    engine = Engine(
-        availableGpuIds='auto',
-        batchSize=batchSize,
-        initializeTimeout=6000,
-        taskTimeout=18000,
-        shutdownGracePeriod=30,
-        gpuReleaseTimeout=30,
-        gpuReleaseStableSeconds=1,
-        gpuReleaseMemoryToleranceMiB=256,
-        pairRetries=1,
-        tui=True,
-        verbose=True,
-    )
+    engine = Engine()
     report = engine.Evaluate(tasks=tasks, methods=methods, metrics=metrics)
 
     print("\n=== KVBench report ===")
@@ -134,6 +109,6 @@ def Main() -> None:
 if __name__ == "__main__":
     try:
         Main()
-    except (FileNotFoundError, RuntimeError) as exc:
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"[main] ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

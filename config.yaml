@@ -18,10 +18,31 @@
 #              (fields: ctxs[{title,text}], question, answers)
 #   samsum/    cacheblend's summarization dataset (samsum.json)
 #   wikimqa/   cacheblend's wiki multi-hop QA dataset (wikimqa_s.json)
-DatasetPath: /data/lyh/kvbench/data
+DatasetPath: /root/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
 ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3.8-27B
+
+# HYPIC's SGLang fork used by methods/Hypic.py. The model itself still comes
+# from the global ModelPath above.
+Hypic:
+  RepoPath: /root/hypic
+
+# The benchmark entry point reads its shared runtime settings from this section.
+# Task selection and method parameters remain in Main.py.
+Engine:
+  AvailableGpuIds: auto
+  BatchSize: 1
+  OutputRoot: outputs
+  InitializeTimeoutSec: 600
+  TaskTimeoutSec: 18000
+  ShutdownGracePeriodSec: 30
+  GpuReleaseTimeoutSec: 30
+  GpuReleaseStableSeconds: 1
+  GpuReleaseMemoryToleranceMiB: 256
+  PairRetries: 1
+  Tui: true
+  Verbose: true
 
 # The CacheblendRepo method (methods/CacheblendRepo.py) runs the *original*
 # CacheBlend repo (YaoJiayi/CacheBlend): a patched vLLM 0.4.1 whose collect /
@@ -31,26 +52,28 @@ ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3.8-27B
 Cacheblend:
   Repo:
     # The original CacheBlend repo clone (holds vllm_blend + .venv).
-    RepoPath: /data/lyh/cache-blend/CacheBlend
+    RepoPath: /root/cache-blend/CacheBlend
 
 # SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:
-  # Root of the cloned SkillsBench repo (must contain tasks/<id>/task.md).
-  # Cloned from https://github.com/benchflow-ai/skillsbench.
-  SkillsBenchRepo: /data/lyh/skillsbench
+  # Dataset mode is the reproducible path. SkillsBenchRepo is needed for local
+  # source runs and is not used to select task ids.
+  SourceMode: dataset
+  Dataset: skillsbench@1.1
+  SkillsBenchRepo: /root/skillsbench
 
   # BenchFlow 0.7.5 currently provides pi-acp, opencode, and mimo, but not
   # qwen-code. pi-acp has the skill path needed for with-skill runs and uses
   # BenchFlow's normal ACP/provider routing.
   Agent: pi-acp
-  Sandbox: docker
+  Sandbox: remote-docker
   SkillMode: with-skill
 
   # To move BenchFlow + Docker to another runtime host, change Sandbox above
   # to remote-docker and start scripts/RemoteDockerRuntimeServer.py there.
   # These loopback defaults let A and B be exercised on this same machine.
   RemoteDocker:
-    Endpoint: http://127.0.0.1:8765
+    Endpoint: http://127.0.0.1:9000
     # Optional on one machine. For two machines, set this to an address of A
     # that B can reach; if omitted KVBench detects A's outbound interface.
     # KVBenchAdvertiseHost: 10.0.0.21
@@ -66,11 +89,23 @@ AgentBenchFlow:
   # host-gateway alias instead.
   ProviderHost: 127.0.0.1
   EndpointHost: 0.0.0.0
+  # Remote-Docker over SSH needs every possible provider port forwarded. Each
+  # concurrent worker claims one free port from this inclusive range.
+  EndpointPortRange: [8000, 8031]
   ProviderApiKeyEnv: KVBENCH_PROVIDER_API_KEY
 
   # BenchFlow writes the official result.json and all rollout artifacts here.
   BenchCommand: bench
-  OutputDir: /data/lyh/kvbench/outputs/benchflow
-  ResultJsonTimeoutSec: 7200
+  OutputDir: /root/kvbench/outputs/benchflow
+  ResultJsonTimeoutSec: 18000
+  # Number of BenchFlow task retries after the initial attempt. Set to 0 to
+  # disable BenchFlow's default retry loop; set to 2 for three total attempts.
+  RetryAttempts: 0
   Thinking: true
-  BenchExtraArgs: []
+  BenchExtraArgs:
+    - --agent-idle-timeout
+    - "18000"
+    - --config-override
+    - '{"agent":{"timeout_sec":18000}}'
+    - --agent-env
+    - REQUEST_TIMEOUT=18000

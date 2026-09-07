@@ -113,6 +113,8 @@ class Scheduler:
         if not self.ctx.pending[worker.methodIndex]:
             self.stopWorker(worker)
             return
+        if worker.externalCleanups:
+            self._CleanupExternalRuns(worker, "before_next_task")
         taskIndex = self.ctx.pending[worker.methodIndex].popleft()
         pair = (worker.methodIndex, taskIndex)
         if self.ctx.pairStatus[pair] != "pending":
@@ -121,7 +123,7 @@ class Scheduler:
         methodDir = Path(worker.instanceLog).parent
         logPaths = {
             attempt: str((methodDir / (
-                f"{worker.workerId}-t{taskIndex:03d}-{Slug(self.ctx.tasks[taskIndex].name)}-"
+                f"{worker.workerId}-t{taskIndex:03d}-{Slug(self.ctx.tasks[taskIndex].Label)}-"
                 f"attempt{attempt}.log"
             )).resolve())
             for attempt in range(startAttempt, self.ctx.maxAttempts + 1)
@@ -130,7 +132,7 @@ class Scheduler:
             self.reporter.addLog(
                 path,
                 f"{self.ctx.methods[worker.methodIndex].Label} / "
-                f"{self.ctx.tasks[taskIndex].name} attempt {attempt}",
+                f"{self.ctx.tasks[taskIndex].Label} attempt {attempt}",
             )
         worker.connection.send({
             "op": "task", "task_index": taskIndex, "task": self.ctx.tasks[taskIndex],
@@ -140,7 +142,7 @@ class Scheduler:
         self.ctx.pairStatus[pair] = "running"
         worker.state = "busy"
         worker.taskIndex = taskIndex
-        worker.taskName = self.ctx.tasks[taskIndex].name
+        worker.taskName = self.ctx.tasks[taskIndex].Label
         worker.attempt = startAttempt
         worker.logPath = logPaths[startAttempt]
         worker.deadline = time.monotonic() + self.engine.taskTimeout
@@ -151,7 +153,7 @@ class Scheduler:
             "method_index": worker.methodIndex,
             "task_index": taskIndex,
             "method": self.ctx.methods[worker.methodIndex].Label,
-            "task": self.ctx.tasks[taskIndex].name,
+            "task": self.ctx.tasks[taskIndex].Label,
             "attempt": startAttempt,
             "log_path": logPaths[startAttempt],
         })
@@ -196,6 +198,7 @@ class Scheduler:
 
     def releaseWorker(self, workerId: str) -> None:
         worker = self.ctx.workers.pop(workerId)
+        self._CleanupExternalRuns(worker, "worker_exit")
         # Even an orderly Method.Close may leave a backend descendant
         # alive. The outer worker is the process-group leader, so sweep
         # the complete group before its PID can be reaped/reused.
@@ -222,6 +225,35 @@ class Scheduler:
             "gpu_ids": worker.gpuIds,
         })
         self.ctx.workerHistory.append(worker.Snapshot())
+
+    def _CleanupExternalRuns(self, worker: "_WorkerState", reason: str) -> None:
+        """Cancel external runs registered by a worker before it disappears."""
+        if not worker.externalCleanups:
+            return
+        # Import lazily: the scheduler is also used by tests that do not
+        # install the optional BenchFlow runtime dependencies.
+        from helpers.benchflow import CancelRemoteRun
+
+        descriptors = list(worker.externalCleanups)
+        worker.externalCleanups.clear()
+        for descriptor in descriptors:
+            try:
+                error = CancelRemoteRun(descriptor)
+            except BaseException as exc:  # cleanup must never stop reaping
+                error = f"{type(exc).__name__}: {exc}"
+            self.reporter.recordEvent({
+                "type": "external_run_cleanup",
+                "time": time.time(),
+                "worker_id": worker.workerId,
+                "method_index": worker.methodIndex,
+                "method": worker.methodLabel,
+                "task_index": worker.taskIndex,
+                "task": worker.taskName,
+                "reason": reason,
+                "cleanup": descriptor,
+                "success": error is None,
+                "error": error,
+            })
 
     # ------------------------------------------------------ recovery
     def recoverCurrentPair(
@@ -281,6 +313,10 @@ class Scheduler:
             )
             self.ctx.fatalStatus = "initialization_failed"
             worker.state = "failed"
+        elif kind == "external_run_started":
+            descriptor = event.get("cleanup")
+            if isinstance(descriptor, dict) and descriptor not in worker.externalCleanups:
+                worker.externalCleanups.append(descriptor)
         elif kind == "task_started":
             taskIndex = int(event["task_index"])
             pair = (worker.methodIndex, taskIndex)
@@ -311,6 +347,7 @@ class Scheduler:
             )
             self.reporter.writeReports()
         elif kind == "task_failed":
+            self._CleanupExternalRuns(worker, "task_failed")
             self.reporter.pairFailure(
                 worker.methodIndex, int(event["task_index"]),
                 error=event.get("error", "pair failed"), kind="exception",
@@ -318,6 +355,7 @@ class Scheduler:
                 tracebackText=event.get("traceback", ""),
             )
         elif kind == "worker_idle":
+            self._CleanupExternalRuns(worker, "worker_idle")
             worker.state = "idle"
             worker.taskIndex = None
             worker.taskName = ""
@@ -349,13 +387,28 @@ class Scheduler:
         try:
             event = ctx.eventQueue.get(timeout=0.1)
         except queue.Empty:
+            self._DrainWorkerControl()
             return
         self.handleEvent(event)
         while True:
             try:
                 self.handleEvent(ctx.eventQueue.get_nowait())
             except queue.Empty:
+                self._DrainWorkerControl()
                 return
+
+    def _DrainWorkerControl(self) -> None:
+        """Read synchronous worker messages before the reap pass."""
+        for worker in list(self.ctx.workers.values()):
+            while True:
+                try:
+                    if not worker.connection.poll():
+                        break
+                    event = worker.connection.recv()
+                except (EOFError, OSError):
+                    break
+                if isinstance(event, dict) and event.get("type"):
+                    self.handleEvent(event)
 
     def reapDeadWorkers(self, ctx: "RunContext", now: float) -> None:
         """Walk every worker once: apply deadlines, then reap exited processes.

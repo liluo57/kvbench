@@ -112,27 +112,79 @@ def _gpu(index):
     return GpuInfo(index, "fake", 100, 0, 0.0, 0)
 
 
+def _new_engine(tmp_path, **overrides):
+    config = {
+        "AvailableGpuIds": "auto",
+        "BatchSize": 1,
+        "OutputRoot": str(tmp_path),
+        "InitializeTimeoutSec": 5,
+        "TaskTimeoutSec": 5,
+        "ShutdownGracePeriodSec": 1,
+        "GpuReleaseTimeoutSec": 30,
+        "GpuReleaseStableSeconds": 0,
+        "GpuReleaseMemoryToleranceMiB": 256,
+        "PairRetries": 1,
+        "Tui": False,
+        "Verbose": False,
+    }
+    keyNames = {
+        "availableGpuIds": "AvailableGpuIds",
+        "batchSize": "BatchSize",
+        "outputRoot": "OutputRoot",
+        "initializeTimeout": "InitializeTimeoutSec",
+        "taskTimeout": "TaskTimeoutSec",
+        "shutdownGracePeriod": "ShutdownGracePeriodSec",
+        "gpuReleaseTimeout": "GpuReleaseTimeoutSec",
+        "gpuReleaseStableSeconds": "GpuReleaseStableSeconds",
+        "gpuReleaseMemoryToleranceMiB": "GpuReleaseMemoryToleranceMiB",
+        "pairRetries": "PairRetries",
+        "tui": "Tui",
+        "verbose": "Verbose",
+    }
+    unknown = set(overrides) - set(keyNames)
+    assert not unknown, f"unknown Engine test overrides: {sorted(unknown)}"
+    config.update({keyNames[key]: value for key, value in overrides.items()})
+    with patch("core.engine.Engine.Get", return_value=config):
+        return Engine()
+
+
 def _run(tmp_path, tasks, methods, gpu_count=2, **kwargs):
     snapshot = [_gpu(index) for index in range(gpu_count)]
-    engine_kwargs = {
-        "initializeTimeout": 5,
-        "taskTimeout": 5,
-        "shutdownGracePeriod": 1,
-        "gpuReleaseStableSeconds": 0,
-        **kwargs,
-    }
     with patch(
         "core.engine.Engine.ResolveGpuIds",
         return_value=(list(range(gpu_count)), snapshot),
     ), patch("core.engine.GpuGovernor.QueryGpus", return_value=snapshot):
-        engine = Engine(
-            availableGpuIds="auto",
-            outputRoot=tmp_path,
-            tui=False,
-            verbose=False,
-            **engine_kwargs,
-        )
+        engine = _new_engine(tmp_path, **kwargs)
         return engine, engine.Evaluate(tasks, methods, [])
+
+
+def test_engine_reads_all_runtime_settings_from_config(tmp_path):
+    engine = _new_engine(
+        tmp_path,
+        availableGpuIds=[2, 4],
+        batchSize=3,
+        initializeTimeout=11,
+        taskTimeout=12,
+        shutdownGracePeriod=13,
+        gpuReleaseTimeout=14,
+        gpuReleaseStableSeconds=1.5,
+        gpuReleaseMemoryToleranceMiB=17,
+        pairRetries=2,
+        tui=True,
+        verbose=True,
+    )
+
+    assert engine.availableGpuIds == [2, 4]
+    assert engine.batchSize == 3
+    assert engine.initializeTimeout == 11
+    assert engine.taskTimeout == 12
+    assert engine.shutdownGracePeriod == 13
+    assert engine.gpuReleaseTimeout == 14
+    assert engine.gpuReleaseStableSeconds == 1.5
+    assert engine.gpuReleaseMemoryTolerance == 17 * 1024 * 1024
+    assert engine.pairRetries == 2
+    assert engine.tuiEnabled
+    assert engine.verbose
 
 
 def test_method_case_batch_limit_is_applied_and_recorded(tmp_path):
@@ -211,14 +263,7 @@ def test_initialization_failure_aborts_benchmark(tmp_path):
     with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], snapshot)), patch(
         "core.engine.GpuGovernor.QueryGpus", return_value=snapshot
     ):
-        engine = Engine(
-            outputRoot=tmp_path,
-            tui=False,
-            verbose=False,
-            initializeTimeout=5,
-            taskTimeout=5,
-            shutdownGracePeriod=0.5,
-        )
+        engine = _new_engine(tmp_path, shutdownGracePeriod=0.5)
         with pytest.raises(BenchmarkInitializationError):
             engine.Evaluate(
                 [FakeTask("task", "text")],
@@ -234,12 +279,9 @@ def test_initialization_timeout_aborts_benchmark(tmp_path):
     with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], snapshot)), patch(
         "core.engine.GpuGovernor.QueryGpus", return_value=snapshot
     ):
-        engine = Engine(
-            outputRoot=tmp_path,
-            tui=False,
-            verbose=False,
+        engine = _new_engine(
+            tmp_path,
             initializeTimeout=0.2,
-            taskTimeout=5,
             shutdownGracePeriod=0.2,
         )
         with pytest.raises(BenchmarkInitializationError, match="timed out"):
@@ -362,15 +404,7 @@ def test_tui_gpu_snapshot_is_refreshed_from_nvml(tmp_path):
     ), patch("core.engine.Engine.BenchmarkTui", return_value=dashboard), patch(
         "core.engine.GpuGovernor._GPU_SNAPSHOT_INTERVAL", 0
     ):
-        engine = Engine(
-            outputRoot=tmp_path,
-            tui=True,
-            verbose=False,
-            initializeTimeout=5,
-            taskTimeout=5,
-            shutdownGracePeriod=1,
-            gpuReleaseStableSeconds=0,
-        )
+        engine = _new_engine(tmp_path, tui=True)
         engine.Evaluate([FakeTask("task", "text")], [FakeMethod()], [])
 
     assert any(
@@ -395,15 +429,9 @@ def test_gpu_is_not_rescheduled_until_nvml_reports_release(tmp_path):
     with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
         "core.engine.GpuGovernor.QueryGpus", side_effect=query
     ):
-        engine = Engine(
-            outputRoot=tmp_path,
-            tui=False,
-            verbose=False,
-            initializeTimeout=5,
-            taskTimeout=5,
-            shutdownGracePeriod=1,
+        engine = _new_engine(
+            tmp_path,
             gpuReleaseTimeout=2,
-            gpuReleaseStableSeconds=0,
             gpuReleaseMemoryToleranceMiB=0,
         )
         report = engine.Evaluate(
@@ -433,15 +461,10 @@ def test_gpu_release_timeout_is_a_distinct_fatal_error(tmp_path):
     with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
         "core.engine.GpuGovernor.QueryGpus", return_value=busy
     ):
-        engine = Engine(
-            outputRoot=tmp_path,
-            tui=False,
-            verbose=False,
-            initializeTimeout=5,
-            taskTimeout=5,
+        engine = _new_engine(
+            tmp_path,
             shutdownGracePeriod=0.2,
             gpuReleaseTimeout=0.3,
-            gpuReleaseStableSeconds=0,
             gpuReleaseMemoryToleranceMiB=0,
         )
         with pytest.raises(BenchmarkResourceReleaseError):
@@ -466,15 +489,10 @@ def test_new_compute_pid_blocks_gpu_release_even_at_baseline_memory(tmp_path):
     with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
         "core.engine.GpuGovernor.QueryGpus", side_effect=query
     ):
-        engine = Engine(
-            outputRoot=tmp_path,
-            tui=False,
-            verbose=False,
-            initializeTimeout=5,
-            taskTimeout=5,
+        engine = _new_engine(
+            tmp_path,
             shutdownGracePeriod=0.2,
             gpuReleaseTimeout=0.3,
-            gpuReleaseStableSeconds=0,
             gpuReleaseMemoryToleranceMiB=0,
         )
         with pytest.raises(BenchmarkResourceReleaseError, match="98765"):
@@ -490,13 +508,8 @@ def test_gpu_must_remain_clean_for_stability_window(tmp_path):
     with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
         "core.engine.GpuGovernor.QueryGpus", return_value=baseline
     ):
-        engine = Engine(
-            outputRoot=tmp_path,
-            tui=False,
-            verbose=False,
-            initializeTimeout=5,
-            taskTimeout=5,
-            shutdownGracePeriod=1,
+        engine = _new_engine(
+            tmp_path,
             gpuReleaseTimeout=2,
             gpuReleaseStableSeconds=0.25,
             gpuReleaseMemoryToleranceMiB=0,

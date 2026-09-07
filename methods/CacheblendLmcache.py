@@ -109,12 +109,6 @@ class CacheblendLmcache(Method):
         maxLocalCpuSize: float = 5.0,
         dtype: str = "bfloat16",
         enforceEager: bool = True,
-        # Kept for signature compatibility with the old worker subprocess
-        # implementation; no longer used.
-        numLayers: int = 28,
-        repoRoot=None,
-        workerPython=None,
-        startTimeout: float = 1800.0,
         tag: Optional[str] = None,
     ):
         super().__init__(gpuNums=gpuNums, perfWeight=perfWeight, tag=tag)
@@ -353,14 +347,11 @@ class CacheblendLmcache(Method):
         Every token stream is submitted up front (``add_request``) and all are
         stepped together, so the V1 scheduler batches them natively. Returns one
         ``(text, ttft, numTokens, totalTime, numCached)`` per request, in input
-        order — TTFT measured vLLM-benchmark style (submission -> first decoded
-        token). Both ``ttft`` and ``totalTime`` are *amortized* over the batch
-        (``measured / batchSize``): the raw submission->first-token wall-clock
-        includes queueing behind the sibling requests (they share the GPU), so
-        amortizing gives the fair per-sample first-token time, consistent with
-        ``totalTime`` and the transformers batch path. ``totalTime`` amortized
-        means summing per-sample times equals the actual run wall-clock — what
-        :class:`~metrics.Throughput.ThroughputMetric` expects.
+        order. ``ttft`` is the real per-request wall time from submission to
+        its first decoded token. ``totalTime`` is the shared batch wall-clock
+        amortized over the batch, so summing per-sample times equals the actual
+        run wall-clock — what :class:`~metrics.Throughput.ThroughputMetric`
+        expects.
         """
         from vllm import SamplingParams
 
@@ -400,7 +391,7 @@ class CacheblendLmcache(Method):
         return [
             (
                 texts.get(rid, ""),
-                float(ttfts.get(rid, 0.0)) / n,
+                float(ttfts.get(rid, 0.0)),
                 tokenLens.get(rid, 0),
                 amortized,
                 numCached.get(rid, 0),

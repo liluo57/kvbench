@@ -37,6 +37,7 @@ class BenchflowRunner:
         providerHost: str = "127.0.0.1",
         endpointHost: str = "0.0.0.0",
         port: int = 0,
+        portRange: Optional[Sequence[int]] = None,
         modelId: Optional[str] = None,
         jobsDir: Optional[str | Path] = None,
         resultJsonTimeout: float = 3600.0,
@@ -45,6 +46,7 @@ class BenchflowRunner:
         providerApiKeyEnv: str = "KVBENCH_PROVIDER_API_KEY",
         benchCommand: str | Sequence[str] = "bench",
         extraArgs: Sequence[str] = (),
+        retryAttempts: int = 0,
         endpoint: Optional[KVBenchEndpoint] = None,
         endpointApiKey: Optional[str] = None,
         popenFactory: Callable[..., subprocess.Popen] = subprocess.Popen,
@@ -71,6 +73,11 @@ class BenchflowRunner:
         self.providerHost = providerHost
         self.endpointHost = endpointHost
         self.port = int(port)
+        self.portRange = (
+            tuple(int(value) for value in portRange)
+            if portRange is not None
+            else None
+        )
         self.modelId = modelId or Path(self.modelPath).name or "model"
         # ``bench eval run --jobs-dir <dir>`` reuses any pre-existing
         # ``result.json`` under ``<dir>`` ("resuming" the job), so a fresh
@@ -91,10 +98,14 @@ class BenchflowRunner:
         self.providerApiKeyEnv = providerApiKeyEnv
         self.benchCommand = benchCommand
         self.extraArgs = list(extraArgs)
+        if int(retryAttempts) < 0:
+            raise ValueError("retryAttempts must not be negative")
+        self.retryAttempts = int(retryAttempts)
         self.endpoint = endpoint or KVBenchEndpoint(
             modelPath=self.modelPath,
             host=self.endpointHost,
             port=self.port,
+            portRange=self.portRange,
             thinking=self.thinking,
             debugLogPath=self.jobsDir / "kvbench_llm_io.jsonl",
             apiKey=endpointApiKey,
@@ -108,6 +119,9 @@ class BenchflowRunner:
         self._monitorThread: Optional[threading.Thread] = None
         self._stopLock = threading.Lock()
         self._stopped = False
+        self._externalCleanupCallback: Optional[
+            Callable[[Dict[str, Any]], None]
+        ] = None
 
     @property
     def endpointUrl(self) -> str:
@@ -228,6 +242,8 @@ class BenchflowRunner:
                 str(self.jobsDir),
                 "--concurrency",
                 "1",
+                "--retry-attempts",
+                str(self.retryAttempts),
                 "--agent-env",
                 f"BENCHFLOW_PROVIDER_BASE_URL={self.providerUrl}",
                 "--agent-env",
@@ -285,6 +301,7 @@ class BenchflowRunner:
             "benchflow_returncode": self.processReturnCode,
             "benchflow_error": self.benchflowError,
             "provider_request_timeout_sec": self.providerRequestTimeout,
+            "benchflow_retry_attempts": self.retryAttempts,
         }
         for key in (
             "task_name",
@@ -303,6 +320,25 @@ class BenchflowRunner:
         return diagnostics
 
     diagnostics = Diagnostics
+
+    def ExternalCleanupDescriptor(self) -> Optional[Dict[str, Any]]:
+        """Return coordinator cleanup data for an external runner, if any."""
+        return None
+
+    external_cleanup_descriptor = ExternalCleanupDescriptor
+
+    def SetExternalCleanupCallback(
+        self, callback: Optional[Callable[[Dict[str, Any]], None]]
+    ) -> None:
+        """Register a callback for coordinator-side external cleanup."""
+        self._externalCleanupCallback = callback
+
+    def _NotifyExternalCleanup(self) -> None:
+        if self._externalCleanupCallback is None:
+            return
+        descriptor = self.ExternalCleanupDescriptor()
+        if descriptor is not None:
+            self._externalCleanupCallback(descriptor)
 
     def stop(self) -> None:
         with self._stopLock:

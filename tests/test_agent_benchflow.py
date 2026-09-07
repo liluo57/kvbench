@@ -2,23 +2,29 @@
 
 import json
 from concurrent.futures import Future
+import importlib
 import threading
 from http.client import HTTPConnection
-from pathlib import Path
 
 import pytest
 
-from core.Result import Result
+from core.Result import Result, TtftKey
 from core.Workload import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
+from helpers.backends.Prompt import ComposeInterleavedReuse
 from helpers.benchflow import BenchflowRunner
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
 from workload.AgentBenchFlowWorkload import (
     AgentBenchFlowInput,
+    AgentBenchFlowPreRunError,
     AgentBenchFlowWorkload,
+    _CanonicalSkillDocument,
     _ExtractSkillDocuments,
 )
+
+
+agentBenchFlowTaskModule = importlib.import_module("tasks.AgentBenchFlowTask")
 
 
 @pytest.fixture
@@ -303,6 +309,10 @@ def test_runner_builds_real_benchflow_dataset_command(tmp_path):
     assert "--sandbox" in command and command[command.index("--sandbox") + 1] == "docker"
     assert "--skill-mode" in command and command[command.index("--skill-mode") + 1] == "with-skill"
     assert ["--usage-tracking", "off"] == command[command.index("--usage-tracking"):command.index("--usage-tracking") + 2]
+    assert command[command.index("--retry-attempts"):command.index("--retry-attempts") + 2] == [
+        "--retry-attempts",
+        "0",
+    ]
     assert f"BENCHFLOW_PROVIDER_BASE_URL=http://host.docker.internal:43123/v1" in command
     assert "BENCHFLOW_PROVIDER_API_KEY=dummy-from-test" in command
     assert str(runner.jobsDir) in command
@@ -322,6 +332,29 @@ def test_runner_builds_local_tasks_dir_command(tmp_path):
     command = runner.BuildCommand()
     assert command[3:5] == ["--tasks-dir", str(repo / "tasks")]
     assert command[command.index("--include") + 1] == "citation-check"
+
+
+def test_runner_configures_benchflow_retry_attempts(tmp_path):
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/model",
+        jobsDir=tmp_path / "case",
+        retryAttempts=2,
+    )
+
+    command = runner.BuildCommand()
+    index = command.index("--retry-attempts")
+    assert command[index:index + 2] == ["--retry-attempts", "2"]
+
+
+def test_runner_rejects_negative_benchflow_retry_attempts(tmp_path):
+    with pytest.raises(ValueError, match="retryAttempts"):
+        BenchflowRunner(
+            taskId="citation-check",
+            modelPath="/models/model",
+            jobsDir=tmp_path / "case",
+            retryAttempts=-1,
+        )
 
 
 def test_runner_reads_official_result_shape(tmp_path):
@@ -346,6 +379,7 @@ def test_runner_reads_official_result_shape(tmp_path):
     assert runner.ReadOfficialResult() == payload
     assert runner.officialResultPath == resultPath
     assert runner.Diagnostics()["benchflow_n_tool_calls"] == 4
+    assert runner.Diagnostics()["benchflow_retry_attempts"] == 0
 
 
 def test_runner_subprocess_is_mockable_and_lifecycle_is_explicit(tmp_path):
@@ -482,7 +516,7 @@ def test_workload_bridges_multiple_turns_and_retains_output():
     assert runner.started
     assert action.kind.value == "run"
     assert action.data == "first rendered prompt"
-    assert action.retainOutput is True
+    assert action.retainOutput is False
     workload.observe([ActionResult(3, Result(output="first output"))])
     assert runner.responses == [(first, "first output")]
     assert workload.next()[0].data == "second rendered prompt"
@@ -542,7 +576,7 @@ def test_workload_prepares_only_skill_documents_before_the_original_run_prompt()
 
     prepare = workload.next()[0]
     assert prepare.kind == ActionKind.PREPARE
-    assert prepare.data == [skill]
+    assert prepare.data == [_CanonicalSkillDocument(skill)]
     assert "available skills" not in prepare.data[0]
     assert "TASK:" not in prepare.data[0]
 
@@ -586,12 +620,109 @@ def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
 
     prepare = workload.next()[0]
     assert prepare.kind == ActionKind.PREPARE
-    assert prepare.data == [skill]
+    assert prepare.data == [_CanonicalSkillDocument(skill)]
     workload.observe([ActionResult(3, Result())])
-    assert workload.next()[0].kind == ActionKind.RUN
+    run = workload.next()[0]
+    assert run.kind == ActionKind.RUN
+    assert _CanonicalSkillDocument(skill) in run.data
+    assert run.data.endswith("rendered prompt without a skill tool result")
 
 
-def test_workload_converts_runner_failure_to_zero_score():
+def test_first_run_skill_injection_uses_chat_template_when_request_has_metadata(
+    monkeypatch, tmp_path
+):
+    skillPath = (
+        tmp_path
+        / "tasks"
+        / "demo-task"
+        / "environment"
+        / "skills"
+        / "demo"
+        / "SKILL.md"
+    )
+    skillPath.parent.mkdir(parents=True)
+    skill = "---\nname: demo\n---\n\nUse the skill.\n"
+    skillPath.write_text(skill, encoding="utf-8")
+
+    renderCalls = []
+
+    def render(messages, *, modelPath, tools=None, thinking=None):
+        renderCalls.append((messages, modelPath, tools, thinking))
+        return "rendered with " + messages[0]["content"]
+
+    monkeypatch.setattr(ModelAdapter, "render_chat", render)
+    request = _request("original rendered prompt")
+    request.modelPath = "/models/test"
+    request.thinking = True
+    runner = _FakeRunner([request])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(
+            task_id="demo-task",
+            source_mode="local",
+            skillsbench_dir=str(tmp_path),
+        ),
+        runner=runner,
+    )
+
+    workload.next()
+    workload.observe([ActionResult(3, Result())])
+    run = workload.next()[0]
+
+    assert run.data.startswith("rendered with")
+    assert _CanonicalSkillDocument(skill) in renderCalls[0][0][0]["content"]
+    assert renderCalls[0][1:] == ("/models/test", None, True)
+    assert "original rendered prompt" not in run.data
+
+
+def test_first_run_skill_segment_matches_after_chat_template_moves_terminal_newline(
+    monkeypatch, tmp_path
+):
+    skillPath = (
+        tmp_path
+        / "tasks"
+        / "demo-task"
+        / "environment"
+        / "skills"
+        / "demo"
+        / "SKILL.md"
+    )
+    skillPath.parent.mkdir(parents=True)
+    skill = "---\nname: demo\n---\n\nUse the skill.\n"
+    canonicalSkill = _CanonicalSkillDocument(skill)
+    skillPath.write_text(skill, encoding="utf-8")
+
+    def render(messages, *, modelPath, tools=None, thinking=None):
+        systemContent = messages[0]["content"].rstrip("\r\n")
+        # Match the relevant Qwen chat-template boundary: the final newline
+        # belongs after the system message terminator, not inside its content.
+        return systemContent + "<|im_end|>\n<|im_start|>user\noriginal prompt"
+
+    monkeypatch.setattr(ModelAdapter, "render_chat", render)
+    request = _request("original prompt")
+    request.modelPath = "/models/test"
+    runner = _FakeRunner([request])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(
+            task_id="demo-task",
+            source_mode="local",
+            skillsbench_dir=str(tmp_path),
+        ),
+        runner=runner,
+    )
+
+    prepare = workload.next()[0]
+    assert prepare.data == [canonicalSkill]
+    workload.observe([ActionResult(3, Result())])
+    run = workload.next()[0]
+
+    assert (0, canonicalSkill) in ComposeInterleavedReuse(
+        prepare.data, run.data
+    )
+
+
+def test_workload_surfaces_runner_failure_before_first_run():
     runner = _FailingRunner()
     workload = AgentBenchFlowWorkload(
         case_id=3,
@@ -599,44 +730,63 @@ def test_workload_converts_runner_failure_to_zero_score():
         runner=runner,
     )
 
-    assert workload.next() is None
+    with pytest.raises(AgentBenchFlowPreRunError, match="before its first RUN"):
+        workload.next()
     assert workload.finished
     assert runner.stopped
     assert workload.final_result.output["reward"] == 0.0
 
 
-def test_task_filters_and_propagates_benchflow_configuration(
+def test_task_loads_benchflow_configuration_and_keeps_task_tag(
     monkeypatch, fakeSkillsbench
 ):
-    monkeypatch.setattr(AgentBenchFlowTask, "_EnsureLocalImages", lambda *args: None)
-    task = AgentBenchFlowTask(
-        skillsbench_dir=fakeSkillsbench,
-        source_mode="local",
-        task_ids=["citation-check", "alpha"],
-        exclude_task_ids=["alpha"],
-        agent="opencode",
-        skill_mode="no-skill",
-        provider_host="host.docker.internal",
+    config = {
+        "SourceMode": "local",
+        "SkillsBenchRepo": str(fakeSkillsbench),
+        "Agent": "opencode",
+        "Sandbox": "remote-docker",
+        "RemoteDocker": {"Endpoint": "http://127.0.0.1:9000"},
+        "SkillMode": "no-skill",
+        "ProviderHost": "host.docker.internal",
+        "RetryAttempts": 2,
+    }
+    monkeypatch.setattr(
+        agentBenchFlowTaskModule,
+        "Get",
+        lambda key, default=None: config if key == "AgentBenchFlow" else default,
     )
+    task = AgentBenchFlowTask("citation-check")
     case = next(iter(task.Cases()))
     assert case.metadata["task_id"] == "citation-check"
+    assert task.Label == "agent_benchflow(citation-check)"
     assert case.input.agent == "opencode"
     assert case.input.skill_mode == "no-skill"
     assert case.input.source_mode == "local"
     assert case.input.provider_host == "host.docker.internal"
+    assert case.input.retry_attempts == 2
 
 
-def test_task_selects_remote_runtime_without_local_docker_validation(fakeSkillsbench):
-    task = AgentBenchFlowTask(
-        skillsbench_dir=fakeSkillsbench,
-        source_mode="local",
-        task_ids=["citation-check"],
-        sandbox="remote-docker",
+def test_task_selects_remote_runtime_without_local_docker_validation(
+    monkeypatch, fakeSkillsbench
+):
+    config = {
+        "SourceMode": "local",
+        "SkillsBenchRepo": str(fakeSkillsbench),
+        "Sandbox": "remote-docker",
+        "RemoteDocker": {"Endpoint": "http://127.0.0.1:9000"},
+        "EndpointPortRange": [8000, 8031],
+    }
+    monkeypatch.setattr(
+        agentBenchFlowTaskModule,
+        "Get",
+        lambda key, default=None: config if key == "AgentBenchFlow" else default,
     )
+    task = AgentBenchFlowTask("citation-check")
     case = next(iter(task.Cases()))
     assert case.input.sandbox == "remote-docker"
-    assert case.input.remote_endpoint == "http://127.0.0.1:8765"
+    assert case.input.remote_endpoint == "http://127.0.0.1:9000"
     assert case.input.remote_advertise_host is None
+    assert case.input.endpoint_port_range == (8000, 8031)
     assert case.input.remote_poll_interval == pytest.approx(1.0)
 
 
@@ -655,10 +805,174 @@ def test_task_extracts_official_rewards(payload, expected):
 
 
 def test_task_evaluate_keeps_infrastructure_diagnostics_available():
-    task = AgentBenchFlowTask(skillsbench_dir=Path("/tmp"), task_ids=["citation-check"])
+    task = AgentBenchFlowTask("citation-check")
     result = Result(
         output={"rewards": {"reward": 0.0}, "error": "Docker environment failed"},
         metadata={"benchflow_error": "Docker environment failed"},
     )
     assert task.Evaluate(result, {}) == {"reward": 0.0, "accuracy": 0.0}
     assert result.metadata["benchflow_error"] == "Docker environment failed"
+
+
+def test_workload_captures_first_run_stats_only_once():
+    first = _request("first rendered prompt")
+    second = _request("second rendered prompt")
+    runner = _FakeRunner([first, second])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    # First RUN: capture ttft + reuse_ratio + prompt length.
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="first output",
+                    performance={TtftKey: 0.42},
+                    metadata={"reuse_ratio": 0.85, "n_input": 12000},
+                ),
+            )
+        ]
+    )
+
+    # Second RUN: very different numbers — must NOT overwrite the first-run
+    # capture, since the report is per-case first-RUN.
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="second output",
+                    performance={TtftKey: 0.99},
+                    metadata={"reuse_ratio": 0.10, "n_input": 400},
+                ),
+            )
+        ]
+    )
+    workload.next()  # returns None, finishes the workload
+
+    final = workload.final_result
+    assert final.metadata["first_run_ttft"] == pytest.approx(0.42)
+    assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
+    assert final.metadata["first_run_prompt_length"] == 12000
+
+
+def test_workload_first_run_prompt_length_is_absent_without_n_input():
+    first = _request("first rendered prompt")
+    runner = _FakeRunner([first])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    # A Method that does not report n_input must still contribute the other
+    # two first-RUN readings.
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="first output",
+                    performance={TtftKey: 0.42},
+                    metadata={"reuse_ratio": 0.85},
+                ),
+            )
+        ]
+    )
+    workload.next()
+
+    final = workload.final_result
+    assert final.metadata["first_run_ttft"] == pytest.approx(0.42)
+    assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
+    assert "first_run_prompt_length" not in final.metadata
+
+
+def test_workload_first_run_capture_is_absent_when_no_run_completes():
+    runner = _FailingRunner()
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    with pytest.raises(AgentBenchFlowPreRunError, match="before its first RUN"):
+        workload.next()  # runner.start() raises -> fail() runs
+
+    final = workload.final_result
+    assert final.metadata.get("first_run_ttft") is None
+    assert final.metadata.get("first_run_reuse_ratio") is None
+    assert final.metadata.get("first_run_prompt_length") is None
+    assert final.output["error"]
+
+
+def test_workload_first_run_metadata_is_attached_even_after_a_mid_run_failure():
+    first = _request("first rendered prompt")
+    runner = _FakeRunner([first])
+
+    def boom(_request, _output):
+        raise RuntimeError("model crashed mid-rollout")
+
+    runner.respond = boom
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="citation-check"),
+        runner=runner,
+    )
+
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="first output",
+                    performance={TtftKey: 0.21},
+                    metadata={"reuse_ratio": 0.73, "n_input": 8192},
+                ),
+            )
+        ]
+    )
+    # observe()'s respond() raises -> fail() is called, which must keep the
+    # already-captured first-RUN stats.
+    final = workload.final_result
+    assert final.metadata["first_run_ttft"] == pytest.approx(0.21)
+    assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.73)
+    assert final.metadata["first_run_prompt_length"] == 8192
+
+
+def test_task_evaluate_surfaces_first_run_task_scores_when_present():
+    task = AgentBenchFlowTask("citation-check")
+    result = Result(
+        output={"rewards": {"reward": 1.0}},
+        metadata={
+            "first_run_ttft": 0.38,
+            "first_run_reuse_ratio": 0.83,
+            "first_run_prompt_length": 12000,
+        },
+    )
+    assert task.Evaluate(result, {}) == {
+        "reward": 1.0,
+        "accuracy": 1.0,
+        "first_run_ttft": pytest.approx(0.38),
+        "first_run_reuse_ratio": pytest.approx(0.83),
+        "first_run_prompt_length": pytest.approx(12000.0),
+    }
+
+
+def test_task_evaluate_omits_first_run_scores_when_unavailable():
+    task = AgentBenchFlowTask("citation-check")
+    result = Result(
+        output={"rewards": {"reward": 0.0}, "error": "no provider reachable"},
+        metadata={"benchflow_error": "no provider reachable"},
+    )
+    scores = task.Evaluate(result, {})
+    assert "first_run_ttft" not in scores
+    assert "first_run_reuse_ratio" not in scores
+    assert "first_run_prompt_length" not in scores

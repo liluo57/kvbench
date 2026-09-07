@@ -41,23 +41,25 @@ task Skill's full document is not the system-level available-Skills index. It
 appears later, after the agent issues a tool call such as
 `read({"path":".../SKILL.md"})`, as the matching `tool` message body.
 
-`AgentBenchFlowWorkload` recognizes only those tool-call/response pairs. It
-sends the document bodies as a `PREPARE` action and then sends the unchanged,
-fully rendered provider prompt as a `RUN` action for the same request:
+`AgentBenchFlowWorkload` recognizes only those tool-call/response pairs. Local
+task-bundled documents are sent as a `PREPARE` action and are also inserted
+verbatim into the first provider prompt. The prompt is then rendered again
+with the model's native chat template:
 
 ```text
 provider request
   -> PREPARE([skill-document-1, skill-document-2, ...])
-  -> RUN(full rendered request)
+  -> RUN(first rendered request + skill documents)
   -> provider response
 ```
 
-The system prompt, task instruction, tool-call metadata, and multi-turn common
-prefix are therefore not preparation inputs. Local SkillsBench runs load the
-task-bundled `environment/skills/*/SKILL.md` files before the first turn;
-dataset runs discover documents from the provider history as the agent reads
-them. Bodies are deduplicated, and later requests reuse the accumulated Skill
-set.
+The system prompt's available-Skill index, task instruction, tool-call
+metadata, and multi-turn common prefix are therefore not preparation inputs.
+Local SkillsBench runs load the task-bundled
+`environment/skills/*/SKILL.md` files before the first turn; dataset runs with
+no local checkout discover documents from the provider history as the agent
+reads them, so those documents cannot be retroactively added to turn one.
+Bodies are deduplicated, and later requests reuse the accumulated Skill set.
 
 This path is useful for methods that support interleaved reusable spans, such
 as `NaiveTransformer` and `CacheblendRepo`. `FullPrefill` intentionally ignores
@@ -76,6 +78,8 @@ AgentBenchFlow:
   Agent: pi-acp
   Sandbox: docker
   SkillMode: with-skill
+  # Retries after the initial BenchFlow attempt; 0 disables retries.
+  RetryAttempts: 0
 ```
 
 Use `SourceMode: local` with `SkillsBenchRepo` for a local checkout. The local
@@ -100,8 +104,13 @@ bench eval run \
   --jobs-dir /data/lyh/kvbench/outputs/benchflow/citation-check \
   --concurrency 1 \
   --agent-env BENCHFLOW_PROVIDER_BASE_URL=http://127.0.0.1:<kvbench-port>/v1 \
-  --agent-env BENCHFLOW_PROVIDER_API_KEY=dummy
+  --agent-env BENCHFLOW_PROVIDER_API_KEY=dummy \
+  --retry-attempts 0
 ```
+
+`RetryAttempts` controls BenchFlow's own task retry loop. It is independent of
+KVBench's `Engine.PairRetries`: `0` runs each BenchFlow task once, while `2`
+restores BenchFlow's default of three total attempts.
 
 The model id defaults to the basename of KVBench's configured `ModelPath` and
 is sent to BenchFlow as `vllm/<model-id>`. The Method controls generation
@@ -173,6 +182,31 @@ detection chooses the wrong interface. The provider endpoint uses a random
 per-run bearer token; the control API independently uses
 ``KVBENCH_REMOTE_TOKEN``. On an untrusted network, place this HTTP traffic on a
 private network or encrypted tunnel.
+
+When A and B are connected through fixed SSH forwards, configure an inclusive
+endpoint port pool (for example ``EndpointPortRange: [8000, 8031]``). KVBench
+assigns one free port per concurrent worker; forwarding only one port would
+still make the second worker unreachable. With the tunnel layout where B runs
+the SSH client, forward every port in that pool from B to A and reverse-forward
+the control API from A to B, for example:
+
+```bash
+forward_args=()
+for port in $(seq 8000 8031); do
+  forward_args+=(-L "127.0.0.1:${port}:127.0.0.1:${port}")
+done
+ssh -NT \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=20 \
+  -o ServerAliveCountMax=3 \
+  "${forward_args[@]}" \
+  -R 127.0.0.1:9000:127.0.0.1:9000 \
+  user@machine-A
+```
+
+Run ``RemoteDockerRuntimeServer.py --listen 127.0.0.1:9000`` on B and
+``python Main.py`` on A. The ``-R`` control tunnel and the ``-L`` provider
+tunnels must be kept in a separate, persistent SSH session.
 
 ``SourceMode: dataset`` needs no source upload. For ``SourceMode: local``, A
 uploads only the selected ``tasks/<task-id>`` directory. B validates that the
