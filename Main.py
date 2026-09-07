@@ -1,20 +1,13 @@
-"""KVBench entry point / configuration.
+"""KVBench entry point.
 
-This file doubles as the configuration: edit the ``tasks`` / ``methods``
-lists below and run from the project root::
-
-    python Main.py
-
-The model path comes from ``config.yaml`` (``ModelPath``);
-datasets resolve by name against ``DatasetPath``.
+Task selection and method parameters live here. Shared runtime settings live in
+``config.yaml``.
 """
 
 import json
 import sys
-from pathlib import Path
 
 from core import ModelPath
-from core.Config import Get
 from core.engine import Engine
 from metrics import ThroughputMetric, TTFTMetric
 
@@ -39,48 +32,26 @@ from tasks import (
     KVCommHumanEvalTask,
     KVCommCopyTask,
 )
-from tasks.FreshGap import FreshGapTask
-
-MAX_SAMPLES=64
-MAX_NEW_TOKENS=512
 
 
 def Main() -> None:
-    skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
-    task_ids = ['ada-bathroom-plan-repair',
-        'adaptive-cruise-control',
-        'data-to-d3',
-        'dynamic-object-aware-egomotion',
-        'enterprise-information-search',
-        'exoplanet-detection-period',
-        'lab-unit-harmonization',
-        'manufacturing-codebook-normalization',
-        'sec-financial-report',
-        'setup-fuzzing-py',
-        'travel-planning',
-        'video-silence-remover',
-        'weighted-gdp-calc',
-        'xlsx-recover-data']
-
-    tasks = [
-        AgentBenchFlowTask(
-            source_mode="local",
-            skillsbench_dir=skillsbench_root,
-            task_ids=[task_id],
-            agent="pi-acp",
-            skill_mode="with-skill",
-            thinking=True,
-            result_json_timeout=BENCHFLOW_TIMEOUT_SEC,
-            bench_extra_args=[
-                "--agent-idle-timeout", str(BENCHFLOW_TIMEOUT_SEC),
-                "--config-override",
-                '{"agent":{"timeout_sec":18000}}',
-                "--agent-env", "REQUEST_TIMEOUT=18000",
-            ],
-            tag=task_id
-        )
-        for task_id in task_ids
+    taskIds = [
+        "ada-bathroom-plan-repair",
+        "adaptive-cruise-control",
+        "data-to-d3",
+        "dynamic-object-aware-egomotion",
+        "enterprise-information-search",
+        "exoplanet-detection-period",
+        "lab-unit-harmonization",
+        "manufacturing-codebook-normalization",
+        "sec-financial-report",
+        "setup-fuzzing-py",
+        "travel-planning",
+        "video-silence-remover",
+        "weighted-gdp-calc",
+        "xlsx-recover-data",
     ]
+    tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
     methods = [
         # HypicMethod(
@@ -99,30 +70,14 @@ def Main() -> None:
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
-
-    batchSize = 1
-
     print(
         f"[main] model={ModelPath()}\n"
-        f"[main] tasks={[t.Label for t in tasks]} "
-        f"methods={[(m.Label, m.gpuNums, m.perfWeight) for m in methods]} "
-        f"batchSize={batchSize}"
+        f"[main] tasks={[task.Label for task in tasks]} "
+        f"methods={[(method.Label, method.gpuNums, method.perfWeight) for method in methods]}"
     )
     sys.stdout.flush()
 
-    engine = Engine(
-        availableGpuIds=list(range(8)),
-        batchSize=batchSize,
-        initializeTimeout=600,
-        taskTimeout=18000,
-        shutdownGracePeriod=30,
-        gpuReleaseTimeout=30,
-        gpuReleaseStableSeconds=1,
-        gpuReleaseMemoryToleranceMiB=256,
-        pairRetries=1,
-        tui=True,
-        verbose=True,
-    )
+    engine = Engine()
     report = engine.Evaluate(tasks=tasks, methods=methods, metrics=metrics)
 
     print("\n=== KVBench report ===")
@@ -133,6 +88,6 @@ def Main() -> None:
 if __name__ == "__main__":
     try:
         Main()
-    except (FileNotFoundError, RuntimeError) as exc:
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"[main] ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

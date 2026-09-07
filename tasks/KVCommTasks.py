@@ -2,10 +2,13 @@
 
 import csv
 import json
+import os
 import random
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -81,10 +84,27 @@ def _extract_python(text: Any) -> str | None:
     return None
 
 
-def _cases(task: Task, rows, specs, decision, metadata=None):
+def _limit_samples(rows: List[Any], max_samples: Optional[int]) -> List[Any]:
+    """Apply the common sample limit without treating zero as unlimited."""
+    if max_samples is None:
+        return rows
+    if isinstance(max_samples, bool) or not isinstance(max_samples, int):
+        raise TypeError("maxSamples must be an integer or None")
+    if max_samples < 0:
+        raise ValueError("maxSamples must be non-negative")
+    return rows[:max_samples]
+
+
+def _cases(rows, specs, decision, metadata=None):
     for i, row in enumerate(rows):
         text, meta = row if isinstance(row, tuple) else (row, {})
-        yield Case(text, MultiAgentFullConnectionWorkload(i, MultiAgentFullConnectionInput(text, specs, decision)), meta if metadata is None else metadata(meta))
+        yield Case(
+            text,
+            MultiAgentFullConnectionWorkload(
+                i, MultiAgentFullConnectionInput(text, specs, decision)
+            ),
+            meta if metadata is None else metadata(meta),
+        )
 
 
 def _cycle(names, count, template):
@@ -114,11 +134,11 @@ class KVCommMMLUTask(Task):
                     for r in csv.reader(f):
                         if len(r) >= 6: rows.append(("{}\nOption A: {}\nOption B: {}\nOption C: {}\nOption D: {}".format(r[0], r[1], r[2], r[3], r[4]), {"answer": r[5]}))
             random.Random(888).shuffle(rows)
-            self._rows = rows[:self.maxSamples] if self.maxSamples else rows
+            self._rows = _limit_samples(rows, self.maxSamples)
         roles = ["Knowledgeable Expert", "Wiki Searcher", "Critic", "Mathematician", "Psychologist", "Historian", "Doctor", "Lawyer", "Economist", "Programmer"]
         specs = _cycle(roles, self.agentCount, "You are a {role}. Analyze the question and choose one of A, B, C, or D.\n\nQ: {task}")
         decision = AgentSpec("FinalRefer", "You are the top decision-maker. Choose exactly one of A, B, C, or D using the analyses.\n\nQ: {task}")
-        yield from _cases(self, self._rows, specs, decision)
+        yield from _cases(self._rows, specs, decision)
     def Evaluate(self, result, metadata):
         answer = str(metadata.get("answer", "")).strip().upper()
         return {"accuracy": float(bool(answer) and _extract_choice(result.output) == answer)}
@@ -141,10 +161,10 @@ class KVCommGSM8KTask(Task):
                 records = json.load(f) if path.suffix == ".json" else (json.loads(line) for line in f)
                 for r in records:
                     rows.append((r.get("question", ""), {"answer": r.get("answer", r.get("target", ""))}))
-            self._rows = rows[:self.maxSamples] if self.maxSamples else rows
+            self._rows = _limit_samples(rows, self.maxSamples)
         specs = _cycle(["Math Solver", "Mathematical Analyst", "Programming Expert", "Inspector"], self.agentCount, "You are a {role}. Solve the problem step by step. Include few-shot reasoning where useful.\n\nQ:{task}\n")
         decision = AgentSpec("FinalRefer", "You are the top decision-maker. Select the most reliable mathematical answer from the following work.\n\nQ:{task}\n")
-        yield from _cases(self, self._rows, specs, decision)
+        yield from _cases(self._rows, specs, decision)
     def Evaluate(self, result, metadata):
         predicted = _extract_number(result.output)
         target = _extract_number(metadata.get("answer", ""), target=True)
@@ -162,7 +182,7 @@ class KVCommHumanEvalTask(Task):
             rows = []
             with (DatasetDir("humaneval") / "humaneval-py.jsonl").open(encoding="utf-8") as f:
                 for line in f: rows.append(json.loads(line))
-            self._rows = rows[:self.maxSamples] if self.maxSamples else rows
+            self._rows = _limit_samples(rows, self.maxSamples)
         names = ["Project Manager", "Algorithm Designer", "Programming Expert", "Test Analyst", "Bug Fixer"]
         specs = _cycle(names, self.agentCount, "You are the {role}. Produce Python code for the task.\n\n{task}")
         decision = AgentSpec("Final Decision", "Return only the best Python implementation in a ```python block.\n\n{task}")
@@ -173,15 +193,37 @@ class KVCommHumanEvalTask(Task):
         code = _extract_python(result.output)
         if code is None:
             return {"accuracy": 0.0}
+
+        command = [
+            sys.executable,
+            "-I",
+            "-c",
+            code + "\n" + metadata.get("test", ""),
+        ]
         try:
-            p = subprocess.run(
-                [sys.executable, "-I", "-c", code + "\n" + metadata.get("test", "")],
-                timeout=10,
-                capture_output=True,
-                text=True,
-            )
-            return {"accuracy": float(p.returncode == 0)}
-        except (subprocess.TimeoutExpired, OSError): return {"accuracy": 0.0}
+            with tempfile.TemporaryDirectory(prefix="kvcomm-humaneval-") as cwd:
+                process = subprocess.Popen(
+                    command,
+                    cwd=cwd,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    start_new_session=(os.name == "posix"),
+                    preexec_fn=_limit_human_eval_process if os.name == "posix" else None,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    if os.name == "posix":
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
+                    process.communicate()
+                    return {"accuracy": 0.0}
+                return {"accuracy": float(process.returncode == 0)}
+        except (OSError, subprocess.SubprocessError):
+            return {"accuracy": 0.0}
 
 
 class KVCommCopyTask(Task):
@@ -196,3 +238,20 @@ class KVCommCopyTask(Task):
             text = " ".join(rng.choices(["Δ", "Ω"], k=1000))
             yield Case(text, MultiAgentFullConnectionWorkload(i, MultiAgentFullConnectionInput(text, specs)), {})
     def Evaluate(self, result, metadata): return {}
+
+
+def _limit_human_eval_process() -> None:
+    """Apply best-effort POSIX limits before executing generated code."""
+    import resource
+
+    limits = {
+        resource.RLIMIT_CPU: (10, 10),
+        resource.RLIMIT_FSIZE: (16 * 1024 * 1024, 16 * 1024 * 1024),
+        resource.RLIMIT_NOFILE: (64, 64),
+        resource.RLIMIT_AS: (1024 * 1024 * 1024, 1024 * 1024 * 1024),
+    }
+    for resource_kind, limit in limits.items():
+        try:
+            resource.setrlimit(resource_kind, limit)
+        except (ValueError, OSError):
+            continue

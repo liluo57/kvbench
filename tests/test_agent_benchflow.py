@@ -2,9 +2,9 @@
 
 import json
 from concurrent.futures import Future
+import importlib
 import threading
 from http.client import HTTPConnection
-from pathlib import Path
 
 import pytest
 
@@ -21,6 +21,9 @@ from workload.AgentBenchFlowWorkload import (
     _CanonicalSkillDocument,
     _ExtractSkillDocuments,
 )
+
+
+agentBenchFlowTaskModule = importlib.import_module("tasks.AgentBenchFlowTask")
 
 
 @pytest.fixture
@@ -704,39 +707,54 @@ def test_workload_converts_runner_failure_to_zero_score():
     assert workload.final_result.output["reward"] == 0.0
 
 
-def test_task_filters_and_propagates_benchflow_configuration(
+def test_task_loads_benchflow_configuration_and_keeps_task_tag(
     monkeypatch, fakeSkillsbench
 ):
-    monkeypatch.setattr(AgentBenchFlowTask, "_EnsureLocalImages", lambda *args: None)
-    task = AgentBenchFlowTask(
-        skillsbench_dir=fakeSkillsbench,
-        source_mode="local",
-        task_ids=["citation-check", "alpha"],
-        exclude_task_ids=["alpha"],
-        agent="opencode",
-        skill_mode="no-skill",
-        provider_host="host.docker.internal",
+    config = {
+        "SourceMode": "local",
+        "SkillsBenchRepo": str(fakeSkillsbench),
+        "Agent": "opencode",
+        "Sandbox": "remote-docker",
+        "RemoteDocker": {"Endpoint": "http://127.0.0.1:9000"},
+        "SkillMode": "no-skill",
+        "ProviderHost": "host.docker.internal",
+    }
+    monkeypatch.setattr(
+        agentBenchFlowTaskModule,
+        "Get",
+        lambda key, default=None: config if key == "AgentBenchFlow" else default,
     )
+    task = AgentBenchFlowTask("citation-check")
     case = next(iter(task.Cases()))
     assert case.metadata["task_id"] == "citation-check"
+    assert task.Label == "agent_benchflow(citation-check)"
     assert case.input.agent == "opencode"
     assert case.input.skill_mode == "no-skill"
     assert case.input.source_mode == "local"
     assert case.input.provider_host == "host.docker.internal"
 
 
-def test_task_selects_remote_runtime_without_local_docker_validation(fakeSkillsbench):
-    task = AgentBenchFlowTask(
-        skillsbench_dir=fakeSkillsbench,
-        source_mode="local",
-        task_ids=["citation-check"],
-        sandbox="remote-docker",
+def test_task_selects_remote_runtime_without_local_docker_validation(
+    monkeypatch, fakeSkillsbench
+):
+    config = {
+        "SourceMode": "local",
+        "SkillsBenchRepo": str(fakeSkillsbench),
+        "Sandbox": "remote-docker",
+        "RemoteDocker": {"Endpoint": "http://127.0.0.1:9000"},
+        "EndpointPortRange": [8000, 8031],
+    }
+    monkeypatch.setattr(
+        agentBenchFlowTaskModule,
+        "Get",
+        lambda key, default=None: config if key == "AgentBenchFlow" else default,
     )
+    task = AgentBenchFlowTask("citation-check")
     case = next(iter(task.Cases()))
     assert case.input.sandbox == "remote-docker"
     assert case.input.remote_endpoint == "http://127.0.0.1:9000"
     assert case.input.remote_advertise_host is None
-    assert case.input.endpoint_port_range == (8000, 8015)
+    assert case.input.endpoint_port_range == (8000, 8031)
     assert case.input.remote_poll_interval == pytest.approx(1.0)
 
 
@@ -755,7 +773,7 @@ def test_task_extracts_official_rewards(payload, expected):
 
 
 def test_task_evaluate_keeps_infrastructure_diagnostics_available():
-    task = AgentBenchFlowTask(skillsbench_dir=Path("/tmp"), task_ids=["citation-check"])
+    task = AgentBenchFlowTask("citation-check")
     result = Result(
         output={"rewards": {"reward": 0.0}, "error": "Docker environment failed"},
         metadata={"benchflow_error": "Docker environment failed"},
@@ -897,7 +915,7 @@ def test_workload_first_run_metadata_is_attached_even_after_a_mid_run_failure():
 
 
 def test_task_evaluate_surfaces_first_run_task_scores_when_present():
-    task = AgentBenchFlowTask(skillsbench_dir=Path("/tmp"), task_ids=["citation-check"])
+    task = AgentBenchFlowTask("citation-check")
     result = Result(
         output={"rewards": {"reward": 1.0}},
         metadata={
@@ -916,7 +934,7 @@ def test_task_evaluate_surfaces_first_run_task_scores_when_present():
 
 
 def test_task_evaluate_omits_first_run_scores_when_unavailable():
-    task = AgentBenchFlowTask(skillsbench_dir=Path("/tmp"), task_ids=["citation-check"])
+    task = AgentBenchFlowTask("citation-check")
     result = Result(
         output={"rewards": {"reward": 0.0}, "error": "no provider reachable"},
         metadata={"benchflow_error": "no provider reachable"},

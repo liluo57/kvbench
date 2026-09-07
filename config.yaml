@@ -28,6 +28,22 @@ ModelPath: /root/autodl-tmp/models/Qwen3.8-27b
 Hypic:
   RepoPath: /root/hypic
 
+# The benchmark entry point reads its shared runtime settings from this section.
+# Task selection and method parameters remain in Main.py.
+Engine:
+  AvailableGpuIds: auto
+  BatchSize: 1
+  OutputRoot: outputs
+  InitializeTimeoutSec: 600
+  TaskTimeoutSec: 18000
+  ShutdownGracePeriodSec: 30
+  GpuReleaseTimeoutSec: 30
+  GpuReleaseStableSeconds: 1
+  GpuReleaseMemoryToleranceMiB: 256
+  PairRetries: 1
+  Tui: true
+  Verbose: true
+
 # The CacheblendRepo method (methods/CacheblendRepo.py) runs the *original*
 # CacheBlend repo (YaoJiayi/CacheBlend): a patched vLLM 0.4.1 whose collect /
 # check / fusion machinery lives in <RepoPath>/vllm_blend. The method launches a
@@ -40,8 +56,8 @@ Cacheblend:
 
 # SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:
-  # Dataset mode is the reproducible path. The local checkout below is used
-  # only to enumerate task ids when task_ids is omitted.
+  # Dataset mode is the reproducible path. SkillsBenchRepo is needed for local
+  # source runs and is not used to select task ids.
   SourceMode: dataset
   Dataset: skillsbench@1.1
   SkillsBenchRepo: /root/skillsbench
@@ -81,6 +97,12 @@ AgentBenchFlow:
   # BenchFlow writes the official result.json and all rollout artifacts here.
   BenchCommand: bench
   OutputDir: /root/kvbench/outputs/benchflow
-  ResultJsonTimeoutSec: 7200
+  ResultJsonTimeoutSec: 18000
   Thinking: true
-  BenchExtraArgs: []
+  BenchExtraArgs:
+    - --agent-idle-timeout
+    - "18000"
+    - --config-override
+    - '{"agent":{"timeout_sec":18000}}'
+    - --agent-env
+    - REQUEST_TIMEOUT=18000

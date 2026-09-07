@@ -186,6 +186,10 @@ class _RulerTask(RulerBase):
         return {}
 
 
+def test_ruler_shuffle_guard_handles_empty_parts():
+    assert _RulerTask()._Shuffled(["", "needle"], seed=7) == ["", "needle"]
+
+
 def test_ruler_loader_filters_length_and_slices(tmp_path):
     (tmp_path / "sample_len8.jsonl").write_text(
         json.dumps({"input": "eight", "outputs": ["8"]}) + "\n\n",

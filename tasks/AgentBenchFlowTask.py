@@ -1,7 +1,7 @@
 """SkillsBench task selection and scoring for the real BenchFlow runtime."""
 
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from core.Config import Get
 from core.Result import Result
@@ -15,8 +15,9 @@ _REWARD_KEYS = ("reward", "score", "rewards", "scores")
 class AgentBenchFlowTask(Task):
     """Expose one real BenchFlow rollout as one KVBench Case.
 
-    KVBench uses a local SkillsBench checkout only to enumerate development
-    cases. BenchFlow remains the source of task parsing, Docker setup, skills,
+    KVBench selects the task id; a local SkillsBench checkout supplies the
+    selected task files when local source mode is used. BenchFlow remains the
+    source of task parsing, Docker setup, skills,
     agent execution, verification, and the official result artifact. For
     reproducible runs, ``source_mode="dataset"`` selects a pinned registry
     dataset such as ``skillsbench@1.1``.
@@ -34,60 +35,36 @@ class AgentBenchFlowTask(Task):
     # inspect` per instance.
     _validatedTaskKeys: set = set()
 
-    def __init__(
-        self,
-        *,
-        skillsbench_dir: Optional[Union[str, Path]] = None,
-        task_ids: Optional[Sequence[str]] = None,
-        exclude_task_ids: Optional[Sequence[str]] = None,
-        max_samples: Optional[int] = None,
-        source_mode: Optional[str] = None,
-        dataset: Optional[str] = None,
-        agent: Optional[str] = None,
-        sandbox: Optional[str] = None,
-        skill_mode: Optional[str] = None,
-        provider_host: Optional[str] = None,
-        endpoint_host: Optional[str] = None,
-        port: Optional[int] = None,
-        endpoint_port_range: Optional[Sequence[int]] = None,
-        model_id: Optional[str] = None,
-        output_dir: Optional[Union[str, Path]] = None,
-        result_json_timeout: Optional[float] = None,
-        thinking: Optional[bool] = None,
-        provider_api_key: Optional[str] = None,
-        provider_api_key_env: Optional[str] = None,
-        bench_command: Optional[str] = None,
-        bench_extra_args: Optional[Sequence[str]] = None,
-        tag: Optional[str] = None,
-    ):
-        super().__init__(tag=tag)
+    def __init__(self, task_id: str):
+        """Create one task from the shared AgentBenchFlow config.
+
+        Task selection remains in ``Main.py``; runtime behavior is configured
+        only through ``config.yaml``.
+        """
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ValueError("task_id must be a non-empty string")
+        super().__init__(tag=task_id)
         abf = Get("AgentBenchFlow", {}) or {}
-        self.sourceMode = source_mode or abf.get("SourceMode", "dataset")
+        self.sourceMode = abf.get("SourceMode", "dataset")
         if self.sourceMode not in {"dataset", "local"}:
             raise ValueError("source_mode must be 'dataset' or 'local'")
-        self.dataset = dataset if dataset is not None else abf.get("Dataset", "skillsbench@1.1")
+        self.dataset = abf.get("Dataset", "skillsbench@1.1")
         configuredRepo = abf.get("SkillsBenchRepo")
-        repoValue = skillsbench_dir if skillsbench_dir is not None else configuredRepo
+        repoValue = configuredRepo
         self.skillsbenchDir = Path(repoValue) if repoValue else None
         if self.sourceMode == "local" and self.skillsbenchDir is None:
             raise FileNotFoundError(
-                "local AgentBenchFlow source requires SkillsBenchRepo or skillsbench_dir"
+                "local AgentBenchFlow source requires AgentBenchFlow.SkillsBenchRepo"
             )
-        self.excludeTaskIds = set(exclude_task_ids or ())
-        self.maxSamples = max_samples
-        self.agent = agent or abf.get("Agent", "pi-acp")
-        self.sandbox = sandbox or abf.get("Sandbox", "docker")
-        self.skillMode = skill_mode or abf.get("SkillMode", "with-skill")
+        self.agent = abf.get("Agent", "pi-acp")
+        self.sandbox = abf.get("Sandbox", "docker")
+        self.skillMode = abf.get("SkillMode", "with-skill")
         if self.skillMode not in {"with-skill", "no-skill"}:
             raise ValueError("skill_mode must be 'with-skill' or 'no-skill'")
-        self.providerHost = provider_host or abf.get("ProviderHost", "127.0.0.1")
-        self.endpointHost = endpoint_host or abf.get("EndpointHost", "0.0.0.0")
-        self.port = 0 if port is None else int(port)
-        configuredPortRange = (
-            endpoint_port_range
-            if endpoint_port_range is not None
-            else abf.get("EndpointPortRange")
-        )
+        self.providerHost = abf.get("ProviderHost", "127.0.0.1")
+        self.endpointHost = abf.get("EndpointHost", "0.0.0.0")
+        self.port = int(abf.get("Port", 0))
+        configuredPortRange = abf.get("EndpointPortRange")
         if configuredPortRange is None:
             self.endpointPortRange = None
         else:
@@ -102,23 +79,17 @@ class AgentBenchFlowTask(Task):
                     "endpoint_port_range must be an inclusive range within ports 1-65535"
                 )
             self.endpointPortRange = (firstPort, lastPort)
-        self.modelId = model_id if model_id is not None else abf.get("ModelId")
-        configuredOutput = output_dir if output_dir is not None else abf.get("OutputDir")
+        self.modelId = abf.get("ModelId")
+        configuredOutput = abf.get("OutputDir")
         self.outputDir = Path(configuredOutput) if configuredOutput else None
-        self.resultJsonTimeout = (
-            float(result_json_timeout)
-            if result_json_timeout is not None
-            else float(abf.get("ResultJsonTimeoutSec", 3600))
-        )
-        self.thinking = thinking if thinking is not None else abf.get("Thinking")
-        self.providerApiKey = provider_api_key
-        self.providerApiKeyEnv = provider_api_key_env or abf.get(
+        self.resultJsonTimeout = float(abf.get("ResultJsonTimeoutSec", 3600))
+        self.thinking = abf.get("Thinking")
+        self.providerApiKey = abf.get("ProviderApiKey")
+        self.providerApiKeyEnv = abf.get(
             "ProviderApiKeyEnv", "KVBENCH_PROVIDER_API_KEY"
         )
-        self.benchCommand = bench_command or abf.get("BenchCommand", "bench")
-        self.benchExtraArgs = list(
-            bench_extra_args if bench_extra_args is not None else abf.get("BenchExtraArgs") or []
-        )
+        self.benchCommand = abf.get("BenchCommand", "bench")
+        self.benchExtraArgs = list(abf.get("BenchExtraArgs") or [])
         remote = abf.get("RemoteDocker", {}) or {}
         if not isinstance(remote, Mapping):
             raise ValueError("AgentBenchFlow.RemoteDocker must be a mapping")
@@ -137,7 +108,7 @@ class AgentBenchFlowTask(Task):
                 "AgentBenchFlow.RemoteDocker.Endpoint is required when "
                 "Sandbox=remote-docker"
             )
-        self._resolvedTaskIds = self._ResolveTaskIds(task_ids)
+        self._resolvedTaskIds = [task_id]
         if (
             self.sourceMode == "local"
             and self.skillsbenchDir is not None
@@ -225,42 +196,6 @@ class AgentBenchFlowTask(Task):
             )
         if newlyVerified:
             print(f"[main] verified {newlyVerified} prebuilt SkillsBench images")
-
-    def _ResolveTaskIds(self, task_ids: Optional[Sequence[str]]) -> List[str]:
-        if task_ids is None:
-            if self.skillsbenchDir is None:
-                raise ValueError(
-                    "task_ids is required for dataset mode when no local SkillsBench "
-                    "checkout is configured"
-                )
-            tasksRoot = self.skillsbenchDir / "tasks"
-            if not tasksRoot.is_dir():
-                raise FileNotFoundError(
-                    f"no tasks/ directory under {self.skillsbenchDir} "
-                    "(used only for local case enumeration)"
-                )
-            discovered = sorted(
-                entry.name
-                for entry in tasksRoot.iterdir()
-                if (entry / "task.md").is_file()
-            )
-        else:
-            if not task_ids:
-                raise ValueError(
-                    "task_ids=[] is almost certainly a typo; pass None to discover "
-                    "from the local checkout or a non-empty list"
-                )
-            discovered = list(task_ids)
-
-        filtered = [taskId for taskId in discovered if taskId not in self.excludeTaskIds]
-        if self.maxSamples is not None:
-            filtered = filtered[: int(self.maxSamples)]
-        if not filtered:
-            raise ValueError(
-                "no BenchFlow tasks to run after filtering "
-                f"(exclude={sorted(self.excludeTaskIds)})"
-            )
-        return filtered
 
     def _CaseOutputDir(self, taskId: str) -> Optional[Path]:
         if self.outputDir is None:

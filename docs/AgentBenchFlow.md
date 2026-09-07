@@ -177,7 +177,7 @@ per-run bearer token; the control API independently uses
 private network or encrypted tunnel.
 
 When A and B are connected through fixed SSH forwards, configure an inclusive
-endpoint port pool (for example ``EndpointPortRange: [8000, 8015]``). KVBench
+endpoint port pool (for example ``EndpointPortRange: [8000, 8031]``). KVBench
 assigns one free port per concurrent worker; forwarding only one port would
 still make the second worker unreachable. With the tunnel layout where B runs
 the SSH client, forward every port in that pool from B to A and reverse-forward
@@ -185,7 +185,7 @@ the control API from A to B, for example:
 
 ```bash
 forward_args=()
-for port in $(seq 8000 8015); do
+for port in $(seq 8000 8031); do
   forward_args+=(-L "127.0.0.1:${port}:127.0.0.1:${port}")
 done
 ssh -NT \
