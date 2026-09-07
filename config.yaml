@@ -98,6 +98,9 @@ AgentBenchFlow:
   BenchCommand: bench
   OutputDir: /root/kvbench/outputs/benchflow
   ResultJsonTimeoutSec: 18000
+  # Number of BenchFlow task retries after the initial attempt. Set to 0 to
+  # disable BenchFlow's default retry loop; set to 2 for three total attempts.
+  RetryAttempts: 0
   Thinking: true
   BenchExtraArgs:
     - --agent-idle-timeout

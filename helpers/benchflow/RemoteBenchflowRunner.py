@@ -198,6 +198,7 @@ class RemoteBenchflowRunner(BenchflowRunner):
             "provider_base_url": self.providerUrl,
             "provider_api_key": self._ApiKey(),
             "result_json_timeout": self.resultJsonTimeout,
+            "retry_attempts": self.retryAttempts,
             "bench_extra_args": list(self.extraArgs),
         }
 

@@ -309,6 +309,10 @@ def test_runner_builds_real_benchflow_dataset_command(tmp_path):
     assert "--sandbox" in command and command[command.index("--sandbox") + 1] == "docker"
     assert "--skill-mode" in command and command[command.index("--skill-mode") + 1] == "with-skill"
     assert ["--usage-tracking", "off"] == command[command.index("--usage-tracking"):command.index("--usage-tracking") + 2]
+    assert command[command.index("--retry-attempts"):command.index("--retry-attempts") + 2] == [
+        "--retry-attempts",
+        "0",
+    ]
     assert f"BENCHFLOW_PROVIDER_BASE_URL=http://host.docker.internal:43123/v1" in command
     assert "BENCHFLOW_PROVIDER_API_KEY=dummy-from-test" in command
     assert str(runner.jobsDir) in command
@@ -328,6 +332,29 @@ def test_runner_builds_local_tasks_dir_command(tmp_path):
     command = runner.BuildCommand()
     assert command[3:5] == ["--tasks-dir", str(repo / "tasks")]
     assert command[command.index("--include") + 1] == "citation-check"
+
+
+def test_runner_configures_benchflow_retry_attempts(tmp_path):
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/model",
+        jobsDir=tmp_path / "case",
+        retryAttempts=2,
+    )
+
+    command = runner.BuildCommand()
+    index = command.index("--retry-attempts")
+    assert command[index:index + 2] == ["--retry-attempts", "2"]
+
+
+def test_runner_rejects_negative_benchflow_retry_attempts(tmp_path):
+    with pytest.raises(ValueError, match="retryAttempts"):
+        BenchflowRunner(
+            taskId="citation-check",
+            modelPath="/models/model",
+            jobsDir=tmp_path / "case",
+            retryAttempts=-1,
+        )
 
 
 def test_runner_reads_official_result_shape(tmp_path):
@@ -352,6 +379,7 @@ def test_runner_reads_official_result_shape(tmp_path):
     assert runner.ReadOfficialResult() == payload
     assert runner.officialResultPath == resultPath
     assert runner.Diagnostics()["benchflow_n_tool_calls"] == 4
+    assert runner.Diagnostics()["benchflow_retry_attempts"] == 0
 
 
 def test_runner_subprocess_is_mockable_and_lifecycle_is_explicit(tmp_path):
@@ -720,6 +748,7 @@ def test_task_loads_benchflow_configuration_and_keeps_task_tag(
         "RemoteDocker": {"Endpoint": "http://127.0.0.1:9000"},
         "SkillMode": "no-skill",
         "ProviderHost": "host.docker.internal",
+        "RetryAttempts": 2,
     }
     monkeypatch.setattr(
         agentBenchFlowTaskModule,
@@ -734,6 +763,7 @@ def test_task_loads_benchflow_configuration_and_keeps_task_tag(
     assert case.input.skill_mode == "no-skill"
     assert case.input.source_mode == "local"
     assert case.input.provider_host == "host.docker.internal"
+    assert case.input.retry_attempts == 2
 
 
 def test_task_selects_remote_runtime_without_local_docker_validation(

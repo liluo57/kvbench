@@ -46,6 +46,7 @@ class BenchflowRunner:
         providerApiKeyEnv: str = "KVBENCH_PROVIDER_API_KEY",
         benchCommand: str | Sequence[str] = "bench",
         extraArgs: Sequence[str] = (),
+        retryAttempts: int = 0,
         endpoint: Optional[KVBenchEndpoint] = None,
         endpointApiKey: Optional[str] = None,
         popenFactory: Callable[..., subprocess.Popen] = subprocess.Popen,
@@ -97,6 +98,9 @@ class BenchflowRunner:
         self.providerApiKeyEnv = providerApiKeyEnv
         self.benchCommand = benchCommand
         self.extraArgs = list(extraArgs)
+        if int(retryAttempts) < 0:
+            raise ValueError("retryAttempts must not be negative")
+        self.retryAttempts = int(retryAttempts)
         self.endpoint = endpoint or KVBenchEndpoint(
             modelPath=self.modelPath,
             host=self.endpointHost,
@@ -238,6 +242,8 @@ class BenchflowRunner:
                 str(self.jobsDir),
                 "--concurrency",
                 "1",
+                "--retry-attempts",
+                str(self.retryAttempts),
                 "--agent-env",
                 f"BENCHFLOW_PROVIDER_BASE_URL={self.providerUrl}",
                 "--agent-env",
@@ -295,6 +301,7 @@ class BenchflowRunner:
             "benchflow_returncode": self.processReturnCode,
             "benchflow_error": self.benchflowError,
             "provider_request_timeout_sec": self.providerRequestTimeout,
+            "benchflow_retry_attempts": self.retryAttempts,
         }
         for key in (
             "task_name",

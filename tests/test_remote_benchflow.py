@@ -33,6 +33,7 @@ def _spec(**overrides):
         "provider_base_url": "http://127.0.0.1:1/v1",
         "provider_api_key": "provider-secret",
         "result_json_timeout": 10,
+        "retry_attempts": 0,
         "bench_extra_args": [],
     }
     payload.update(overrides)
@@ -92,6 +93,18 @@ def test_remote_server_forwards_client_agent_env_into_command(tmp_path):
     assert baseIdx < clientIdx
     # Non-agent-env extras still flow through verbatim.
     assert command[command.index("--some-flag") + 1] == "value"
+
+
+def test_remote_server_forwards_benchflow_retry_attempts(tmp_path):
+    manager = RemoteRunManager(
+        workRoot=tmp_path / "runtime",
+        benchCommand="bench",
+        validateDockerImages=False,
+    )
+    record = manager.CreateRun(_spec(retry_attempts=2))
+    command = manager._BuildCommand(record)
+    index = command.index("--retry-attempts")
+    assert command[index:index + 2] == ["--retry-attempts", "2"]
 
 
 def test_remote_server_rejects_client_agent_env_override_attempts(tmp_path):

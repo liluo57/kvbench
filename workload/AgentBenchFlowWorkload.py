@@ -178,6 +178,9 @@ class AgentBenchFlowInput:
     provider_api_key_env: str = "KVBENCH_PROVIDER_API_KEY"
     bench_command: str = "bench"
     bench_extra_args: Sequence[str] = field(default_factory=tuple)
+    #: Number of BenchFlow task retries after the initial attempt. Zero means
+    #: that BenchFlow runs each selected task exactly once.
+    retry_attempts: int = 0
     remote_endpoint: Optional[str] = None
     remote_advertise_host: Optional[str] = None
     remote_auth_token_env: str = "KVBENCH_REMOTE_TOKEN"
@@ -347,6 +350,7 @@ class AgentBenchFlowWorkload(Workload):
                     providerApiKeyEnv=self._data.provider_api_key_env,
                     benchCommand=self._data.bench_command,
                     extraArgs=self._data.bench_extra_args,
+                    retryAttempts=self._data.retry_attempts,
                 )
                 if self._data.sandbox == "remote-docker":
                     if not self._data.remote_endpoint:

@@ -78,6 +78,8 @@ AgentBenchFlow:
   Agent: pi-acp
   Sandbox: docker
   SkillMode: with-skill
+  # Retries after the initial BenchFlow attempt; 0 disables retries.
+  RetryAttempts: 0
 ```
 
 Use `SourceMode: local` with `SkillsBenchRepo` for a local checkout. The local
@@ -102,8 +104,13 @@ bench eval run \
   --jobs-dir /data/lyh/kvbench/outputs/benchflow/citation-check \
   --concurrency 1 \
   --agent-env BENCHFLOW_PROVIDER_BASE_URL=http://127.0.0.1:<kvbench-port>/v1 \
-  --agent-env BENCHFLOW_PROVIDER_API_KEY=dummy
+  --agent-env BENCHFLOW_PROVIDER_API_KEY=dummy \
+  --retry-attempts 0
 ```
+
+`RetryAttempts` controls BenchFlow's own task retry loop. It is independent of
+KVBench's `Engine.PairRetries`: `0` runs each BenchFlow task once, while `2`
+restores BenchFlow's default of three total attempts.
 
 The model id defaults to the basename of KVBench's configured `ModelPath` and
 is sent to BenchFlow as `vllm/<model-id>`. The Method controls generation

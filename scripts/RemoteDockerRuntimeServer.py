@@ -56,6 +56,7 @@ _RESERVED_EXTRA_OPTIONS = frozenset(
         "--usage-tracking",
         "--jobs-dir",
         "--concurrency",
+        "--retry-attempts",
         # ``--agent-env`` is intentionally NOT reserved. The server accepts
         # ``--agent-env KEY=VALUE`` pairs from the client and routes them into
         # ``bench`` alongside the server's own reserved ``--agent-env`` lines
@@ -389,6 +390,14 @@ class RemoteRunManager:
                 400, "result_json_timeout must be between 0 and 604800 seconds"
             )
 
+        retryAttempts = raw.get("retry_attempts", 0)
+        if (
+            isinstance(retryAttempts, bool)
+            or not isinstance(retryAttempts, int)
+            or retryAttempts < 0
+        ):
+            raise ApiError(400, "retry_attempts must be a non-negative integer")
+
         def nonempty(name: str) -> str:
             value = raw.get(name)
             if not isinstance(value, str) or not value:
@@ -411,6 +420,7 @@ class RemoteRunManager:
             "provider_base_url": providerBaseUrl.rstrip("/"),
             "provider_api_key": providerApiKey,
             "result_json_timeout": float(timeout),
+            "retry_attempts": retryAttempts,
             "bench_extra_args": list(extraArgs),
         }
 
@@ -547,6 +557,8 @@ class RemoteRunManager:
                 str(record.jobsDir),
                 "--concurrency",
                 "1",
+                "--retry-attempts",
+                str(record.spec["retry_attempts"]),
                 "--agent-env",
                 f"BENCHFLOW_PROVIDER_BASE_URL={record.spec['provider_base_url']}",
                 "--agent-env",

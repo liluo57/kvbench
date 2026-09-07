@@ -90,6 +90,9 @@ class AgentBenchFlowTask(Task):
         )
         self.benchCommand = abf.get("BenchCommand", "bench")
         self.benchExtraArgs = list(abf.get("BenchExtraArgs") or [])
+        self.retryAttempts = int(abf.get("RetryAttempts", 0))
+        if self.retryAttempts < 0:
+            raise ValueError("retry_attempts must not be negative")
         remote = abf.get("RemoteDocker", {}) or {}
         if not isinstance(remote, Mapping):
             raise ValueError("AgentBenchFlow.RemoteDocker must be a mapping")
@@ -227,6 +230,7 @@ class AgentBenchFlowTask(Task):
                 provider_api_key_env=self.providerApiKeyEnv,
                 bench_command=self.benchCommand,
                 bench_extra_args=self.benchExtraArgs,
+                retry_attempts=self.retryAttempts,
                 remote_endpoint=(
                     str(self.remoteEndpoint) if self.remoteEndpoint is not None else None
                 ),
