@@ -49,9 +49,20 @@ BENCHFLOW_TIMEOUT_SEC = 18000
 
 def Main() -> None:
     skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
-    # task_ids =['3d-scan-calc', 'bike-rebalance', 'citation-check', 'crystallographic-wyckoff-position-analysis', 'dapt-intrusion-detection', 'dialogue-parser', 'earthquake-plate-calculation', 'econ-detrending-correlation', 'energy-ac-optimal-power-flow', 'energy-market-pricing', 'exceltable-in-ppt', 'fix-build-google-auto', 'fix-erlang-ssh-cve', 'fix-visual-stability', 'flink-query', 'flood-risk-analysis', 'glm-lake-mendota', 'gravitational-wave-detection', 'grid-dispatch-operator', 'hvac-control', 'invoice-fraud-detection', 'jax-computing-basics', 'jpg-ocr-stat', 'lab-unit-harmonization', 'lake-warming-attribution', 'latex-formula-extraction', 'lean4-proof', 'llm-prefix-cache-replay', 'manufacturing-equipment-maintenance', 'mario-coin-counting', 'offer-letter-generator', 'organize-messy-filesfix-build-agentops', 'parallel-tfidf-search', 'pddl-tpp-planning', 'pdf-excel-diff', 'powerlifting-coef-calc', 'pptx-reference-formatting', 'protein-expression-analysis', 'python-scala-translation', 'quantum-numerical-simulation', 'r2r-mpc-control', 'radar-vital-signs', 'react-performance-debugging', 'reserves-at-risk-calc', 'sales-pivot-analysis', 'sec-financial-report', 'seismic-phase-picking', 'setup-fuzzing-py', 'shock-analysis-demand', 'shock-analysis-supply', 'simpo-code-reproduction', 'software-dependency-audit', 'syzkaller-ppdev-syzlang', 'threejs-structure-parser', 'threejs-to-obj', 'tictoc-unnecessary-abort-detection', 'travel-planning', 'video-silence-remover', 'weighted-gdp-calc', 'xlsx-recover-data']
-    
-    task_ids = ['energy-ac-optimal-power-flow', 'fix-erlang-ssh-cve', 'flood-risk-analysis','gravitational-wave-detection', 'hvac-control', 'invoice-fraud-detection', 'jax-computing-basics', 'jpg-ocr-stat', 'lake-warming-attribution', 'latex-formula-extraction', 'lean4-proof', 'llm-prefix-cache-replay', 'manufacturing-equipment-maintenance', 'mario-coin-counting', 'offer-letter-generator', 'organize-messy-filesfix-build-agentops']
+    task_ids = ['ada-bathroom-plan-repair',
+        'adaptive-cruise-control',
+        'data-to-d3',
+        'dynamic-object-aware-egomotion',
+        'enterprise-information-search',
+        'exoplanet-detection-period',
+        'lab-unit-harmonization',
+        'manufacturing-codebook-normalization',
+        'sec-financial-report',
+        'setup-fuzzing-py',
+        'travel-planning',
+        'video-silence-remover',
+        'weighted-gdp-calc',
+        'xlsx-recover-data']
 
     tasks = [
         AgentBenchFlowTask(
@@ -102,7 +113,7 @@ def Main() -> None:
     sys.stdout.flush()
 
     engine = Engine(
-        availableGpuIds='auto',
+        availableGpuIds=list(range(8)),
         batchSize=batchSize,
         initializeTimeout=1800,
         taskTimeout=18000,
