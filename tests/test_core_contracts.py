@@ -4,6 +4,7 @@ from core.Config import DatasetDir, Get, LoadConfig, ModelPath
 from core.Method import Method
 from core.Metrics import AggregateStats
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from core.Task import Task
 from metrics import TTFTMetric, ThroughputMetric
 
 
@@ -15,6 +16,16 @@ class _Method(Method):
 
     def Run(self, data, retainOutput=None):
         return [Result(output=value) for value in data]
+
+
+class _Task(Task):
+    name = "stub"
+
+    def Cases(self):
+        return iter([])
+
+    def Evaluate(self, result, metadata):
+        return {}
 
 
 @pytest.mark.parametrize(
@@ -48,6 +59,17 @@ def test_method_label_and_gpu_binding_contract():
 
     method.Initialize(["2", 3])
     assert method.gpuIds == [2, 3]
+
+
+def test_task_label_contract():
+    task = _Task()
+
+    assert task.tag is None
+    assert task.Label == "stub"
+
+    tagged = _Task(tag="experiment")
+    assert tagged.tag == "experiment"
+    assert tagged.Label == "stub(experiment)"
 
 
 def test_aggregate_stats_empty_and_interpolated_percentiles():

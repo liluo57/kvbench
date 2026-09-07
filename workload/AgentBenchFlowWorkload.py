@@ -1,14 +1,16 @@
 """Small Workload bridge between a real BenchFlow rollout and KVBench."""
 
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.Config import ModelPath
-from core.Result import Result
+from core.Result import Result, TtftKey
 from core.Workload import Action, ActionKind, ActionResult, Workload
 
+from helpers.backends import ModelAdapter
 from helpers.benchflow import BenchflowRunner, RemoteBenchflowRunner
 from helpers.endpoint import OpenAIRequest
 
@@ -46,6 +48,18 @@ def _MessageText(content: Any) -> Optional[str]:
         if isinstance(text, str):
             parts.append(text)
     return "".join(parts) if parts else None
+
+
+def _CanonicalSkillDocument(document: str) -> str:
+    """Return the cacheable Skill body without file-only line endings.
+
+    ``apply_chat_template`` owns the system-message terminator and moves a
+    trailing newline outside the message, immediately before ``<|im_end|>``.
+    HYPIC matches prepared segments byte-for-byte, so retaining that terminal
+    newline makes a Skill loaded from ``SKILL.md`` fail to match its first-run
+    rendered prompt.  Newlines inside the document remain unchanged.
+    """
+    return document.rstrip("\r\n")
 
 
 def _ExtractSkillDocuments(messages: Sequence[Dict[str, Any]]) -> List[str]:
@@ -87,6 +101,56 @@ def _ExtractSkillDocuments(messages: Sequence[Dict[str, Any]]) -> List[str]:
     return documents
 
 
+def _MessageContainsDocument(
+    messages: Sequence[Dict[str, Any]], document: str
+) -> bool:
+    """Return whether a message history carries this canonical document."""
+    canonicalDocument = _CanonicalSkillDocument(document)
+    return any(
+        isinstance(message, dict)
+        and _CanonicalSkillDocument(_MessageText(message.get("content")) or "")
+        == canonicalDocument
+        for message in messages
+    )
+
+
+def _AugmentMessagesWithSkills(
+    messages: Sequence[Dict[str, Any]], documents: Sequence[str]
+) -> List[Dict[str, Any]]:
+    """Add canonical Skill bodies to the first system turn without changing the input.
+
+    Besides giving the model the Skill on turn one, canonicalizing the
+    file-only terminal newline preserves each body as an exact substring of
+    the rendered prompt, which lets interleaved KV-reuse methods match the
+    corresponding PREPARE segment.
+    """
+    augmented = copy.deepcopy(list(messages))
+    skillText = "\n\n".join(
+        canonical
+        for document in documents
+        if (canonical := _CanonicalSkillDocument(document))
+    )
+    if not skillText:
+        return augmented
+
+    for message in augmented:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            separator = "\n\n" if content else ""
+            message["content"] = content + separator + skillText
+            return augmented
+        if isinstance(content, list):
+            content.append({"type": "text", "text": "\n\n" + skillText})
+            return augmented
+        message["content"] = skillText
+        return augmented
+
+    augmented.insert(0, {"role": "system", "content": skillText})
+    return augmented
+
+
 @dataclass
 class AgentBenchFlowInput:
     """Per-case configuration passed to :class:`AgentBenchFlowWorkload`."""
@@ -101,6 +165,7 @@ class AgentBenchFlowInput:
     provider_host: str = "127.0.0.1"
     endpoint_host: str = "0.0.0.0"
     port: int = 0
+    endpoint_port_range: Optional[Tuple[int, int]] = None
     model_id: Optional[str] = None
     output_dir: Optional[str] = None
     result_json_timeout: float = 3600.0
@@ -141,15 +206,28 @@ class AgentBenchFlowWorkload(Workload):
         self._skillDocuments: List[str] = []
         self._skillDocumentSet = set()
         self._skillsPrepared = False
+        self._firstRunPromptBuilt = False
+        #: Captured from the first RUN Action's Result so the final report can
+        #: surface a per-case first-RUN TTFT, reuse ratio and prompt length.
+        #: The agent often runs many turns after the first one; the
+        #: inlined-Skill first turn is the one whose TTFT and cache hit ratio
+        #: best reflect the prepared state, and its prompt length is what makes
+        #: that reuse ratio interpretable. ``None`` until observe() has seen
+        #: that result.
+        self._firstRunObserved = False
+        self._firstRunTtft: Optional[float] = None
+        self._firstRunReuseRatio: Optional[float] = None
+        self._firstRunPromptLength: Optional[int] = None
         self._RememberSkillDocuments(self._LoadBundledSkillDocuments())
 
     def _LoadBundledSkillDocuments(self) -> List[str]:
         """Load local task skills so they can be prepared before turn one.
 
-        Local runs have the exact SkillsBench source tree that BenchFlow
-        uploads into the sandbox.  Preparing these files up front avoids one
-        prepare/reset cycle per Skill as the agent progressively reads them.
-        Dataset-mode runs do not expose that tree here and use the request
+        A supplied SkillsBench checkout has the exact source tree that
+        BenchFlow uses for local runs (and that dataset-mode configurations
+        may retain for task enumeration). Preparing these files up front
+        avoids one prepare/reset cycle per Skill as the agent progressively
+        reads them. Without a checkout, dataset-mode runs use the request
         history fallback in :meth:`next` instead.
         """
         if self._data.skill_mode != "with-skill" or not self._data.skillsbench_dir:
@@ -169,6 +247,7 @@ class AgentBenchFlowWorkload(Workload):
                 content = skillPath.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
                 continue
+            content = _CanonicalSkillDocument(content)
             if content:
                 documents.append(content)
         return documents
@@ -177,6 +256,7 @@ class AgentBenchFlowWorkload(Workload):
         """Add unseen Skill bodies and return the newly observed ones."""
         newDocuments: List[str] = []
         for document in documents:
+            document = _CanonicalSkillDocument(document)
             if not document or document in self._skillDocumentSet:
                 continue
             self._skillDocumentSet.add(document)
@@ -185,13 +265,46 @@ class AgentBenchFlowWorkload(Workload):
         return newDocuments
 
     def _RunAction(self, request: OpenAIRequest) -> Action:
+        prompt = request.prompt
+        if not self._firstRunPromptBuilt:
+            self._firstRunPromptBuilt = True
+            prompt = self._BuildFirstRunPrompt(request)
         return Action(
             kind=ActionKind.RUN,
             case_id=self.case_id,
-            data=request.prompt,
+            data=prompt,
             tag="agent_turn",
-            retainOutput=True,
+            retainOutput=False,
         )
+
+    def _BuildFirstRunPrompt(self, request: OpenAIRequest) -> str:
+        """Return the initial provider prompt with bundled Skills included."""
+        if self._data.skill_mode != "with-skill" or not self._skillDocuments:
+            return request.prompt
+
+        documents = [
+            document
+            for document in self._skillDocuments
+            if not _MessageContainsDocument(request.messages, document)
+        ]
+        if not documents:
+            return request.prompt
+
+        augmentedMessages = _AugmentMessagesWithSkills(
+            request.messages, documents
+        )
+        if request.modelPath:
+            return ModelAdapter.render_chat(
+                augmentedMessages,
+                modelPath=request.modelPath,
+                tools=request.tools,
+                thinking=request.thinking,
+            )
+
+        # Directly-created fake requests do not carry endpoint rendering
+        # metadata. Keep those runners usable while retaining the same exact
+        # document substring expected by the reuse methods.
+        return "\n\n".join(documents) + "\n\n" + request.prompt
 
     def next(self) -> Optional[List[Action]]:
         if self._finished:
@@ -218,6 +331,7 @@ class AgentBenchFlowWorkload(Workload):
                     providerHost=self._data.provider_host,
                     endpointHost=self._data.endpoint_host,
                     port=self._data.port,
+                    portRange=self._data.endpoint_port_range,
                     modelId=self._data.model_id,
                     jobsDir=self._data.output_dir,
                     resultJsonTimeout=self._data.result_json_timeout,
@@ -302,6 +416,22 @@ class AgentBenchFlowWorkload(Workload):
             raise RuntimeError("AgentBenchFlowWorkload has an invalid pending action")
         result = results[0].result
         self._lastResult = result
+        if not self._firstRunObserved:
+            # Capture the agent's first inference result so the task can
+            # report first-RUN TTFT, reuse ratio and prompt length. The first
+            # RUN carries the inlined Skill documents, so its TTFT and cache
+            # hit ratio are the most representative single observation per
+            # case, and its input token count is the scale they apply to.
+            self._firstRunObserved = True
+            ttftValue = result.performance.get(TtftKey)
+            if ttftValue is not None:
+                self._firstRunTtft = float(ttftValue)
+            reuseValue = result.metadata.get("reuse_ratio")
+            if reuseValue is not None:
+                self._firstRunReuseRatio = float(reuseValue)
+            promptLength = result.metadata.get("n_input")
+            if promptLength is not None:
+                self._firstRunPromptLength = int(promptLength)
         request = self._pending
         self._pending = None
         self._pendingKind = None
@@ -355,6 +485,8 @@ class AgentBenchFlowWorkload(Workload):
         self._pending = None
         self._pendingKind = None
         self._pendingActionSent = False
+        self._firstRunPromptBuilt = True
+        self._AttachFirstRunStats(metadata)
         self._finalResult = Result(
             output={"reward": 0.0, "error": message},
             performance={},
@@ -371,7 +503,27 @@ class AgentBenchFlowWorkload(Workload):
             # The monitor has already collected BenchFlow's result. Close the
             # listening endpoint before the case is handed to Task.Evaluate.
             self._runner.stop()
+        self._AttachFirstRunStats(metadata)
         return Result(output=payload, performance={}, metadata=metadata)
+
+    def _AttachFirstRunStats(self, metadata: Dict[str, Any]) -> None:
+        """Surface the captured first-RUN statistics on ``metadata``.
+
+        Only writes keys that were actually observed. A case that fails before
+        its first inference result returns to the workload leaves the
+        attributes at ``None`` and contributes no entry, so the per-case
+        mean in the report simply excludes it. The same holds per key: a
+        Method that does not report ``n_input`` omits the prompt length while
+        still contributing its TTFT and reuse ratio.
+        """
+        if not self._firstRunObserved:
+            return
+        if self._firstRunTtft is not None:
+            metadata["first_run_ttft"] = self._firstRunTtft
+        if self._firstRunReuseRatio is not None:
+            metadata["first_run_reuse_ratio"] = self._firstRunReuseRatio
+        if self._firstRunPromptLength is not None:
+            metadata["first_run_prompt_length"] = self._firstRunPromptLength
 
     def close(self) -> None:
         if self._runner is not None:

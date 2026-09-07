@@ -8,7 +8,7 @@ import subprocess
 import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Optional
 
 from core.Config import DatasetDir
 from core.Result import Result
@@ -100,7 +100,8 @@ def _cycle(names, count, template):
 
 class KVCommMMLUTask(Task):
     name = "kvcomm_mmlu"
-    def __init__(self, maxSamples=None, agentCount=5):
+    def __init__(self, maxSamples=None, agentCount=5, tag: Optional[str] = None):
+        super().__init__(tag=tag)
         self.maxSamples, self.agentCount = maxSamples, agentCount
         self._rows = None
     def Cases(self) -> Iterator[Case]:
@@ -125,7 +126,10 @@ class KVCommMMLUTask(Task):
 
 class KVCommGSM8KTask(Task):
     name = "kvcomm_gsm8k"
-    def __init__(self, maxSamples=None, agentCount=3): self.maxSamples, self.agentCount = maxSamples, agentCount; self._rows = None
+    def __init__(self, maxSamples=None, agentCount=3, tag: Optional[str] = None):
+        super().__init__(tag=tag)
+        self.maxSamples, self.agentCount = maxSamples, agentCount
+        self._rows = None
     def Cases(self):
         if self._rows is None:
             root = DatasetDir("gsm8k")
@@ -149,7 +153,10 @@ class KVCommGSM8KTask(Task):
 
 class KVCommHumanEvalTask(Task):
     name = "kvcomm_humaneval"
-    def __init__(self, maxSamples=None, agentCount=5): self.maxSamples, self.agentCount = maxSamples, agentCount; self._rows = None
+    def __init__(self, maxSamples=None, agentCount=5, tag: Optional[str] = None):
+        super().__init__(tag=tag)
+        self.maxSamples, self.agentCount = maxSamples, agentCount
+        self._rows = None
     def Cases(self):
         if self._rows is None:
             rows = []
@@ -179,7 +186,9 @@ class KVCommHumanEvalTask(Task):
 
 class KVCommCopyTask(Task):
     name = "kvcomm_copy"
-    def __init__(self, nCases=100, agentCount=5, seed=42): self.nCases, self.agentCount, self.seed = nCases, agentCount, seed
+    def __init__(self, nCases=100, agentCount=5, seed=42, tag: Optional[str] = None):
+        super().__init__(tag=tag)
+        self.nCases, self.agentCount, self.seed = nCases, agentCount, seed
     def Cases(self):
         rng = random.Random(self.seed)
         specs = [AgentSpec("Copy Machine", " Ω" * 512 + "\nRandomly output Ω or Δ 512 times.\n\n{task}") for _ in range(self.agentCount)]

@@ -23,7 +23,9 @@ from methods import (
     CacheblendRepo,
     FullPrefillVllm,
     FullPrefillTransformer,
+    HypicMethod,
     NaiveTransformer,
+    Qwen38TestMethod
 )
 from tasks import (
     AgentBenchFlowTask,
@@ -45,26 +47,56 @@ MAX_NEW_TOKENS=512
 
 
 def Main() -> None:
+    skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
+    task_ids = ['ada-bathroom-plan-repair',
+        'adaptive-cruise-control',
+        'data-to-d3',
+        'dynamic-object-aware-egomotion',
+        'enterprise-information-search',
+        'exoplanet-detection-period',
+        'lab-unit-harmonization',
+        'manufacturing-codebook-normalization',
+        'sec-financial-report',
+        'setup-fuzzing-py',
+        'travel-planning',
+        'video-silence-remover',
+        'weighted-gdp-calc',
+        'xlsx-recover-data']
 
     tasks = [
-        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        VTShuffleTask(maxSamples=MAX_SAMPLES),
-        MusiqueTask(maxSamples=MAX_SAMPLES),
-        SamsumTask(maxSamples=MAX_SAMPLES),
-        WikimQATask(maxSamples=MAX_SAMPLES),
-        FreshGapTask(nCases=MAX_SAMPLES),
-        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
-        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
-        KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+        AgentBenchFlowTask(
+            source_mode="local",
+            skillsbench_dir=skillsbench_root,
+            task_ids=[task_id],
+            agent="pi-acp",
+            skill_mode="with-skill",
+            thinking=True,
+            result_json_timeout=BENCHFLOW_TIMEOUT_SEC,
+            bench_extra_args=[
+                "--agent-idle-timeout", str(BENCHFLOW_TIMEOUT_SEC),
+                "--config-override",
+                '{"agent":{"timeout_sec":18000}}',
+                "--agent-env", "REQUEST_TIMEOUT=18000",
+            ],
+            tag=task_id
+        )
+        for task_id in task_ids
     ]
 
     methods = [
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
-        FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
-        NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
+        # HypicMethod(
+        #     maxNewTokens=40960,
+        #     maxModelLen=256000,
+        #     memFractionStatic=0.80,
+        #     picMode="addition",
+        # ),
+        HypicMethod(
+            maxNewTokens=40960,
+            maxModelLen=256000,
+            memFractionStatic=0.80,
+            fullPrefill=True,
+            tag="full_prefill",
+        )
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
@@ -73,14 +105,14 @@ def Main() -> None:
 
     print(
         f"[main] model={ModelPath()}\n"
-        f"[main] tasks={[t.name for t in tasks]} "
+        f"[main] tasks={[t.Label for t in tasks]} "
         f"methods={[(m.Label, m.gpuNums, m.perfWeight) for m in methods]} "
         f"batchSize={batchSize}"
     )
     sys.stdout.flush()
 
     engine = Engine(
-        availableGpuIds='auto',
+        availableGpuIds=list(range(8)),
         batchSize=batchSize,
         initializeTimeout=600,
         taskTimeout=18000,
