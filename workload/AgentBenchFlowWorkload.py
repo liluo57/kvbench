@@ -181,6 +181,10 @@ class AgentBenchFlowInput:
     #: Number of BenchFlow task retries after the initial attempt. Zero means
     #: that BenchFlow runs each selected task exactly once.
     retry_attempts: int = 0
+    #: Stop the external rollout after the first completed model RUN. This is
+    #: useful for collecting first-RUN system metrics without running the
+    #: rest of the agent trajectory.
+    first_run_only: bool = False
     remote_endpoint: Optional[str] = None
     remote_advertise_host: Optional[str] = None
     remote_auth_token_env: str = "KVBENCH_REMOTE_TOKEN"
@@ -458,6 +462,17 @@ class AgentBenchFlowWorkload(Workload):
             promptLength = result.metadata.get("n_input")
             if promptLength is not None:
                 self._firstRunPromptLength = int(promptLength)
+        if self._data.first_run_only:
+            # The first RUN result has already been recorded by Worker for
+            # system metrics. Do not send it back to BenchFlow: doing so would
+            # allow the agent to issue another provider request. Closing the
+            # runner here also releases the in-flight provider request.
+            self._pending = None
+            self._pendingKind = None
+            self._pendingActionSent = False
+            self._finalResult = self._BuildFinalResult()
+            self._finished = True
+            return
         request = self._pending
         self._pending = None
         self._pendingKind = None

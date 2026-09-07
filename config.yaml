@@ -56,9 +56,10 @@ Cacheblend:
 
 # SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:
-  # Dataset mode is the reproducible path. SkillsBenchRepo is needed for local
-  # source runs and is not used to select task ids.
-  SourceMode: dataset
+  # Upload the selected task from this checkout to the remote Docker server.
+  # This is the source mode used by the pre-refactor remote-docker runs and
+  # avoids resolving the dataset through the remote GitHub registry.
+  SourceMode: local
   Dataset: skillsbench@1.1
   SkillsBenchRepo: /root/skillsbench
 

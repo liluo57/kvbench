@@ -429,6 +429,7 @@ class _FakeRunner:
             "error": "",
         }
         self.started = False
+        self.stopped = False
 
     def start(self):
         self.started = True
@@ -444,7 +445,7 @@ class _FakeRunner:
         return {"official_result_path": "/jobs/result.json", "benchflow_error": None}
 
     def stop(self):
-        pass
+        self.stopped = True
 
 
 class _FailingRunner(_FakeRunner):
@@ -755,7 +756,7 @@ def test_task_loads_benchflow_configuration_and_keeps_task_tag(
         "Get",
         lambda key, default=None: config if key == "AgentBenchFlow" else default,
     )
-    task = AgentBenchFlowTask("citation-check")
+    task = AgentBenchFlowTask("citation-check", firstRunOnly=True)
     case = next(iter(task.Cases()))
     assert case.metadata["task_id"] == "citation-check"
     assert task.Label == "agent_benchflow(citation-check)"
@@ -764,6 +765,7 @@ def test_task_loads_benchflow_configuration_and_keeps_task_tag(
     assert case.input.source_mode == "local"
     assert case.input.provider_host == "host.docker.internal"
     assert case.input.retry_attempts == 2
+    assert case.input.first_run_only is True
 
 
 def test_task_selects_remote_runtime_without_local_docker_validation(
@@ -860,6 +862,42 @@ def test_workload_captures_first_run_stats_only_once():
     assert final.metadata["first_run_ttft"] == pytest.approx(0.42)
     assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
     assert final.metadata["first_run_prompt_length"] == 12000
+
+
+def test_workload_first_run_only_stops_after_first_run():
+    first = _request("first rendered prompt")
+    second = _request("second rendered prompt")
+    runner = _FakeRunner([first, second])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(
+            task_id="citation-check",
+            first_run_only=True,
+        ),
+        runner=runner,
+    )
+
+    workload.next()
+    workload.observe(
+        [
+            ActionResult(
+                3,
+                Result(
+                    output="first output",
+                    performance={TtftKey: 0.42},
+                    metadata={"reuse_ratio": 0.85, "n_input": 12000},
+                ),
+            )
+        ]
+    )
+
+    assert workload.finished
+    assert workload.next() is None
+    assert runner.responses == []
+    assert runner.stopped
+    assert workload.final_result.metadata["first_run_ttft"] == pytest.approx(0.42)
+    assert workload.final_result.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
+    assert workload.final_result.metadata["first_run_prompt_length"] == 12000
 
 
 def test_workload_first_run_prompt_length_is_absent_without_n_input():

@@ -35,31 +35,50 @@ from tasks import (
 
 
 def Main() -> None:
-    taskIds = [
-        "ada-bathroom-plan-repair",
-        "adaptive-cruise-control",
-        "data-to-d3",
-        "dynamic-object-aware-egomotion",
-        "enterprise-information-search",
-        "exoplanet-detection-period",
-        "lab-unit-harmonization",
-        "manufacturing-codebook-normalization",
-        "sec-financial-report",
-        "setup-fuzzing-py",
-        "travel-planning",
-        "video-silence-remover",
-        "weighted-gdp-calc",
-        "xlsx-recover-data",
-    ]
-    tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
+    taskIds =['azure-bgp-oscillation-route-leak',
+ 'debug-trl-grpo',
+ 'earthquake-phase-association',
+ 'edit-pdf',
+ 'energy-unit-commitment',
+ 'exam-block-sequencing',
+ 'financial-modeling-qa',
+ 'grid-dispatch-operator',
+ 'manufacturing-fjsp-optimization',
+ 'mars-clouds-clustering',
+ 'paper-anonymizer',
+ 'parallel-tfidf-search',
+ 'paratransit-routing',
+ 'pddl-tpp-planning',
+ 'pdf-excel-diff',
+ 'powerlifting-coef-calc',
+ 'pptx-reference-formatting',
+ 'protein-expression-analysis',
+ 'python-scala-translation',
+ 'quantum-numerical-simulation',
+ 'r2r-mpc-control',
+ 'radar-vital-signs',
+ 'react-performance-debugging',
+ 'reserves-at-risk-calc',
+ 'sales-pivot-analysis',
+ 'seismic-phase-picking',
+ 'shock-analysis-demand',
+ 'shock-analysis-supply',
+ 'simpo-code-reproduction',
+ 'software-dependency-audit',
+ 'syzkaller-ppdev-syzlang',
+ 'threejs-structure-parser',
+ 'threejs-to-obj',
+ 'tictoc-unnecessary-abort-detection']
+
+    tasks = [AgentBenchFlowTask(taskId, firstRunOnly=False) for taskId in taskIds]
 
     methods = [
-        # HypicMethod(
-        #     maxNewTokens=40960,
-        #     maxModelLen=256000,
-        #     memFractionStatic=0.80,
-        #     picMode="addition",
-        # ),
+        HypicMethod(
+            maxNewTokens=40960,
+            maxModelLen=256000,
+            memFractionStatic=0.80,
+            picMode="addition",
+        ),
         HypicMethod(
             maxNewTokens=40960,
             maxModelLen=256000,
