@@ -50,6 +50,18 @@ def _MessageText(content: Any) -> Optional[str]:
     return "".join(parts) if parts else None
 
 
+def _CanonicalSkillDocument(document: str) -> str:
+    """Return the cacheable Skill body without file-only line endings.
+
+    ``apply_chat_template`` owns the system-message terminator and moves a
+    trailing newline outside the message, immediately before ``<|im_end|>``.
+    HYPIC matches prepared segments byte-for-byte, so retaining that terminal
+    newline makes a Skill loaded from ``SKILL.md`` fail to match its first-run
+    rendered prompt.  Newlines inside the document remain unchanged.
+    """
+    return document.rstrip("\r\n")
+
+
 def _ExtractSkillDocuments(messages: Sequence[Dict[str, Any]]) -> List[str]:
     """Extract only Skill document bodies from a provider message history.
 
@@ -92,10 +104,12 @@ def _ExtractSkillDocuments(messages: Sequence[Dict[str, Any]]) -> List[str]:
 def _MessageContainsDocument(
     messages: Sequence[Dict[str, Any]], document: str
 ) -> bool:
-    """Return whether a message history already carries this exact document."""
+    """Return whether a message history carries this canonical document."""
+    canonicalDocument = _CanonicalSkillDocument(document)
     return any(
         isinstance(message, dict)
-        and _MessageText(message.get("content")) == document
+        and _CanonicalSkillDocument(_MessageText(message.get("content")) or "")
+        == canonicalDocument
         for message in messages
     )
 
@@ -103,15 +117,19 @@ def _MessageContainsDocument(
 def _AugmentMessagesWithSkills(
     messages: Sequence[Dict[str, Any]], documents: Sequence[str]
 ) -> List[Dict[str, Any]]:
-    """Add Skill bodies to the first system turn without changing the input.
+    """Add canonical Skill bodies to the first system turn without changing the input.
 
-    The bodies are kept verbatim inside the system content.  Besides giving
-    the model the Skill on turn one, this preserves each body as an exact
-    substring of the rendered prompt, which lets interleaved KV-reuse methods
-    match the corresponding PREPARE segment.
+    Besides giving the model the Skill on turn one, canonicalizing the
+    file-only terminal newline preserves each body as an exact substring of
+    the rendered prompt, which lets interleaved KV-reuse methods match the
+    corresponding PREPARE segment.
     """
     augmented = copy.deepcopy(list(messages))
-    skillText = "\n\n".join(document for document in documents if document)
+    skillText = "\n\n".join(
+        canonical
+        for document in documents
+        if (canonical := _CanonicalSkillDocument(document))
+    )
     if not skillText:
         return augmented
 
@@ -229,6 +247,7 @@ class AgentBenchFlowWorkload(Workload):
                 content = skillPath.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
                 continue
+            content = _CanonicalSkillDocument(content)
             if content:
                 documents.append(content)
         return documents
@@ -237,6 +256,7 @@ class AgentBenchFlowWorkload(Workload):
         """Add unseen Skill bodies and return the newly observed ones."""
         newDocuments: List[str] = []
         for document in documents:
+            document = _CanonicalSkillDocument(document)
             if not document or document in self._skillDocumentSet:
                 continue
             self._skillDocumentSet.add(document)

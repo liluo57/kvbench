@@ -11,12 +11,14 @@ import pytest
 from core.Result import Result, TtftKey
 from core.Workload import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
+from helpers.backends.Prompt import ComposeInterleavedReuse
 from helpers.benchflow import BenchflowRunner
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
 from workload.AgentBenchFlowWorkload import (
     AgentBenchFlowInput,
     AgentBenchFlowWorkload,
+    _CanonicalSkillDocument,
     _ExtractSkillDocuments,
 )
 
@@ -542,7 +544,7 @@ def test_workload_prepares_only_skill_documents_before_the_original_run_prompt()
 
     prepare = workload.next()[0]
     assert prepare.kind == ActionKind.PREPARE
-    assert prepare.data == [skill]
+    assert prepare.data == [_CanonicalSkillDocument(skill)]
     assert "available skills" not in prepare.data[0]
     assert "TASK:" not in prepare.data[0]
 
@@ -586,11 +588,11 @@ def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
 
     prepare = workload.next()[0]
     assert prepare.kind == ActionKind.PREPARE
-    assert prepare.data == [skill]
+    assert prepare.data == [_CanonicalSkillDocument(skill)]
     workload.observe([ActionResult(3, Result())])
     run = workload.next()[0]
     assert run.kind == ActionKind.RUN
-    assert skill in run.data
+    assert _CanonicalSkillDocument(skill) in run.data
     assert run.data.endswith("rendered prompt without a skill tool result")
 
 
@@ -636,9 +638,56 @@ def test_first_run_skill_injection_uses_chat_template_when_request_has_metadata(
     run = workload.next()[0]
 
     assert run.data.startswith("rendered with")
-    assert skill in renderCalls[0][0][0]["content"]
+    assert _CanonicalSkillDocument(skill) in renderCalls[0][0][0]["content"]
     assert renderCalls[0][1:] == ("/models/test", None, True)
     assert "original rendered prompt" not in run.data
+
+
+def test_first_run_skill_segment_matches_after_chat_template_moves_terminal_newline(
+    monkeypatch, tmp_path
+):
+    skillPath = (
+        tmp_path
+        / "tasks"
+        / "demo-task"
+        / "environment"
+        / "skills"
+        / "demo"
+        / "SKILL.md"
+    )
+    skillPath.parent.mkdir(parents=True)
+    skill = "---\nname: demo\n---\n\nUse the skill.\n"
+    canonicalSkill = _CanonicalSkillDocument(skill)
+    skillPath.write_text(skill, encoding="utf-8")
+
+    def render(messages, *, modelPath, tools=None, thinking=None):
+        systemContent = messages[0]["content"].rstrip("\r\n")
+        # Match the relevant Qwen chat-template boundary: the final newline
+        # belongs after the system message terminator, not inside its content.
+        return systemContent + "<|im_end|>\n<|im_start|>user\noriginal prompt"
+
+    monkeypatch.setattr(ModelAdapter, "render_chat", render)
+    request = _request("original prompt")
+    request.modelPath = "/models/test"
+    runner = _FakeRunner([request])
+    workload = AgentBenchFlowWorkload(
+        case_id=3,
+        data=AgentBenchFlowInput(
+            task_id="demo-task",
+            source_mode="local",
+            skillsbench_dir=str(tmp_path),
+        ),
+        runner=runner,
+    )
+
+    prepare = workload.next()[0]
+    assert prepare.data == [canonicalSkill]
+    workload.observe([ActionResult(3, Result())])
+    run = workload.next()[0]
+
+    assert (0, canonicalSkill) in ComposeInterleavedReuse(
+        prepare.data, run.data
+    )
 
 
 def test_workload_converts_runner_failure_to_zero_score():
