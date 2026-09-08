@@ -1,7 +1,7 @@
 """Cross-cutting helpers grouped by concern.
 
 This package is a deliberate ``helpers/`` catch-all: it is the only place
-outside :mod:`core` that tasks, methods, and workloads depend on. Three
+outside :mod:`core` that tasks, methods, and workflows depend on. Three
 loosely-coupled subsystems live here today:
 
 1. **Backend adapters** — talk to model runtimes.

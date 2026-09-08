@@ -4,7 +4,7 @@ import pytest
 
 from core.Config import ModelPath as _ModelPath
 from core.Result import Result
-from core.Workload import ActionKind, ActionResult
+from core.Workflow import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
 from tasks.bases.KBBase import (
     NormalizeAnswer,
@@ -21,12 +21,12 @@ from tasks.bases.RulerBase import (
     _LengthFromName,
     _findNeedleSentence,
 )
-from workload import (
+from workflow import (
     AgentSpec,
     MultiAgentFullConnectionInput,
-    MultiAgentFullConnectionWorkload,
+    MultiAgentFullConnectionWorkflow,
     RAGInput,
-    RAGWorkload,
+    RAGWorkflow,
 )
 
 
@@ -40,53 +40,53 @@ def modelPath():
     return _ModelPath()
 
 
-def test_rag_workload_prepare_run_and_final_result():
-    workload = RAGWorkload(7, RAGInput(["a", "b"], "prompt"))
+def test_rag_workflow_prepare_run_and_final_result():
+    workflow = RAGWorkflow(7, RAGInput(["a", "b"], "prompt"))
 
-    prepare = workload.next()[0]
+    prepare = workflow.next()[0]
     assert prepare.kind == ActionKind.PREPARE
     assert prepare.case_id == 7
     assert prepare.data == ["a", "b"]
-    workload.observe([ActionResult(7, Result(), prepare.tag)])
-    assert workload.final_result is None
+    workflow.observe([ActionResult(7, Result(), prepare.tag)])
+    assert workflow.final_result is None
 
-    run = workload.next()[0]
+    run = workflow.next()[0]
     assert run.kind == ActionKind.RUN
     assert run.data == "prompt"
     assert not run.retainOutput
-    workload.observe([ActionResult(7, Result(output="answer"), run.tag)])
+    workflow.observe([ActionResult(7, Result(output="answer"), run.tag)])
 
-    assert workload.finished
-    assert workload.next() is None
-    assert workload.final_result.output == "answer"
-
-
-def test_rag_workload_skips_empty_prepare():
-    workload = RAGWorkload(1, RAGInput([], "prompt"))
-
-    assert workload.next()[0].kind == ActionKind.RUN
+    assert workflow.finished
+    assert workflow.next() is None
+    assert workflow.final_result.output == "answer"
 
 
-def test_rag_workload_keeps_a_final_result_with_none_output():
-    workload = RAGWorkload(1, RAGInput([], "prompt"))
-    run = workload.next()[0]
+def test_rag_workflow_skips_empty_prepare():
+    workflow = RAGWorkflow(1, RAGInput([], "prompt"))
+
+    assert workflow.next()[0].kind == ActionKind.RUN
+
+
+def test_rag_workflow_keeps_a_final_result_with_none_output():
+    workflow = RAGWorkflow(1, RAGInput([], "prompt"))
+    run = workflow.next()[0]
     result = Result(output=None, metadata={"diagnostic": True})
 
-    workload.observe([ActionResult(1, result, run.tag)])
+    workflow.observe([ActionResult(1, result, run.tag)])
 
-    assert workload.final_result is result
+    assert workflow.final_result is result
 
 
-def test_rag_workload_observe_requires_one_result():
-    workload = RAGWorkload(1, RAGInput([], "prompt"))
-    workload.next()
+def test_rag_workflow_observe_requires_one_result():
+    workflow = RAGWorkflow(1, RAGInput([], "prompt"))
+    workflow.next()
 
     with pytest.raises(ValueError, match="exactly one"):
-        workload.observe([])
+        workflow.observe([])
 
 
 def test_multiagent_plain_prompts_without_shared_prepare():
-    workload = MultiAgentFullConnectionWorkload(
+    workflow = MultiAgentFullConnectionWorkflow(
         3,
         MultiAgentFullConnectionInput(
             task="TASK",
@@ -96,36 +96,36 @@ def test_multiagent_plain_prompts_without_shared_prepare():
         ),
     )
 
-    first = workload.next()[0]
+    first = workflow.next()[0]
     assert first.kind == ActionKind.RUN
     assert first.data == "A says TASK"
     assert first.retainOutput
-    workload.observe([ActionResult(3, Result(output="first answer"), first.tag)])
+    workflow.observe([ActionResult(3, Result(output="first answer"), first.tag)])
 
-    second = workload.next()[0]
+    second = workflow.next()[0]
     assert second.kind == ActionKind.RUN
     assert second.data.startswith("B says TASK")
     assert "Agent 0, role is A" in second.data
     assert "first answer" in second.data
     assert not second.retainOutput
-    workload.observe([ActionResult(3, Result(output="final answer"), second.tag)])
+    workflow.observe([ActionResult(3, Result(output="final answer"), second.tag)])
 
-    assert workload.finished
-    assert workload.final_result.output == "final answer"
+    assert workflow.finished
+    assert workflow.final_result.output == "final answer"
 
 
 def test_multiagent_observe_requires_one_result():
-    workload = MultiAgentFullConnectionWorkload(
+    workflow = MultiAgentFullConnectionWorkflow(
         1,
         MultiAgentFullConnectionInput(
             "task", [AgentSpec("A", "{task}")],
             modelPath=_ModelPath(),
         ),
     )
-    workload.next()
+    workflow.next()
 
     with pytest.raises(ValueError, match="exactly one"):
-        workload.observe([])
+        workflow.observe([])
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,6 @@
 """Shared machinery for the knowledge-base tasks (musique / wikimqa / samsum).
 
-These are the knowledge-base workloads the original CacheBlend repo evaluates
+These are the knowledge-base workflows the original CacheBlend repo evaluates
 on (``example/blend_musique.py``, ``blend_wikimqa.py``, ``blend_samsum.py``).
 The KVBench tasks reuse the same data and prompt layout, but the tasks
 themselves are independent of the CacheBlend method. Each resolves its data by
@@ -20,7 +20,7 @@ Data shape (the original ``inputs/*.json``):
 Case payload contract (consumed by every Method)
 -------------------------------------------------
 ``input = RAGInput(prepare_input=chunks, run_input=fullPrompt)``
-``workload = RAGWorkload`` (Prepare → Run)
+``workflow = RAGWorkflow`` (Prepare → Run)
 ``metadata`` = ``{"answers", "question", "n_chunks", ...}``
 
 The ``suffix`` (the fresh question fused against the cached knowledge base) is
@@ -41,7 +41,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from core.Config import DatasetDir, ModelPath
 from core.Result import Result
 from core.Task import Case, Task
-from workload.RAGWorkload import RAGInput, RAGWorkload
+from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
 from helpers.backends.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
@@ -204,7 +204,7 @@ class KBBase(Task):
             )
             yield Case(
                 input=RAGInput(prepare_input=chunks, run_input=fullPrompt),
-                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=chunks, run_input=fullPrompt)),
+                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=chunks, run_input=fullPrompt)),
                 metadata={
                     "case_id": i,
                     "question": s.get("question"),

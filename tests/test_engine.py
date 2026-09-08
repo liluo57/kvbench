@@ -24,7 +24,7 @@ from methods import (
     FullPrefillVllm,
     NaiveTransformer,
 )
-from workload.RAGWorkload import RAGInput, RAGWorkload
+from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
 
 class FakeTask(Task):
@@ -34,7 +34,7 @@ class FakeTask(Task):
 
     def Cases(self):
         data = RAGInput(prepare_input=[], run_input=self.prompt)
-        yield Case(data, RAGWorkload(0, data), {"expected": self.prompt})
+        yield Case(data, RAGWorkflow(0, data), {"expected": self.prompt})
 
     def Evaluate(self, result, metadata):
         return {"accuracy": float(result.output == metadata["expected"])}
@@ -50,7 +50,7 @@ class FakeMultiCaseTask(Task):
         for caseId in range(self.count):
             prompt = f"case-{caseId}"
             data = RAGInput(prepare_input=[], run_input=prompt)
-            yield Case(data, RAGWorkload(caseId, data), {"expected": prompt})
+            yield Case(data, RAGWorkflow(caseId, data), {"expected": prompt})
 
     def Evaluate(self, result, metadata):
         return {"accuracy": float(result.output == metadata["expected"])}

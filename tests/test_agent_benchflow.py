@@ -9,16 +9,16 @@ from http.client import HTTPConnection
 import pytest
 
 from core.Result import Result, TtftKey
-from core.Workload import ActionKind, ActionResult
+from core.Workflow import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
 from helpers.backends.Prompt import ComposeInterleavedReuse
 from helpers.benchflow import BenchflowRunner
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
-from workload.AgentBenchFlowWorkload import (
+from workflow.AgentBenchFlowWorkflow import (
     AgentBenchFlowInput,
     AgentBenchFlowPreRunError,
-    AgentBenchFlowWorkload,
+    AgentBenchFlowWorkflow,
     _CanonicalSkillDocument,
     _ExtractSkillDocuments,
 )
@@ -504,27 +504,27 @@ def _skill_messages(skill_path, content, call_id="skill-call"):
     ]
 
 
-def test_workload_bridges_multiple_turns_and_retains_output():
+def test_workflow_bridges_multiple_turns_and_retains_output():
     first = _request("first rendered prompt")
     second = _request("second rendered prompt")
     runner = _FakeRunner([first, second])
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(task_id="citation-check"),
         runner=runner,
     )
-    action = workload.next()[0]
+    action = workflow.next()[0]
     assert runner.started
     assert action.kind.value == "run"
     assert action.data == "first rendered prompt"
     assert action.retainOutput is False
-    workload.observe([ActionResult(3, Result(output="first output"))])
+    workflow.observe([ActionResult(3, Result(output="first output"))])
     assert runner.responses == [(first, "first output")]
-    assert workload.next()[0].data == "second rendered prompt"
-    workload.observe([ActionResult(3, Result(output="second output"))])
-    assert workload.next() is None
-    assert workload.finished
-    assert workload.final_result.output["rewards"]["reward"] == 0.75
+    assert workflow.next()[0].data == "second rendered prompt"
+    workflow.observe([ActionResult(3, Result(output="second output"))])
+    assert workflow.next() is None
+    assert workflow.finished
+    assert workflow.final_result.output["rewards"]["reward"] == 0.75
 
 
 def test_skill_document_extraction_excludes_system_task_and_other_tool_output():
@@ -557,7 +557,7 @@ def test_skill_document_extraction_excludes_system_task_and_other_tool_output():
     assert _ExtractSkillDocuments(messages) == [skill]
 
 
-def test_workload_prepares_only_skill_documents_before_the_original_run_prompt():
+def test_workflow_prepares_only_skill_documents_before_the_original_run_prompt():
     skill = "---\nname: demo-skill\n---\n\nUse the skill.\n"
     first = _request("first rendered prompt")
     second = _request(
@@ -565,27 +565,27 @@ def test_workload_prepares_only_skill_documents_before_the_original_run_prompt()
         _skill_messages("/home/agent/.pi/agent/skills/demo/SKILL.md", skill),
     )
     runner = _FakeRunner([first, second])
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(task_id="citation-check"),
         runner=runner,
     )
 
-    firstAction = workload.next()[0]
+    firstAction = workflow.next()[0]
     assert firstAction.kind.value == "run"
-    workload.observe([ActionResult(3, Result(output="first output"))])
+    workflow.observe([ActionResult(3, Result(output="first output"))])
 
-    prepare = workload.next()[0]
+    prepare = workflow.next()[0]
     assert prepare.kind == ActionKind.PREPARE
     assert prepare.data == [_CanonicalSkillDocument(skill)]
     assert "available skills" not in prepare.data[0]
     assert "TASK:" not in prepare.data[0]
 
-    workload.observe([ActionResult(3, Result())])
-    secondAction = workload.next()[0]
+    workflow.observe([ActionResult(3, Result())])
+    secondAction = workflow.next()[0]
     assert secondAction.kind == ActionKind.RUN
     assert secondAction.data == "second rendered prompt"
-    workload.observe([ActionResult(3, Result(output="second output"))])
+    workflow.observe([ActionResult(3, Result(output="second output"))])
 
     assert runner.responses == [
         (first, "first output"),
@@ -609,7 +609,7 @@ def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
 
     request = _request("rendered prompt without a skill tool result")
     runner = _FakeRunner([request])
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(
             task_id="demo-task",
@@ -619,11 +619,11 @@ def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
         runner=runner,
     )
 
-    prepare = workload.next()[0]
+    prepare = workflow.next()[0]
     assert prepare.kind == ActionKind.PREPARE
     assert prepare.data == [_CanonicalSkillDocument(skill)]
-    workload.observe([ActionResult(3, Result())])
-    run = workload.next()[0]
+    workflow.observe([ActionResult(3, Result())])
+    run = workflow.next()[0]
     assert run.kind == ActionKind.RUN
     assert _CanonicalSkillDocument(skill) in run.data
     assert run.data.endswith("rendered prompt without a skill tool result")
@@ -656,7 +656,7 @@ def test_first_run_skill_injection_uses_chat_template_when_request_has_metadata(
     request.modelPath = "/models/test"
     request.thinking = True
     runner = _FakeRunner([request])
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(
             task_id="demo-task",
@@ -666,9 +666,9 @@ def test_first_run_skill_injection_uses_chat_template_when_request_has_metadata(
         runner=runner,
     )
 
-    workload.next()
-    workload.observe([ActionResult(3, Result())])
-    run = workload.next()[0]
+    workflow.next()
+    workflow.observe([ActionResult(3, Result())])
+    run = workflow.next()[0]
 
     assert run.data.startswith("rendered with")
     assert _CanonicalSkillDocument(skill) in renderCalls[0][0][0]["content"]
@@ -703,7 +703,7 @@ def test_first_run_skill_segment_matches_after_chat_template_moves_terminal_newl
     request = _request("original prompt")
     request.modelPath = "/models/test"
     runner = _FakeRunner([request])
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(
             task_id="demo-task",
@@ -713,29 +713,29 @@ def test_first_run_skill_segment_matches_after_chat_template_moves_terminal_newl
         runner=runner,
     )
 
-    prepare = workload.next()[0]
+    prepare = workflow.next()[0]
     assert prepare.data == [canonicalSkill]
-    workload.observe([ActionResult(3, Result())])
-    run = workload.next()[0]
+    workflow.observe([ActionResult(3, Result())])
+    run = workflow.next()[0]
 
     assert (0, canonicalSkill) in ComposeInterleavedReuse(
         prepare.data, run.data
     )
 
 
-def test_workload_surfaces_runner_failure_before_first_run():
+def test_workflow_surfaces_runner_failure_before_first_run():
     runner = _FailingRunner()
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(task_id="broken-task"),
         runner=runner,
     )
 
     with pytest.raises(AgentBenchFlowPreRunError, match="before its first RUN"):
-        workload.next()
-    assert workload.finished
+        workflow.next()
+    assert workflow.finished
     assert runner.stopped
-    assert workload.final_result.output["reward"] == 0.0
+    assert workflow.final_result.output["reward"] == 0.0
 
 
 def test_task_loads_benchflow_configuration_and_keeps_task_tag(
@@ -816,19 +816,19 @@ def test_task_evaluate_keeps_infrastructure_diagnostics_available():
     assert result.metadata["benchflow_error"] == "Docker environment failed"
 
 
-def test_workload_captures_first_run_stats_only_once():
+def test_workflow_captures_first_run_stats_only_once():
     first = _request("first rendered prompt")
     second = _request("second rendered prompt")
     runner = _FakeRunner([first, second])
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(task_id="citation-check"),
         runner=runner,
     )
 
     # First RUN: capture ttft + reuse_ratio + prompt length.
-    workload.next()
-    workload.observe(
+    workflow.next()
+    workflow.observe(
         [
             ActionResult(
                 3,
@@ -843,8 +843,8 @@ def test_workload_captures_first_run_stats_only_once():
 
     # Second RUN: very different numbers — must NOT overwrite the first-run
     # capture, since the report is per-case first-RUN.
-    workload.next()
-    workload.observe(
+    workflow.next()
+    workflow.observe(
         [
             ActionResult(
                 3,
@@ -856,19 +856,19 @@ def test_workload_captures_first_run_stats_only_once():
             )
         ]
     )
-    workload.next()  # returns None, finishes the workload
+    workflow.next()  # returns None, finishes the workflow
 
-    final = workload.final_result
+    final = workflow.final_result
     assert final.metadata["first_run_ttft"] == pytest.approx(0.42)
     assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
     assert final.metadata["first_run_prompt_length"] == 12000
 
 
-def test_workload_first_run_only_stops_after_first_run():
+def test_workflow_first_run_only_stops_after_first_run():
     first = _request("first rendered prompt")
     second = _request("second rendered prompt")
     runner = _FakeRunner([first, second])
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(
             task_id="citation-check",
@@ -877,8 +877,8 @@ def test_workload_first_run_only_stops_after_first_run():
         runner=runner,
     )
 
-    workload.next()
-    workload.observe(
+    workflow.next()
+    workflow.observe(
         [
             ActionResult(
                 3,
@@ -891,19 +891,19 @@ def test_workload_first_run_only_stops_after_first_run():
         ]
     )
 
-    assert workload.finished
-    assert workload.next() is None
+    assert workflow.finished
+    assert workflow.next() is None
     assert runner.responses == []
     assert runner.stopped
-    assert workload.final_result.metadata["first_run_ttft"] == pytest.approx(0.42)
-    assert workload.final_result.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
-    assert workload.final_result.metadata["first_run_prompt_length"] == 12000
+    assert workflow.final_result.metadata["first_run_ttft"] == pytest.approx(0.42)
+    assert workflow.final_result.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
+    assert workflow.final_result.metadata["first_run_prompt_length"] == 12000
 
 
-def test_workload_first_run_prompt_length_is_absent_without_n_input():
+def test_workflow_first_run_prompt_length_is_absent_without_n_input():
     first = _request("first rendered prompt")
     runner = _FakeRunner([first])
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(task_id="citation-check"),
         runner=runner,
@@ -911,8 +911,8 @@ def test_workload_first_run_prompt_length_is_absent_without_n_input():
 
     # A Method that does not report n_input must still contribute the other
     # two first-RUN readings.
-    workload.next()
-    workload.observe(
+    workflow.next()
+    workflow.observe(
         [
             ActionResult(
                 3,
@@ -924,33 +924,33 @@ def test_workload_first_run_prompt_length_is_absent_without_n_input():
             )
         ]
     )
-    workload.next()
+    workflow.next()
 
-    final = workload.final_result
+    final = workflow.final_result
     assert final.metadata["first_run_ttft"] == pytest.approx(0.42)
     assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.85)
     assert "first_run_prompt_length" not in final.metadata
 
 
-def test_workload_first_run_capture_is_absent_when_no_run_completes():
+def test_workflow_first_run_capture_is_absent_when_no_run_completes():
     runner = _FailingRunner()
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(task_id="citation-check"),
         runner=runner,
     )
 
     with pytest.raises(AgentBenchFlowPreRunError, match="before its first RUN"):
-        workload.next()  # runner.start() raises -> fail() runs
+        workflow.next()  # runner.start() raises -> fail() runs
 
-    final = workload.final_result
+    final = workflow.final_result
     assert final.metadata.get("first_run_ttft") is None
     assert final.metadata.get("first_run_reuse_ratio") is None
     assert final.metadata.get("first_run_prompt_length") is None
     assert final.output["error"]
 
 
-def test_workload_first_run_metadata_is_attached_even_after_a_mid_run_failure():
+def test_workflow_first_run_metadata_is_attached_even_after_a_mid_run_failure():
     first = _request("first rendered prompt")
     runner = _FakeRunner([first])
 
@@ -958,14 +958,14 @@ def test_workload_first_run_metadata_is_attached_even_after_a_mid_run_failure():
         raise RuntimeError("model crashed mid-rollout")
 
     runner.respond = boom
-    workload = AgentBenchFlowWorkload(
+    workflow = AgentBenchFlowWorkflow(
         case_id=3,
         data=AgentBenchFlowInput(task_id="citation-check"),
         runner=runner,
     )
 
-    workload.next()
-    workload.observe(
+    workflow.next()
+    workflow.observe(
         [
             ActionResult(
                 3,
@@ -979,7 +979,7 @@ def test_workload_first_run_metadata_is_attached_even_after_a_mid_run_failure():
     )
     # observe()'s respond() raises -> fail() is called, which must keep the
     # already-captured first-RUN stats.
-    final = workload.final_result
+    final = workflow.final_result
     assert final.metadata["first_run_ttft"] == pytest.approx(0.21)
     assert final.metadata["first_run_reuse_ratio"] == pytest.approx(0.73)
     assert final.metadata["first_run_prompt_length"] == 8192

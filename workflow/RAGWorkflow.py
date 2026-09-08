@@ -1,15 +1,15 @@
-"""RAG workload: Prepare → Run execution policy."""
+"""RAG workflow: Prepare → Run execution policy."""
 
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from core.Result import Result
-from core.Workload import Action, ActionKind, ActionResult, Workload
+from core.Workflow import Action, ActionKind, ActionResult, Workflow
 
 
 @dataclass
 class RAGInput:
-    """Input data for RAG workload.
+    """Input data for RAG workflow.
 
     This preserves backward compatibility with existing RAG benchmarks.
     The Task computes prepare_input and run_input during Cases() construction.
@@ -24,7 +24,7 @@ class RAGInput:
     run_input: str = ""
 
 
-class RAGWorkload(Workload):
+class RAGWorkflow(Workflow):
     """Simplest execution policy: Prepare → Run, two steps max.
 
     This perfectly expresses existing RAG benchmark semantics:
@@ -68,7 +68,7 @@ class RAGWorkload(Workload):
 
     def observe(self, results: List[ActionResult]) -> None:
         if len(results) != 1:
-            raise ValueError("RAGWorkload expects exactly one ActionResult per step")
+            raise ValueError("RAGWorkflow expects exactly one ActionResult per step")
         # ``next`` advances _step before the action is executed. Step 1 is the
         # optional PREPARE placeholder; step 2 is the real RUN result, whose
         # output may legitimately be None while diagnostics remain useful.

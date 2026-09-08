@@ -3,7 +3,7 @@ import pytest
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Task import Case, Task
-from core.Workload import Action, ActionKind, Workload
+from core.Workflow import Action, ActionKind, Workflow
 from core.Worker import (
     EvaluatePair,
     _Initialize,
@@ -14,7 +14,7 @@ from core.Worker import (
 from metrics import TTFTMetric, ThroughputMetric
 
 
-class _TwoRunWorkload(Workload):
+class _TwoRunWorkflow(Workflow):
     def __init__(self, caseId):
         self.case_id = caseId
         self.step = 0
@@ -61,16 +61,16 @@ class _BatchTask(Task):
 
     def __init__(self, count=3):
         self.count = count
-        self.workloads = []
+        self.workflows = []
         self.evaluated = []
 
     def Cases(self):
         for caseId in range(self.count):
-            workload = _TwoRunWorkload(caseId)
-            self.workloads.append(workload)
+            workflow = _TwoRunWorkflow(caseId)
+            self.workflows.append(workflow)
             yield Case(
                 input=caseId,
-                workload=workload,
+                workflow=workflow,
                 metadata={"expected": f"case-{caseId}:final"},
             )
 
@@ -166,7 +166,7 @@ def test_evaluate_pair_batches_actions_and_aggregates_every_run():
     ]
     assert method.resetCalls == 2
     assert task.evaluated == ["case-0:final", "case-1:final", "case-2:final"]
-    assert all(len(workload.observed) == 3 for workload in task.workloads)
+    assert all(len(workflow.observed) == 3 for workflow in task.workflows)
 
 
 class _CaseFailureIsolatedTask(Task):
@@ -176,7 +176,7 @@ class _CaseFailureIsolatedTask(Task):
     def Cases(self):
         for caseId in range(2):
             yield Case(
-                workload=_TwoRunWorkload(caseId),
+                workflow=_TwoRunWorkflow(caseId),
                 metadata={"expected": f"case-{caseId}:final"},
             )
 
@@ -201,7 +201,7 @@ def test_evaluate_pair_scores_failed_case_as_zero_and_continues():
     assert method.resetCalls == 2
 
 
-class _OneActionWorkload(Workload):
+class _OneActionWorkflow(Workflow):
     def __init__(self, caseId, kind):
         self.case_id = caseId
         self.kind = kind
@@ -224,8 +224,8 @@ class _MixedTask(Task):
     name = "mixed"
 
     def Cases(self):
-        yield Case(workload=_OneActionWorkload(0, ActionKind.PREPARE))
-        yield Case(workload=_OneActionWorkload(1, ActionKind.RUN))
+        yield Case(workflow=_OneActionWorkflow(0, ActionKind.PREPARE))
+        yield Case(workflow=_OneActionWorkflow(1, ActionKind.RUN))
 
     def Evaluate(self, result, metadata):
         return {}
@@ -245,7 +245,7 @@ class _RunTask(Task):
     name = "wrong-result-count"
 
     def Cases(self):
-        yield Case(workload=_OneActionWorkload(0, ActionKind.RUN))
+        yield Case(workflow=_OneActionWorkflow(0, ActionKind.RUN))
 
     def Evaluate(self, result, metadata):
         return {}
@@ -256,7 +256,7 @@ def test_evaluate_pair_validates_method_result_count():
         EvaluatePair(_RunTask(), _ShortMethod(), [], batchSize=1)
 
 
-class _StalledWorkload(Workload):
+class _StalledWorkflow(Workflow):
     case_id = 0
 
     def next(self):
@@ -274,13 +274,13 @@ class _StalledTask(Task):
     name = "stalled"
 
     def Cases(self):
-        yield Case(workload=_StalledWorkload())
+        yield Case(workflow=_StalledWorkflow())
 
     def Evaluate(self, result, metadata):
         return {"accuracy": 1.0}
 
 
-def test_evaluate_pair_rejects_a_stalled_unfinished_workload():
+def test_evaluate_pair_rejects_a_stalled_unfinished_workflow():
     with pytest.raises(RuntimeError, match="unfinished"):
         EvaluatePair(_StalledTask(), _RecordingMethod(), [], batchSize=1)
 
@@ -289,7 +289,7 @@ class _PrepareOnlyTask(Task):
     name = "prepare-only"
 
     def Cases(self):
-        yield Case(workload=_OneActionWorkload(0, ActionKind.PREPARE))
+        yield Case(workflow=_OneActionWorkflow(0, ActionKind.PREPARE))
 
     def Evaluate(self, result, metadata):
         return {"accuracy": 1.0}
@@ -300,7 +300,7 @@ def test_evaluate_pair_requires_a_final_run_result():
         EvaluatePair(_PrepareOnlyTask(), _RecordingMethod(), [], batchSize=1)
 
 
-class _EmptyActionWorkload(_StalledWorkload):
+class _EmptyActionWorkflow(_StalledWorkflow):
     def next(self):
         return []
 
@@ -309,7 +309,7 @@ class _EmptyActionTask(_StalledTask):
     name = "empty-actions"
 
     def Cases(self):
-        yield Case(workload=_EmptyActionWorkload())
+        yield Case(workflow=_EmptyActionWorkflow())
 
 
 def test_evaluate_pair_rejects_an_empty_action_step():

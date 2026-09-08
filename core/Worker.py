@@ -11,7 +11,7 @@ from .Metrics import AggregateStats, Metric
 from .Method import Method
 from .Result import AggregateScores, NormalizeScores, Result
 from .Task import Case, Task
-from .Workload import Action, ActionKind, ActionResult, Workload
+from .Workflow import Action, ActionKind, ActionResult, Workflow
 
 
 def EvaluatePair(
@@ -109,7 +109,7 @@ def _ProcessCaseBatch(
             raise
 
         case = batch[0]
-        fail = getattr(case.workload, "fail", None)
+        fail = getattr(case.workflow, "fail", None)
         if callable(fail):
             try:
                 fail(exc)
@@ -146,7 +146,7 @@ def _ProcessBatch(
     methodWeights: Dict[str, List[float]],
     externalRunCallback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
 ) -> int:
-    workloads = [case.workload for case in batch]
+    workflows = [case.workflow for case in batch]
     finalResults: Dict[int, Result] = {}
     reportedExternalRuns: Dict[int, Dict[str, Any]] = {}
 
@@ -160,52 +160,52 @@ def _ProcessBatch(
 
     # Register a runner as soon as it starts, including the interval while
     # it is waiting for its first provider request.  The post-next() probe is
-    # retained for lightweight/custom workloads that do not implement the
+    # retained for lightweight/custom workflows that do not implement the
     # setter but expose a descriptor directly.
-    for workload in workloads:
-        setter = getattr(workload, "SetExternalCleanupCallback", None)
+    for workflow in workflows:
+        setter = getattr(workflow, "SetExternalCleanupCallback", None)
         if callable(setter):
             setter(
-                lambda descriptor, caseId=workload.case_id: reportExternalRun(
+                lambda descriptor, caseId=workflow.case_id: reportExternalRun(
                     caseId, descriptor
                 )
             )
 
     while True:
         stepActions: List[Action] = []
-        workloadSlices: List[Tuple[Workload, int, int]] = []
-        for workload in workloads:
-            if workload.finished:
+        workflowSlices: List[Tuple[Workflow, int, int]] = []
+        for workflow in workflows:
+            if workflow.finished:
                 continue
-            actions = workload.next()
+            actions = workflow.next()
             descriptorGetter = getattr(
-                workload, "ExternalCleanupDescriptor", None
+                workflow, "ExternalCleanupDescriptor", None
             )
             if callable(descriptorGetter):
-                reportExternalRun(workload.case_id, descriptorGetter())
+                reportExternalRun(workflow.case_id, descriptorGetter())
             if actions is None:
-                if not workload.finished:
+                if not workflow.finished:
                     raise RuntimeError(
-                        f"Workload case_id={workload.case_id} returned no "
+                        f"Workflow case_id={workflow.case_id} returned no "
                         "Actions while unfinished"
                     )
                 continue
             if not actions:
                 raise RuntimeError(
-                    f"Workload case_id={workload.case_id} returned an empty "
+                    f"Workflow case_id={workflow.case_id} returned an empty "
                     "Action list"
                 )
             start = len(stepActions)
             stepActions.extend(actions)
-            workloadSlices.append((workload, start, start + len(actions)))
+            workflowSlices.append((workflow, start, start + len(actions)))
 
         if not stepActions:
             unfinished = [
-                workload.case_id for workload in workloads if not workload.finished
+                workflow.case_id for workflow in workflows if not workflow.finished
             ]
             if unfinished:
                 raise RuntimeError(
-                    f"Workloads produced no Actions while unfinished: {unfinished}"
+                    f"Workflows produced no Actions while unfinished: {unfinished}"
                 )
             break
         kinds = {action.kind for action in stepActions}
@@ -251,30 +251,30 @@ def _ProcessBatch(
                     )
                     methodWeights[name].append(float(weight or 0.0))
 
-        for workload, start, end in workloadSlices:
-            workload.observe(stepResults[start:end])
+        for workflow, start, end in workflowSlices:
+            workflow.observe(stepResults[start:end])
 
     missingResults = [
-        case.workload.case_id
+        case.workflow.case_id
         for case in batch
         if (
-            case.workload.case_id not in finalResults
-            and getattr(case.workload, "final_result", None) is None
+            case.workflow.case_id not in finalResults
+            and getattr(case.workflow, "final_result", None) is None
         )
     ]
     if missingResults:
         raise RuntimeError(
-            f"Workloads finished without a RUN result: {missingResults}"
+            f"Workflows finished without a RUN result: {missingResults}"
         )
 
     for case in batch:
-        # Most workloads expose the last inference Result via ``finalResults``;
-        # workloads whose scoring signal is *not* an inference output (e.g.
-        # AgentBenchFlowWorkload, which exposes the rollout's ``result.json``)
+        # Most workflows expose the last inference Result via ``finalResults``;
+        # workflows whose scoring signal is *not* an inference output (e.g.
+        # AgentBenchFlowWorkflow, which exposes the rollout's ``result.json``)
         # may override ``final_result`` to surface a different Result.
         result = (
-            getattr(case.workload, "final_result", None)
-            or finalResults[case.workload.case_id]
+            getattr(case.workflow, "final_result", None)
+            or finalResults[case.workflow.case_id]
         )
         scores = NormalizeScores(task.Evaluate(result, case.metadata))
         for name, value in scores.items():
@@ -286,7 +286,7 @@ def _ProcessBatch(
 def _HasUnsuccessfulExternalRun(batch: List[Case]) -> bool:
     """Return whether a case explicitly failed before its first model RUN."""
     for case in batch:
-        checker = getattr(case.workload, "HasSuccessfulRun", None)
+        checker = getattr(case.workflow, "HasSuccessfulRun", None)
         if callable(checker) and not checker():
             return True
     return False

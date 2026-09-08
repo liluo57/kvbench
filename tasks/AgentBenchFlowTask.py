@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 from core.Config import Get
 from core.Result import Result
 from core.Task import Case, Task
-from workload.AgentBenchFlowWorkload import AgentBenchFlowInput, AgentBenchFlowWorkload
+from workflow.AgentBenchFlowWorkflow import AgentBenchFlowInput, AgentBenchFlowWorkflow
 
 
 _REWARD_KEYS = ("reward", "score", "rewards", "scores")
@@ -251,7 +251,7 @@ class AgentBenchFlowTask(Task):
             )
             yield Case(
                 input=data,
-                workload=AgentBenchFlowWorkload(case_id=index, data=data),
+                workflow=AgentBenchFlowWorkflow(case_id=index, data=data),
                 metadata={
                     "case_id": index,
                     "task_id": taskId,
@@ -269,7 +269,7 @@ class AgentBenchFlowTask(Task):
             "reward": float(reward),
             "accuracy": float(reward),
         }
-        # The workload records one TTFT / reuse_ratio / prompt length reading
+        # The workflow records one TTFT / reuse_ratio / prompt length reading
         # per case, taken from that case's first inference result (the
         # Skill-inlined turn). A case that failed before its first RUN
         # completes simply omits these keys, so the per-case mean in the

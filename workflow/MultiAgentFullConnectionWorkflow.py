@@ -1,11 +1,11 @@
-"""Single-round sequential complete-DAG multi-agent workload."""
+"""Single-round sequential complete-DAG multi-agent workflow."""
 
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from core.Config import ModelPath
 from core.Result import Result
-from core.Workload import Action, ActionKind, ActionResult, Workload
+from core.Workflow import Action, ActionKind, ActionResult, Workflow
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ class MultiAgentFullConnectionInput:
     modelPath: str = field(default_factory=ModelPath)
 
 
-class MultiAgentFullConnectionWorkload(Workload):
+class MultiAgentFullConnectionWorkflow(Workflow):
     """Execute workers in creation order, then an optional decision agent."""
 
     def __init__(self, case_id: int, data: MultiAgentFullConnectionInput):
@@ -57,7 +57,7 @@ class MultiAgentFullConnectionWorkload(Workload):
         # The agent always sees real system/user turns (and stops at the
         # model's chat-template close token); helpers.backends.ModelAdapter
         # .render_chat owns the per-arch kwargs (``enable_thinking``, etc.)
-        # and the boundary strings, so the same workload renders correctly
+        # and the boundary strings, so the same workflow renders correctly
         # for Qwen3 / Muse Glimmer / Mistral / any future arch. ``thinking``
         # is forced off: the multi-agent decision flow does not benefit
         # from a per-agent <think> trace and KV-reuse tasks would otherwise

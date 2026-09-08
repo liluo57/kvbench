@@ -35,7 +35,7 @@ from typing import Any, Dict, Iterator, Optional
 from core.Config import ModelPath
 from core.Result import Result
 from core.Task import Case, Task
-from workload.RAGWorkload import RAGInput, RAGWorkload
+from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
 from helpers.backends.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
@@ -89,7 +89,7 @@ class FreshGapTask(Task):
 
             yield Case(
                 input=data,
-                workload=RAGWorkload(case_id=i, data=data),
+                workflow=RAGWorkflow(case_id=i, data=data),
                 metadata={
                     "answer": answer,
                     "fresh": fresh,
