@@ -18,6 +18,10 @@
 #              (fields: ctxs[{title,text}], question, answers)
 #   samsum/    cacheblend's summarization dataset (samsum.json)
 #   wikimqa/   cacheblend's wiki multi-hop QA dataset (wikimqa_s.json)
+#   hotpotqa/  LongBench HotpotQA snapshot (hotpotqa.jsonl)
+#   triviaqa/  LongBench TriviaQA snapshot (triviaqa.jsonl)
+#   multinews/ LongBench MultiNews snapshot (multinews.jsonl)
+#   govreport/ LongBench GovReport snapshot (govreport.jsonl)
 DatasetPath: /root/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
@@ -40,7 +44,7 @@ Engine:
   GpuReleaseTimeoutSec: 30
   GpuReleaseStableSeconds: 1
   GpuReleaseMemoryToleranceMiB: 256
-  PairRetries: 1
+  PairRetries: 0
   Tui: true
   Verbose: true
 
