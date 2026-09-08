@@ -1,6 +1,7 @@
 import json
 import inspect
 import os
+import signal
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -83,6 +84,9 @@ class FakeMethod(Method):
             self.seen.add(prompt)
             raise RuntimeError(f"fake run failure: {prompt}")
         if self.failMode == "sleep":
+            time.sleep(2)
+        if self.failMode == "ignore_term":
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             time.sleep(2)
         if self.failMode == "crash":
             os._exit(7)
@@ -317,6 +321,21 @@ def test_task_timeout_retries_then_fails(tmp_path):
     assert not report["runs"]
     assert report["failures"][0]["kind"] in ("task_timeout", "worker_exit")
     assert report["failures"][0]["attempts"] == 2
+
+
+def test_task_timeout_force_kills_hung_worker_and_releases_slot(tmp_path):
+    _, report = _run(
+        tmp_path,
+        [FakeTask("hung", "hung")],
+        [FakeMethod(failMode="ignore_term")],
+        gpu_count=1,
+        taskTimeout=0.2,
+        shutdownGracePeriod=0.2,
+        pairRetries=0,
+    )
+    assert report["status"] == "completed"
+    assert not report["runs"]
+    assert report["failures"][0]["kind"] == "task_timeout"
 
 
 def test_worker_crash_retries_in_a_replacement_process(tmp_path):
