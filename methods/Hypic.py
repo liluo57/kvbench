@@ -37,13 +37,70 @@ _PIC_MODES = {
     "transition_rope",
     "transition_rope_recompute",
 }
-_DEFAULT_MAX_MAMBA_CACHE_SIZE = 128
 _WARMUP_TAIL = "\n[KVBench HYPIC cache warmup]\n"
 
 
 def _HypicRepoPath() -> Path:
     config = Get("Hypic", {}) or {}
     return Path(config.get("RepoPath") or "/root/hypic").expanduser().resolve()
+
+
+def _BuildHypicEngineKwargs(
+    modelPath: str,
+    gpuIds: Sequence[int],
+    *,
+    dtype: str,
+    maxModelLen: int,
+    memFractionStatic: float,
+    picMode: str,
+    separator: str,
+    maxMambaCacheSize: Optional[int],
+    fullPrefill: bool,
+) -> Dict[str, Any]:
+    """Build SGLang options while keeping PIC and prefix caching independent.
+
+    ``fullPrefill`` is the no-PIC control path: it submits the original prompt
+    as one ordinary request, but ordinary radix prefix caching remains enabled.
+    The latter is important for workloads whose later requests share a literal
+    prompt prefix, such as multi-turn agent runs.
+    """
+    engineKwargs: Dict[str, Any] = dict(
+        model_path=modelPath,
+        dtype=dtype,
+        tp_size=len(gpuIds),
+        context_length=maxModelLen,
+        max_prefill_tokens=maxModelLen,
+        max_running_requests=1,
+        mem_fraction_static=memFractionStatic,
+        trust_remote_code=True,
+        enable_multimodal=False,
+        page_size=1,
+        chunked_prefill_size=-1,
+        cuda_graph_backend_prefill="disabled",
+        log_level="error",
+    )
+    if fullPrefill:
+        # Disable only position-independent composition. Keep the normal radix
+        # cache so an exact prompt prefix can still be reused across requests.
+        engineKwargs.update(
+            pic_enable=False,
+            disable_radix_cache=False,
+            mamba_radix_cache_strategy="no_buffer",
+            disable_overlap_schedule=True,
+        )
+    else:
+        engineKwargs.update(
+            pic_enable=True,
+            pic_mode=picMode,
+            pic_separator_str=separator,
+        )
+        # Let SGLang size the hybrid state cache from the actual remaining
+        # memory.  A fixed slot count is safe for the addition PIC mode but
+        # can exceed the budget for transition modes, which allocate an extra
+        # transition matrix per cache slot.
+        if maxMambaCacheSize is not None:
+            engineKwargs["max_mamba_cache_size"] = maxMambaCacheSize
+    return engineKwargs
 
 
 def _CreateHypicEngine(
@@ -55,7 +112,7 @@ def _CreateHypicEngine(
     memFractionStatic: float,
     picMode: str,
     separator: str,
-    maxMambaCacheSize: int,
+    maxMambaCacheSize: Optional[int],
     fullPrefill: bool,
 ):
     """Import HYPIC lazily and create its SGLang engine on ``gpuIds``.
@@ -85,36 +142,17 @@ def _CreateHypicEngine(
             f"imported sglang from {loaded}, expected the HYPIC checkout at {pythonDir}"
         )
 
-    engineKwargs = dict(
-        model_path=modelPath,
+    engineKwargs = _BuildHypicEngineKwargs(
+        modelPath,
+        gpuIds,
         dtype=dtype,
-        tp_size=len(gpuIds),
-        context_length=maxModelLen,
-        max_prefill_tokens=maxModelLen,
-        max_running_requests=1,
-        mem_fraction_static=memFractionStatic,
-        trust_remote_code=True,
-        enable_multimodal=False,
-        page_size=1,
-        chunked_prefill_size=-1,
-        cuda_graph_backend_prefill="disabled",
-        log_level="error",
+        maxModelLen=maxModelLen,
+        memFractionStatic=memFractionStatic,
+        picMode=picMode,
+        separator=separator,
+        maxMambaCacheSize=maxMambaCacheSize,
+        fullPrefill=fullPrefill,
     )
-    if fullPrefill:
-        # Match HYPIC's own full-recompute control: neither PIC nor the normal
-        # radix prefix cache may satisfy any part of the measured request.
-        engineKwargs.update(
-            pic_enable=False,
-            disable_radix_cache=True,
-            mamba_radix_cache_strategy="no_buffer",
-        )
-    else:
-        engineKwargs.update(
-            pic_enable=True,
-            pic_mode=picMode,
-            pic_separator_str=separator,
-            max_mamba_cache_size=maxMambaCacheSize,
-        )
     return sgl.Engine(**engineKwargs)
 
 
@@ -150,7 +188,7 @@ class HypicMethod(Method):
         dtype: str = "bfloat16",
         picMode: str = "addition",
         separator: str = "<<PIC_SEP>>",
-        maxMambaCacheSize: int = _DEFAULT_MAX_MAMBA_CACHE_SIZE,
+        maxMambaCacheSize: Optional[int] = None,
         fullPrefill: bool = False,
         tag: Optional[str] = None,
     ):
@@ -176,12 +214,13 @@ class HypicMethod(Method):
             )
         if not separator:
             raise ValueError("separator must not be empty")
-        if isinstance(maxMambaCacheSize, bool) or not isinstance(
-            maxMambaCacheSize, int
-        ):
-            raise TypeError("maxMambaCacheSize must be an integer")
-        if maxMambaCacheSize < 1:
-            raise ValueError("maxMambaCacheSize must be at least 1")
+        if maxMambaCacheSize is not None:
+            if isinstance(maxMambaCacheSize, bool) or not isinstance(
+                maxMambaCacheSize, int
+            ):
+                raise TypeError("maxMambaCacheSize must be an integer")
+            if maxMambaCacheSize < 1:
+                raise ValueError("maxMambaCacheSize must be at least 1")
         if not isinstance(fullPrefill, bool):
             raise TypeError("fullPrefill must be a bool")
 
@@ -337,11 +376,9 @@ class HypicMethod(Method):
         matchedPreparedSegments: int = 0,
     ) -> Result:
         nInput = int(meta.get("prompt_tokens", 0) or 0)
-        numCached = (
-            0
-            if fullPrefill
-            else int(meta.get("cached_tokens", 0) or 0)
-        )
+        # The no-PIC control path can still hit ordinary radix prefix cache.
+        # Report that hit instead of treating fullPrefill as "no cache at all".
+        numCached = int(meta.get("cached_tokens", 0) or 0)
         metadata: Dict[str, Any] = {
             "backend": self.backend,
             "n_input": nInput,

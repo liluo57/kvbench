@@ -35,49 +35,52 @@ from tasks import (
 
 
 def Main() -> None:
-    taskIds =['azure-bgp-oscillation-route-leak',
- 'debug-trl-grpo',
- 'earthquake-phase-association',
- 'edit-pdf',
- 'energy-unit-commitment',
- 'exam-block-sequencing',
- 'financial-modeling-qa',
- 'grid-dispatch-operator',
- 'manufacturing-fjsp-optimization',
- 'mars-clouds-clustering',
- 'paper-anonymizer',
- 'parallel-tfidf-search',
- 'paratransit-routing',
- 'pddl-tpp-planning',
- 'pdf-excel-diff',
- 'powerlifting-coef-calc',
- 'pptx-reference-formatting',
- 'protein-expression-analysis',
- 'python-scala-translation',
- 'quantum-numerical-simulation',
- 'r2r-mpc-control',
- 'radar-vital-signs',
- 'react-performance-debugging',
- 'reserves-at-risk-calc',
- 'sales-pivot-analysis',
- 'seismic-phase-picking',
- 'shock-analysis-demand',
- 'shock-analysis-supply',
- 'simpo-code-reproduction',
- 'software-dependency-audit',
- 'syzkaller-ppdev-syzlang',
- 'threejs-structure-parser',
- 'threejs-to-obj',
- 'tictoc-unnecessary-abort-detection']
+    # taskIds =['paratransit-routing','parallel-tfidf-search', 'seismic-phase-picking', 'shock-analysis-demand', 'shock-analysis-supply', 'simpo-code-reproduction', 'software-dependency-audit', 'syzkaller-ppdev-syzlang', 'threejs-structure-parser', 'threejs-to-obj', 'tictoc-unnecessary-abort-detection']
 
-    tasks = [AgentBenchFlowTask(taskId, firstRunOnly=False) for taskId in taskIds]
+    # tasks = [AgentBenchFlowTask(taskId, firstRunOnly=False) for taskId in taskIds]
+
+    MAX_SAMPLES = 4
+    tasks = [
+        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        VTShuffleTask(maxSamples=MAX_SAMPLES),
+        MusiqueTask(maxSamples=MAX_SAMPLES),
+        SamsumTask(maxSamples=MAX_SAMPLES),
+        WikimQATask(maxSamples=MAX_SAMPLES),
+        # KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        # KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+    ]
 
     methods = [
         HypicMethod(
             maxNewTokens=40960,
             maxModelLen=256000,
-            memFractionStatic=0.80,
+            memFractionStatic=0.90,
             picMode="addition",
+            maxMambaCacheSize=100,
+        ),
+        HypicMethod(
+            maxNewTokens=40960,
+            maxModelLen=256000,
+            memFractionStatic=0.90,
+            picMode="transition",
+            maxMambaCacheSize=100,
+        ),
+        HypicMethod(
+            maxNewTokens=40960,
+            maxModelLen=256000,
+            memFractionStatic=0.90,
+            picMode="transition_rope",
+            maxMambaCacheSize=100,
+        ),
+        HypicMethod(
+            maxNewTokens=40960,
+            maxModelLen=256000,
+            memFractionStatic=0.90,
+            picMode="transition_rope_recompute",
+            maxMambaCacheSize=100,
         ),
         HypicMethod(
             maxNewTokens=40960,
