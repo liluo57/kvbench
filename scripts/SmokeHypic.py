@@ -36,12 +36,6 @@ def Main() -> None:
         choices=["niah", "cwe", "vt", "musique", "samsum", "wikimqa"],
         help="run the first case of a Main.py task instead of the synthetic smoke",
     )
-    parser.add_argument(
-        "--max-mamba-cache-size",
-        type=int,
-        default=None,
-        help="override HYPIC's Mamba/PIC cache slot count",
-    )
     parser.add_argument("--full-prefill", action="store_true")
     parser.add_argument(
         "--fresh-gap",
@@ -63,7 +57,6 @@ def Main() -> None:
         maxModelLen=args.max_model_len,
         memFractionStatic=args.mem_fraction_static,
         picMode=args.pic_mode,
-        maxMambaCacheSize=args.max_mamba_cache_size,
         fullPrefill=args.full_prefill,
         tag="full_prefill" if args.full_prefill else None,
     )

@@ -77,7 +77,6 @@ def Main() -> None:
             maxModelLen=256000,
             memFractionStatic=0.90,
             picMode="transition",
-            maxMambaCacheSize=110,
             tag="transition",
         ),
         HypicMethod(
@@ -86,7 +85,6 @@ def Main() -> None:
             maxModelLen=256000,
             memFractionStatic=0.90,
             picMode="transition_rope",
-            maxMambaCacheSize=110,
             tag="transition_rope",
         ),
         HypicMethod(
@@ -95,7 +93,6 @@ def Main() -> None:
             maxModelLen=256000,
             memFractionStatic=0.90,
             picMode="transition_rope_recompute",
-            maxMambaCacheSize=110,
             tag="transition_rope_recompute",
         ),
         HypicMethod(

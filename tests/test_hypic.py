@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from core import Config
 from methods.Hypic import (
     HypicMethod,
     _BuildHypicEngineKwargs,
@@ -9,6 +10,35 @@ from methods.Hypic import (
     _WARMUP_TAIL,
 )
 from tasks.FreshGap import FreshGapTask
+
+
+@pytest.fixture
+def fake_hypic_config(monkeypatch):
+    """Point Config.Get at an in-memory Hypic dict.
+
+    ``hypic_cfg`` is the dict that ``Config.Get("Hypic", {})`` will return.
+    Default values match ``config.yaml`` (``MaxMambaCacheSize: 32``).
+
+    Both ``core.Config.Get`` and ``methods.Hypic.Get`` are patched because
+    Hypic.py imports ``Get`` directly into its module namespace.
+    """
+    from methods import Hypic as HypicModule
+
+    default = {"RepoPath": "/root/hypic", "MaxMambaCacheSize": 32}
+    hypic_cfg = dict(default)
+
+    def _override(**overrides):
+        hypic_cfg.update(overrides)
+        return hypic_cfg
+
+    def _fake_get(key, default=None, config=None):
+        if key == "Hypic":
+            return hypic_cfg
+        return default
+
+    monkeypatch.setattr(Config, "Get", _fake_get)
+    monkeypatch.setattr(HypicModule, "Get", _fake_get)
+    return _override
 
 
 class _FakeEngine:
@@ -184,7 +214,7 @@ def test_full_prefill_disables_pic_but_keeps_prefix_reuse():
     assert method.Label == "hypic(full_prefill)"
 
 
-def test_full_prefill_engine_options_keep_radix_cache_without_pic():
+def test_full_prefill_engine_options_keep_radix_cache_without_pic(fake_hypic_config):
     options = _BuildHypicEngineKwargs(
         "/model",
         [2],
@@ -193,7 +223,6 @@ def test_full_prefill_engine_options_keep_radix_cache_without_pic():
         memFractionStatic=0.8,
         picMode="addition",
         separator="<<PIC_SEP>>",
-        maxMambaCacheSize=128,
         fullPrefill=True,
     )
 
@@ -204,7 +233,10 @@ def test_full_prefill_engine_options_keep_radix_cache_without_pic():
     assert "pic_separator_str" not in options
 
 
-def test_pic_engine_options_auto_size_mamba_cache_by_default():
+def test_pic_engine_options_auto_size_mamba_cache_by_default(fake_hypic_config):
+    # MaxMambaCacheSize = -1 -> SGLang auto-fit; max_mamba_cache_size must
+    # not appear in engine kwargs.
+    fake_hypic_config(MaxMambaCacheSize=-1)
     options = _BuildHypicEngineKwargs(
         "/model",
         [2],
@@ -213,13 +245,57 @@ def test_pic_engine_options_auto_size_mamba_cache_by_default():
         memFractionStatic=0.8,
         picMode="transition",
         separator="<<PIC_SEP>>",
-        maxMambaCacheSize=None,
         fullPrefill=False,
     )
 
     assert options["pic_enable"] is True
     assert options["pic_mode"] == "transition"
     assert "max_mamba_cache_size" not in options
+
+
+def test_pic_engine_options_pass_capped_mamba_cache_size(fake_hypic_config):
+    # Default (32) -> max_mamba_cache_size = 32 must be passed through.
+    options = _BuildHypicEngineKwargs(
+        "/model",
+        [2],
+        dtype="bfloat16",
+        maxModelLen=128,
+        memFractionStatic=0.8,
+        picMode="addition",
+        separator="<<PIC_SEP>>",
+        fullPrefill=False,
+    )
+
+    assert options["pic_enable"] is True
+    assert options["max_mamba_cache_size"] == 32
+
+
+def test_pic_engine_options_omit_mamba_cache_for_full_prefill(fake_hypic_config):
+    # fullPrefill path disables PIC; max_mamba_cache_size must not be set even
+    # when config has a positive value.
+    options = _BuildHypicEngineKwargs(
+        "/model",
+        [2],
+        dtype="bfloat16",
+        maxModelLen=128,
+        memFractionStatic=0.8,
+        picMode="addition",
+        separator="<<PIC_SEP>>",
+        fullPrefill=True,
+    )
+
+    assert options["pic_enable"] is False
+    assert "max_mamba_cache_size" not in options
+
+
+def test_hypic_method_rejects_invalid_max_mamba_cache_size(fake_hypic_config):
+    fake_hypic_config(MaxMambaCacheSize="oops")
+    with pytest.raises(TypeError, match="MaxMambaCacheSize"):
+        HypicMethod(maxNewTokens=8, tag="t")
+
+    fake_hypic_config(MaxMambaCacheSize=0)
+    with pytest.raises(ValueError, match="MaxMambaCacheSize"):
+        HypicMethod(maxNewTokens=8, tag="t")
 
 
 def test_reset_flushes_picache_and_close_shuts_down_engine():

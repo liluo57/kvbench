@@ -45,6 +45,29 @@ def _HypicRepoPath() -> Path:
     return Path(config.get("RepoPath") or "/root/hypic").expanduser().resolve()
 
 
+def _MaxMambaCacheSize() -> Optional[int]:
+    """Resolve Hypic.MaxMambaCacheSize from config.
+
+    Returns the resolved slot count, or ``None`` to let SGLang auto-fit.
+    ``-1`` means auto-fit; any other integer must be a positive slot count.
+    """
+    cfg = Get("Hypic", {}) or {}
+    val = cfg.get("MaxMambaCacheSize", 32)
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise TypeError(
+            "Hypic.MaxMambaCacheSize must be an integer or -1 "
+            f"(got {type(val).__name__}: {val!r})"
+        )
+    if val == -1:
+        return None
+    if val < 1:
+        raise ValueError(
+            f"Hypic.MaxMambaCacheSize must be a positive integer or -1 "
+            f"(got {val})"
+        )
+    return int(val)
+
+
 def _BuildHypicEngineKwargs(
     modelPath: str,
     gpuIds: Sequence[int],
@@ -54,7 +77,6 @@ def _BuildHypicEngineKwargs(
     memFractionStatic: float,
     picMode: str,
     separator: str,
-    maxMambaCacheSize: Optional[int],
     fullPrefill: bool,
 ) -> Dict[str, Any]:
     """Build SGLang options while keeping PIC and prefix caching independent.
@@ -94,10 +116,12 @@ def _BuildHypicEngineKwargs(
             pic_mode=picMode,
             pic_separator_str=separator,
         )
-        # Let SGLang size the hybrid state cache from the actual remaining
-        # memory.  A fixed slot count is safe for the addition PIC mode but
-        # can exceed the budget for transition modes, which allocate an extra
-        # transition matrix per cache slot.
+        # Cap the mamba / linear-attention state pool size from
+        # Hypic.MaxMambaCacheSize (config.yaml). SGLang's auto-fit defaults to
+        # ~300 slots, which on Qwen3.5-27B eats ~47 GiB per GPU; the explicit
+        # cap keeps room for prefill workspace. ``None`` falls through to
+        # SGLang auto-fit.
+        maxMambaCacheSize = _MaxMambaCacheSize()
         if maxMambaCacheSize is not None:
             engineKwargs["max_mamba_cache_size"] = maxMambaCacheSize
     return engineKwargs
@@ -112,7 +136,6 @@ def _CreateHypicEngine(
     memFractionStatic: float,
     picMode: str,
     separator: str,
-    maxMambaCacheSize: Optional[int],
     fullPrefill: bool,
 ):
     """Import HYPIC lazily and create its SGLang engine on ``gpuIds``.
@@ -150,7 +173,6 @@ def _CreateHypicEngine(
         memFractionStatic=memFractionStatic,
         picMode=picMode,
         separator=separator,
-        maxMambaCacheSize=maxMambaCacheSize,
         fullPrefill=fullPrefill,
     )
     return sgl.Engine(**engineKwargs)
@@ -188,7 +210,6 @@ class HypicMethod(Method):
         dtype: str = "bfloat16",
         picMode: str = "addition",
         separator: str = "<<PIC_SEP>>",
-        maxMambaCacheSize: Optional[int] = None,
         fullPrefill: bool = False,
         tag: Optional[str] = None,
     ):
@@ -214,15 +235,13 @@ class HypicMethod(Method):
             )
         if not separator:
             raise ValueError("separator must not be empty")
-        if maxMambaCacheSize is not None:
-            if isinstance(maxMambaCacheSize, bool) or not isinstance(
-                maxMambaCacheSize, int
-            ):
-                raise TypeError("maxMambaCacheSize must be an integer")
-            if maxMambaCacheSize < 1:
-                raise ValueError("maxMambaCacheSize must be at least 1")
         if not isinstance(fullPrefill, bool):
             raise TypeError("fullPrefill must be a bool")
+
+        # Validate Hypic.MaxMambaCacheSize up-front so a bad value fails at
+        # construction rather than at engine launch. Resolution itself happens
+        # in _BuildHypicEngineKwargs at launch time.
+        _MaxMambaCacheSize()
 
         self.modelPath = DefaultModelPath()
         self.maxNewTokens = maxNewTokens
@@ -231,7 +250,6 @@ class HypicMethod(Method):
         self.dtype = dtype
         self.picMode = picMode
         self.separator = separator
-        self.maxMambaCacheSize = maxMambaCacheSize
         self.fullPrefill = fullPrefill
         self.engine = None
         self._states: List[Dict[str, Any]] = []
@@ -248,7 +266,6 @@ class HypicMethod(Method):
             memFractionStatic=self.memFractionStatic,
             picMode=self.picMode,
             separator=self.separator,
-            maxMambaCacheSize=self.maxMambaCacheSize,
             fullPrefill=self.fullPrefill,
         )
 
