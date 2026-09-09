@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from core.Config import Get, ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from core.Sampling import ResolveSamplingConfig
 
 from helpers.backends.Prompt import ComposeInterleavedReuse
 
@@ -105,6 +106,7 @@ class CacheblendRepo(Method):
             )
         self.repoRoot = Path(str(repoPath)).expanduser()
         self.modelPath = DefaultModelPath()
+        self.samplingConfig = ResolveSamplingConfig(self.modelPath)
         self.workerPython = self.repoRoot / ".venv" / "bin" / "python"
         if not self.workerPython.exists():
             raise FileNotFoundError(
@@ -159,6 +161,7 @@ class CacheblendRepo(Method):
                 "--max_model_len", str(self.maxModelLen),
                 "--gpu_memory_utilization", str(self.gpuMemoryUtilization),
                 "--recomp_ratio", str(self.recompRatio),
+                "--sampling_config", json.dumps(self.samplingConfig),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

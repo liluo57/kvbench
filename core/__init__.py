@@ -11,6 +11,8 @@ Public surface (what tasks / methods / workflows may import):
   :class:`ActionResult` (:mod:`core.Workflow`) — the workflow contract.
 - :func:`LoadConfig`, :func:`Get`, :func:`ModelPath`, :func:`DatasetDir`
   (:mod:`core.Config`) — config helpers.
+- :func:`ResolveSamplingConfig` (:mod:`core.Sampling`) — shared model
+  sampling policy resolution.
 
 Deliberately **not** re-exported from this barrel:
 
@@ -25,6 +27,7 @@ from .Config import DatasetDir, Get, LoadConfig, ModelPath
 from .Metrics import Metric
 from .Method import Method
 from .Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from .Sampling import ResolveSamplingConfig
 from .Task import Case, Task
 from .Workflow import Action, ActionKind, ActionResult, Workflow
 
@@ -41,6 +44,7 @@ __all__ = [
     "ModelPath",
     "NumOutputTokensKey",
     "Result",
+    "ResolveSamplingConfig",
     "Task",
     "TotalTimeKey",
     "TtftKey",

@@ -824,7 +824,7 @@ def CreateBlendLlm(
     )
 
 
-def Warmup(llm) -> None:
+def Warmup(llm, samplingConfig=None) -> None:
     """Issue a throwaway first request so lmcache's first (corrupt) store is
     discarded.
 
@@ -835,6 +835,7 @@ def Warmup(llm) -> None:
     Prepare/Run work, makes the real stores always clean.
     """
     from vllm import SamplingParams
+    from core.Sampling import VllmSamplingParams
 
     tokenizer = llm.get_tokenizer()
     # Long enough to survive lmcache's segment splitter (which crashes on streams
@@ -848,7 +849,10 @@ def Warmup(llm) -> None:
     except TypeError:
         ids = tokenizer(text, add_special_tokens=False)["input_ids"]
     llm.generate(
-        prompts=ids, sampling_params=SamplingParams(temperature=0, max_tokens=1)
+        prompts=ids,
+        sampling_params=SamplingParams(
+            **VllmSamplingParams(samplingConfig, maxTokens=1)
+        ),
     )
 
 

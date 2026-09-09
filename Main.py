@@ -39,18 +39,40 @@ from tasks import (
 
 
 def Main() -> None:
-    taskIds = ['paratransit-routing','parallel-tfidf-search', 'seismic-phase-picking', 'shock-analysis-demand', 'shock-analysis-supply', 'simpo-code-reproduction', 'software-dependency-audit', 'syzkaller-ppdev-syzlang', 'threejs-structure-parser', 'threejs-to-obj', 'tictoc-unnecessary-abort-detection','fix-druid-loophole-cve', 'multilingual-video-dubbing', 'pddl-airport-planning', 'spring-boot-jakarta-migration', 'suricata-custom-exfil']
+    taskIds = [
+        'azure-bgp-oscillation-route-leak',
+        'debug-trl-grpo',
+        'earthquake-phase-association',
+        'fix-build-agentops',
+        'fix-build-google-auto',
+        'fix-druid-loophole-cve',
+        'fix-visual-stability',
+        'flink-query',
+        'glm-lake-mendota',
+        'latex-formula-extraction',
+        'lean4-proof',
+        'multilingual-video-dubbing',
+        'organize-messy-files',
+        'parallel-tfidf-search',
+        'paratransit-routing',
+        'seismic-phase-picking',
+        'shock-analysis-supply',
+        'software-dependency-audit',
+        'spring-boot-jakarta-migration',
+        'suricata-custom-exfil',
+        'syzkaller-ppdev-syzlang',
+    ]
 
     tasks = [AgentBenchFlowTask(taskId, firstRunOnly=False) for taskId in taskIds]
 
     # MAX_SAMPLES = 64
     # tasks = [
-    #     NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-    #     CWEShuffleTask(maxSamples=MAX_SAMPLES),
-    #     VTShuffleTask(maxSamples=MAX_SAMPLES),
-    #     MusiqueTask(maxSamples=MAX_SAMPLES),
-    #     SamsumTask(maxSamples=MAX_SAMPLES),
-    #     WikimQATask(maxSamples=MAX_SAMPLES),
+    #     # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+    #     # CWEShuffleTask(maxSamples=MAX_SAMPLES),
+    #     # VTShuffleTask(maxSamples=MAX_SAMPLES),
+    #     # MusiqueTask(maxSamples=MAX_SAMPLES),
+    #     # SamsumTask(maxSamples=MAX_SAMPLES),
+    #     # WikimQATask(maxSamples=MAX_SAMPLES),
     #     # GovReportTask(maxSamples=MAX_SAMPLES),
     #     # HotpotQATask(maxSamples=MAX_SAMPLES),
     #     # MultiNewsTask(maxSamples=MAX_SAMPLES),
@@ -102,7 +124,24 @@ def Main() -> None:
             memFractionStatic=0.80,
             fullPrefill=True,
             tag="full_prefill",
-        )
+        ),
+        # Duplicate method instances to fill all 8 GPUs (4 parallel runs)
+        HypicMethod(
+            maxNewTokens=MAX_NEW_TOKENS,
+            gpuNums=2,
+            maxModelLen=256000,
+            memFractionStatic=0.90,
+            picMode="addition",
+            tag="addition_b",
+        ),
+        HypicMethod(
+            maxNewTokens=MAX_NEW_TOKENS,
+            gpuNums=2,
+            maxModelLen=256000,
+            memFractionStatic=0.80,
+            fullPrefill=True,
+            tag="full_prefill_b",
+        ),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]

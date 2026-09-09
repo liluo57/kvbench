@@ -25,7 +25,17 @@
 DatasetPath: /root/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /root/autodl-tmp/models/Qwen3.8-27b
+ModelPath: /root/autodl-tmp/models/Qwen3.5-35b
+
+# Shared model sampling policy.
+#   greedy   - deterministic argmax decoding
+#   default  - use the model's generation_config.json (or config.json)
+#   override - use the sampling values listed below
+ModelConfig:
+  mode: default
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
 
 # HYPIC's SGLang fork used by methods/Hypic.py. The model itself still comes
 # from the global ModelPath above.

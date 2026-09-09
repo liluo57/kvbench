@@ -28,6 +28,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from core.Config import Get, ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from core.Sampling import ResolveSamplingConfig, SglangSamplingParams
 from helpers.backends.Prompt import ComposeInterleavedReuse
 
 
@@ -244,6 +245,7 @@ class HypicMethod(Method):
         _MaxMambaCacheSize()
 
         self.modelPath = DefaultModelPath()
+        self.samplingConfig = ResolveSamplingConfig(self.modelPath)
         self.maxNewTokens = maxNewTokens
         self.maxModelLen = maxModelLen
         self.memFractionStatic = float(memFractionStatic)
@@ -436,12 +438,9 @@ class HypicMethod(Method):
 
         stream = self.engine.generate(
             prompt,
-            sampling_params={
-                "temperature": 1.0,
-                "top_p": 0.95,
-                "top_k": 20,
-                "max_new_tokens": maxNewTokens,
-            },
+            sampling_params=SglangSamplingParams(
+                self.samplingConfig, maxNewTokens
+            ),
             stream=True,
         )
         for chunk in stream:

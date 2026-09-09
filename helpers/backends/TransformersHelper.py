@@ -13,7 +13,14 @@ and an explicit ``device_map=f"cuda:<n>"``.
 
 import os
 import time
-from typing import Any, List, Optional, Tuple
+from collections import Counter
+from typing import Any, List, Mapping, Optional, Tuple
+
+from core.Sampling import (
+    IsGreedy,
+    ResolveSamplingConfig,
+    TransformersGenerationKwargs,
+)
 
 
 def CacheLayerPairs(cache):
@@ -43,7 +50,7 @@ def FirstGpu(gpuIds: Any) -> Optional[int]:
 
 
 class TransformersGenerator:
-    """Owns one HF model + tokenizer and runs a manual greedy decode loop.
+    """Owns one HF model + tokenizer and runs a manual decode loop.
 
     Generation is stepped token by token so the time to the *first* generated
     token (TTFT) can be measured independently of the full decode.
@@ -57,6 +64,7 @@ class TransformersGenerator:
         maxNewTokens: int = 64,
         dtype: str = "bfloat16",
         device: str = "cuda",
+        samplingConfig: Optional[Mapping[str, Any]] = None,
     ):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -65,6 +73,13 @@ class TransformersGenerator:
 
         self._torch = torch
         self.maxNewTokens = maxNewTokens
+        # Methods pass the resolved repository-wide ModelConfig explicitly;
+        # resolving here as well keeps direct helper use consistent.
+        self.samplingConfig = dict(
+            samplingConfig
+            if samplingConfig is not None
+            else ResolveSamplingConfig(modelPath)
+        )
         #: max tokens per eager prefill step (chunked prefill for long inputs).
         self.prefillChunk = int(os.environ.get("KVBENCH_PREFILL_CHUNK", "2048"))
 
@@ -90,6 +105,13 @@ class TransformersGenerator:
             )
         self.model.eval()
         self.eosId = self.tokenizer.eos_token_id
+        eosIds = self.samplingConfig.get("eos_token_id", self.eosId)
+        if isinstance(eosIds, (list, tuple)):
+            self.eosIds = {int(value) for value in eosIds}
+        elif eosIds is None:
+            self.eosIds = set()
+        else:
+            self.eosIds = {int(eosIds)}
 
     # ------------------------------------------------------------------ utils
     def Encode(self, text: str, *, addSpecialTokens: bool = False) -> List[int]:
@@ -153,6 +175,114 @@ class TransformersGenerator:
             return out
 
     # ------------------------------------------------------------- generation
+    def _SampleNextToken(
+        self,
+        logits: Any,
+        history: List[int],
+        generator: Optional[Any],
+    ) -> int:
+        """Sample one token using the resolved config.
+
+        The regular methods use a token-by-token loop for real TTFT and KV
+        reuse, so calling ``model.generate`` cannot provide the needed cache
+        semantics. This is the small, backend-neutral subset of Generation
+        Config's logits warpers needed by the benchmark.
+        """
+        if IsGreedy(self.samplingConfig):
+            return int(self._torch.argmax(logits).item())
+
+        scores = logits.float()
+        counts = Counter(history)
+        presencePenalty = float(
+            self.samplingConfig.get("presence_penalty", 0.0)
+        )
+        frequencyPenalty = float(
+            self.samplingConfig.get("frequency_penalty", 0.0)
+        )
+        if presencePenalty or frequencyPenalty:
+            for token, count in counts.items():
+                scores[token] -= presencePenalty + frequencyPenalty * count
+
+        penalty = self.samplingConfig.get("repetition_penalty")
+        if penalty is not None and penalty != 1.0 and history:
+            seen = self._torch.tensor(
+                list(set(history)), dtype=self._torch.long, device=scores.device
+            )
+            selected = scores[seen]
+            scores[seen] = self._torch.where(
+                selected < 0, selected * penalty, selected / penalty
+            )
+
+        temperature = float(self.samplingConfig.get("temperature", 1.0))
+        if temperature <= 0:
+            return int(self._torch.argmax(scores).item())
+        scores = scores / temperature
+
+        topK = int(self.samplingConfig.get("top_k", -1))
+        if topK > 0 and topK < scores.numel():
+            threshold = self._torch.topk(scores, topK).values[-1]
+            scores = self._torch.where(
+                scores < threshold,
+                self._torch.full_like(scores, float("-inf")),
+                scores,
+            )
+
+        typicalP = float(self.samplingConfig.get("typical_p", 1.0))
+        if 0 < typicalP < 1:
+            probs = self._torch.softmax(scores, dim=-1)
+            logProbs = self._torch.log(probs.clamp_min(1e-20))
+            entropy = -(probs * logProbs).sum()
+            shifted = (-logProbs - entropy).abs()
+            _, sortedIndices = self._torch.sort(shifted, descending=False)
+            cumulative = self._torch.cumsum(probs[sortedIndices], dim=-1)
+            remove = cumulative > typicalP
+            remove[1:] = remove[:-1].clone()
+            remove[0] = False
+            removeUnsorted = self._torch.zeros_like(remove).scatter(
+                0, sortedIndices, remove
+            )
+            scores = scores.masked_fill(removeUnsorted, float("-inf"))
+
+        topP = float(self.samplingConfig.get("top_p", 1.0))
+        if 0 < topP < 1:
+            sortedScores, sortedIndices = self._torch.sort(
+                scores, descending=True
+            )
+            sortedProbs = self._torch.softmax(sortedScores, dim=-1)
+            cumulative = self._torch.cumsum(sortedProbs, dim=-1)
+            remove = cumulative > topP
+            # Keep the first token over the threshold, matching HF's
+            # TopPLogitsWarper shift behavior.
+            remove[1:] = remove[:-1].clone()
+            remove[0] = False
+            removeUnsorted = self._torch.zeros_like(remove).scatter(
+                0, sortedIndices, remove
+            )
+            scores = scores.masked_fill(removeUnsorted, float("-inf"))
+
+        minP = self.samplingConfig.get("min_p")
+        if minP is not None and 0 < float(minP) <= 1:
+            probs = self._torch.softmax(scores, dim=-1)
+            scores = scores.masked_fill(
+                probs < probs.max() * float(minP), float("-inf")
+            )
+
+        probs = self._torch.softmax(scores, dim=-1)
+        if not self._torch.isfinite(probs).all() or float(probs.sum()) <= 0:
+            return int(self._torch.argmax(scores).item())
+        return int(
+            self._torch.multinomial(probs, num_samples=1, generator=generator)
+            .item()
+        )
+
+    def _Generator(self) -> Optional[Any]:
+        seed = self.samplingConfig.get("seed")
+        if seed is None:
+            return None
+        generator = self._torch.Generator(device=self.device)
+        generator.manual_seed(int(seed))
+        return generator
+
     def Generate(
         self,
         inputIds: List[int],
@@ -161,7 +291,7 @@ class TransformersGenerator:
         maxNewTokens: Optional[int] = None,
         returnCache: bool = False,
     ) -> Tuple[Any, ...]:
-        """Greedy-decode ``inputIds``.
+        """Decode ``inputIds`` according to the resolved ModelConfig.
 
         Returns ``(text, ttft, totalTime, numOutputTokens)``.
         When ``pastKeyValues`` is given (naive reuse), only the suffix is
@@ -169,9 +299,11 @@ class TransformersGenerator:
         """
         maxNew = self.maxNewTokens if maxNewTokens is None else maxNewTokens
         generated: List[int] = []
+        history = list(inputIds)
         past = pastKeyValues
         t0 = time.perf_counter()
         ttft: Optional[float] = None
+        generator = self._Generator()
 
         with self._torch.no_grad():
             for _ in range(max(1, maxNew)):
@@ -180,12 +312,13 @@ class TransformersGenerator:
                 else:
                     out = self.Forward(inputIds, past, useCache=True)
                 logits = out.logits[0, -1]
-                nxt = int(self._torch.argmax(logits).item())
+                nxt = self._SampleNextToken(logits, history, generator)
                 if ttft is None:
                     ttft = time.perf_counter() - t0
                 generated.append(nxt)
+                history.append(nxt)
                 past = out.past_key_values
-                if nxt == self.eosId:
+                if nxt in self.eosIds:
                     break
                 inputIds = [nxt]
 
@@ -233,12 +366,17 @@ class TransformersGenerator:
 
         t0 = time.perf_counter()
         with self._torch.no_grad():
+            generationKwargs = TransformersGenerationKwargs(
+                self.samplingConfig, maxNew
+            )
+            generator = self._Generator()
+            if generator is not None:
+                generationKwargs["generator"] = generator
             out = self.model.generate(
                 batch,
                 attention_mask=mask,
-                max_new_tokens=maxNew,
                 pad_token_id=padId,
-                do_sample=False,
+                **generationKwargs,
             )
         total = time.perf_counter() - t0
         amortized = total / len(inputIdsList) if inputIdsList else 0.0
