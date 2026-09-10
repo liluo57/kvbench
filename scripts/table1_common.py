@@ -195,30 +195,20 @@ def make_methods(
     *,
     max_new_tokens: int,
 ) -> List[Any]:
-    """Construct the five required Table 1 methods.
+    """Construct the Table 1 methods used by this branch.
 
-    EPIC is deliberately required.  If its adapter is not yet present, fail
-    loudly instead of silently producing a four-method comparison.
+    EPIC is intentionally skipped (no adapter is wired into this branch).
+    Cacheblend is run via the original external CacheBlend repo subprocess
+    (:class:`methods.CacheblendRepo`), which expects ``<RepoPath>/.venv/bin/python``
+    to exist; on pku14 this path is a symlink to ``/data1/ly/envs/cacheblend/bin/python3.10``
+    so the original YaoJiayi/CacheBlend vllm_blend is reused as-is.
     """
-    from methods import A3, CacheblendRepo, FullPrefillTransformer, NaiveTransformer
-
-    epic_cls = None
-    for module_name, class_name in (
-        ("methods.EPIC", "EPIC"),
-        ("methods.Epic", "Epic"),
-        ("methods.LegoLink", "LegoLink"),
-    ):
-        try:
-            module = __import__(module_name, fromlist=[class_name])
-            epic_cls = getattr(module, class_name)
-            break
-        except (ImportError, AttributeError):
-            continue
-    if epic_cls is None:
-        raise RuntimeError(
-            "Table 1 requires the EPIC/LegoLink Method adapter; expected "
-            "methods.EPIC.EPIC, methods.Epic.Epic, or methods.LegoLink.LegoLink"
-        )
+    from methods import (
+        A3,
+        CacheblendRepo,
+        FullPrefillTransformer,
+        NaiveTransformer,
+    )
 
     common = dict(gpuNums=1, maxNewTokens=max_new_tokens)
     return [
@@ -228,13 +218,6 @@ def make_methods(
             **common,
             recompRatio=0.15,
             tag="cacheblend",
-        ),
-        epic_cls(
-            gpuNums=1,
-            maxNewTokens=max_new_tokens,
-            recomputeTokensPerChunk=20,
-            dtype="float16",
-            tag="legolink_epic",
         ),
         A3(
             **common,
