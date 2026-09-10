@@ -26,6 +26,7 @@ Each constructor declares the strict ``gpuNums`` requirement and a relative
 
 from .CacheblendLmcache import CacheblendLmcache
 from .CacheblendRepo import CacheblendRepo, NaiveCacheblendRepo
+from .A3 import A3
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
@@ -37,4 +38,5 @@ __all__ = [
     "FullPrefillVllm",
     "HypicMethod",
     "NaiveTransformer",
+    "A3",
 ]
