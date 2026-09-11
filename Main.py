@@ -18,6 +18,7 @@ from methods import (
     FullPrefillTransformer,
     HypicMethod,
     NaiveTransformer,
+    DependencyAnalysisMethod,
 )
 from tasks import (
     AgentBenchFlowTask,
@@ -45,10 +46,14 @@ def Main() -> None:
         # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
         # CWEShuffleTask(maxSamples=MAX_SAMPLES),
         # VTShuffleTask(maxSamples=MAX_SAMPLES),
-        MusiqueTask(maxSamples=MAX_SAMPLES),
+        # MusiqueTask(maxSamples=MAX_SAMPLES),
         # SamsumTask(maxSamples=MAX_SAMPLES),
-        WikimQATask(maxSamples=MAX_SAMPLES),
+        # WikimQATask(maxSamples=MAX_SAMPLES),
         # FreshGapTask(nCases=MAX_SAMPLES),
+        GovReportTask(maxSamples=MAX_SAMPLES),
+        # HotpotQATask(maxSamples=MAX_SAMPLES),
+        # MultiNewsTask(maxSamples=MAX_SAMPLES),
+        # TriviaQATask(maxSamples=MAX_SAMPLES),
         # KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
         # KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
         # KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
@@ -81,19 +86,21 @@ def Main() -> None:
     # ]
     # tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
-    MAX_NEW_TOKENS = 64
+    MAX_NEW_TOKENS = 512
     methods = [
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
+        DependencyAnalysisMethod(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
         # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
         # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
-        NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
+        # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
         # FullPrefillVllm(
         #     gpuNums=2, perfWeight=2, maxNewTokens=40960,
         #     gpuMemoryUtilization=0.85,
         #     maxModelLen=256000,
         #     enforceEager=True,
         #     languageModelOnly=True,
-        # )
+        # ),
+
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
