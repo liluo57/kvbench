@@ -25,14 +25,14 @@
 DatasetPath: /root/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /root/autodl-tmp/models/Qwen3.5-35b
+ModelPath: /root/autodl-tmp/models/Qwen3.8-27b
 
 # Shared model sampling policy.
 #   greedy   - deterministic argmax decoding
 #   default  - use the model's generation_config.json (or config.json)
 #   override - use the sampling values listed below
 ModelConfig:
-  mode: default
+  mode: greedy #default
   temperature: 1.0
   top_p: 0.95
   top_k: 20
@@ -47,12 +47,14 @@ Hypic:
   # PIC PICache segment count rarely exceeds a few dozen in practice; 32 is
   # safe for the current agent tasks. Set to -1 to fall back to SGLang's
   # auto-fit (default when this key is absent).
-  MaxMambaCacheSize: 32
+  MaxMambaCacheSize: 128
 
 # The benchmark entry point reads its shared runtime settings from this section.
 # Task selection and method parameters remain in Main.py.
 Engine:
-  AvailableGpuIds: auto
+  # GPU 0 reports a bogus 100% utilization; use the explicit physical pool.
+  # This machine exposes eight devices numbered 0 through 7.
+  AvailableGpuIds: [0, 1, 2, 3, 4, 5, 6, 7]
   BatchSize: 1
   OutputRoot: outputs
   InitializeTimeoutSec: 600
