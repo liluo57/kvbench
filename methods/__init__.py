@@ -29,6 +29,7 @@ from .CacheblendRepo import CacheblendRepo, NaiveCacheblendRepo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
+from .ProphetKV import ProphetKV
 __all__ = [
     "CacheblendLmcache",
     "CacheblendRepo",
@@ -37,4 +38,5 @@ __all__ = [
     "FullPrefillVllm",
     "HypicMethod",
     "NaiveTransformer",
+    "ProphetKV",
 ]
