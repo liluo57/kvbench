@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 
@@ -24,7 +25,6 @@ class A3Worker:
         sys.path.insert(0, self.repo_root)
 
         import torch
-        from models.loader import load_model, load_model_precompute
 
         self.torch = torch
         try:
@@ -46,11 +46,25 @@ class A3Worker:
             rate=args.recomp_ratio,
         )
 
+        # Qwen3 is not part of the old ragkv checkout or its Transformers
+        # environment.  Install the out-of-tree bridge before importing the
+        # official loader; Llama/Mistral/Qwen2 continue through ragkv's native
+        # functions unchanged.
+        arch = self._arch_name(args.model)
+        if arch == "Qwen3":
+            kvbench_root = str(Path(__file__).resolve().parents[2])
+            if kvbench_root not in sys.path:
+                sys.path.insert(0, kvbench_root)
+            from helpers.a3_repo.Qwen3ForA3Repo import install_qwen3
+
+            load_model, load_model_precompute = install_qwen3(self.repo_root)
+        else:
+            from models.loader import load_model, load_model_precompute
+
         # ragkv's precompute loader temporarily replaces
         # transformers.<Arch>ForCausalLM.  Restore the public class before
         # loading the runtime model so both official model variants coexist.
         import transformers
-        arch = self._arch_name(args.model)
         class_name = f"{arch}ForCausalLM"
         original_cls = getattr(transformers, class_name)
         print(f"[a3-repo-helper] loading official precompute model {args.model} ...", flush=True)
@@ -67,11 +81,23 @@ class A3Worker:
 
     @staticmethod
     def _arch_name(model_path: str) -> str:
+        config_path = Path(model_path).expanduser() / "config.json"
+        if config_path.is_file():
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                architectures = config.get("architectures", []) or []
+                model_type = str(config.get("model_type", "")).lower()
+                if any("Qwen3" in str(name) for name in architectures) or model_type == "qwen3":
+                    return "Qwen3"
+            except (OSError, json.JSONDecodeError):
+                pass
         lower = model_path.lower()
         if "llama" in lower:
             return "Llama"
         if "mistral" in lower:
             return "Mistral"
+        if "qwen3" in lower:
+            return "Qwen3"
         if "qwen" in lower:
             return "Qwen2"
         raise ValueError(f"official ragkv adapter does not recognize model path: {model_path}")
