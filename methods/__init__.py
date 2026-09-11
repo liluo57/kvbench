@@ -14,6 +14,9 @@ Each constructor declares the strict ``gpuNums`` requirement and a relative
   CacheblendRepoHelper``) collects the context KV once and fuses each fresh
   query against it; ``reuse_ratio`` is reported by the worker. Repo/model paths
   come from ``config.yaml`` (``Cacheblend.Repo.*``).
+- :class:`A3Repo` — A^3 via the authors' official ``ragkv`` repository: a
+  worker subprocess under that repository's environment, with only the
+  KVBench lifecycle and request protocol implemented in this checkout.
 - :class:`FullPrefillTransformer` / :class:`FullPrefillVllm` — the recompute
   baselines: answer the full prompt from scratch every query, over plain
   transformers / the system vLLM.
@@ -26,6 +29,7 @@ Each constructor declares the strict ``gpuNums`` requirement and a relative
 
 from .CacheblendLmcache import CacheblendLmcache
 from .CacheblendRepo import CacheblendRepo, NaiveCacheblendRepo
+from .A3Repo import A3Repo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
@@ -33,6 +37,7 @@ __all__ = [
     "CacheblendLmcache",
     "CacheblendRepo",
     "NaiveCacheblendRepo",
+    "A3Repo",
     "FullPrefillTransformer",
     "FullPrefillVllm",
     "HypicMethod",
