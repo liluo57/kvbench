@@ -941,10 +941,18 @@ def WrapAptInstallRun(body: str) -> str:
         # ``apt-get update &&`` so we rely on indexes baked into the base
         # image, but those indexes are against archive.ubuntu.com /
         # deb.debian.org and cannot satisfy an install against the mirror.
-        # The semicolon (not ``&&``) keeps :func:`RemoveAptUpdateCommands`
-        # from stripping this update.
+        # The semicolon (not ``&&``) between the update and install keeps
+        # the install going even if a single apt repo is missing (e.g.
+        # Debian ``trixie-security`` on tuna returns 404 because tuna does
+        # not mirror that suite; apt-get update then exits 100, but the
+        # ``main`` / ``updates`` indexes have already been refreshed, which
+        # is enough for ``apt-get install`` to resolve the requested
+        # packages).  We then chain install -> restoreList with ``&&`` so a
+        # failed ``apt-get install`` propagates to the RUN's exit code;
+        # otherwise ``restoreList`` succeeds and Docker commits a layer
+        # missing the intended packages (e.g. wget / pip / git).
         f"apt-get update; "
-        f"{prefix}{aptPortion}; "
+        f"{prefix}{aptPortion} && "
         f"{restoreList}"
     )
 
@@ -1011,9 +1019,13 @@ def WrapDnfInstallRun(body: str) -> str:
         f"{rewriteRepos}; "
         # dnf/microdnf cache metadata under ``/var/cache/dnf``; force a refresh
         # against the mirror repos we just wrote so the install can resolve
-        # package names that the original repo files never indexed.
+        # package names that the original repo files never indexed. The
+        # trailing ``|| true`` survives a partial cache rebuild on minimal
+        # base images; we then ``&&``-chain the install so a failure
+        # propagates to the RUN's exit code and Docker does NOT commit a
+        # layer where dnf failed to install the requested packages.
         f"dnf -y makecache --disablerepo='*' --enablerepo='*' 2>/dev/null || true; "
-        f"{prefix}{rpmPortion}; "
+        f"{prefix}{rpmPortion} && "
         f"{restoreRepos}"
     )
 
@@ -1023,10 +1035,34 @@ def WrapPipInstallRun(body: str) -> str:
 
     ``--index-url`` is per-invocation and does not touch pip's user/global
     config files, so the final image's ``~/.pip/pip.conf`` etc. stay clean.
+
+    Also rewrites pip's ``git+https://github.com/...`` URLs through the
+    gh-proxy.com front-end: pip delegates to ``git clone`` for VCS
+    installs, so we need a ``git config --global url.<...>.insteadOf`` to
+    redirect those clones. Doing this at the start of the RUN keeps the
+    final image's ``~/.gitconfig`` empty (the ``GIT_CONFIG_GLOBAL`` env
+    var points at ``/tmp/.kvbench-gitconfig`` which is removed in the
+    final cleanup; ``git config --global`` would otherwise write to
+    ``~/.gitconfig`` which is part of the image).
     """
 
     if not re.search(r"(?i)\bpip3?\s+install\b", body):
         return body
+    if "github.com" in body:
+        # pip delegates VCS installs to ``git clone``; rewrite github.com
+        # URLs through the gh-proxy.com front-end via an insteadOf config.
+        # ``GIT_CONFIG_GLOBAL`` only affects reads (git config --global
+        # writes to ~/.gitconfig regardless), so we write the config
+        # file directly and point the env var at it. The file lives in
+        # /tmp and is removed by Docker's layer eviction, so the final
+        # image does not carry the redirect.
+        body = (
+            "printf '[url \"https://" + GITHUB_PROXY_HOST + "/https://github.com/\"]\\n"
+            "	insteadOf = https://github.com/\\n' "
+            "> /tmp/.kvbench-gitconfig && "
+            "GIT_CONFIG_GLOBAL=/tmp/.kvbench-gitconfig "
+            + body
+        )
     rewritten = re.sub(
         r"(?i)(\bpip3?\s+install\b)",
         rf"\1 --index-url {PIP_MIRROR_URL}",
@@ -1126,10 +1162,16 @@ def WrapGitCloneRun(body: str) -> str:
     url.<...>.insteadOf`` because the config would persist for any later
     git invocation in the same RUN. The mirror only proxies github.com; git
     clones against any other host are left untouched.
+
+    The URL may follow ``git clone`` directly OR come after any number of
+    short/long flags (e.g. ``git clone --depth 1 --branch v1.2.0 URL``); the
+    pattern below uses a non-greedy match through the flags before the URL
+    so we still anchor at ``https?://``. We capture the URL into a group so
+    ``replace`` can rewrite it.
     """
 
     def replace(match: re.Match[str]) -> str:
-        verb = match.group(1)
+        head = match.group(1)
         url = match.group(2)
         if url.startswith("https://github.com/") or url.startswith(
             "http://github.com/"
@@ -1137,12 +1179,12 @@ def WrapGitCloneRun(body: str) -> str:
             url = f"https://{GITHUB_PROXY_HOST}/https://github.com/" + url.split(
                 "github.com/", 1
             )[1]
-        return f"{verb} {url}"
+        return f"{head} {url}"
 
     if not re.search(r"(?i)\bgit\s+clone\b", body):
         return body
     rewritten = re.sub(
-        r"(?i)(git\s+clone)\s+(https?://[^\s'\"\\$|&;]+)",
+        r"(?i)(git\s+clone(?:\s+--?[A-Za-z][\w-]*(?:[ =][^\s'\"\\$|&;]+)?)*?)\s+(https?://[^\s'\"\\$|&;]+)",
         replace,
         body,
     )
@@ -1274,19 +1316,84 @@ def WrapNpmInstallRun(body: str) -> str:
 
     ``--registry`` is per-invocation and does not write to ``~/.npmrc`` or
     the project config, so the final image's npm settings are pristine.
+
+    Also matches invocations through the npm CLI JS bootstrap
+    (``node /opt/nodeXX/lib/node_modules/npm/bin/npm-cli.js install ...``,
+    which is what ``/opt/nodeXX/bin/npm`` symlinks to). The naive
+    ``\bnpm install`` regex misses those because the npm command is
+    loaded via a relative ``node`` path. We match either form.
     """
 
-    if not re.search(r"(?i)\bnpm\s+(?:install|i|add|ci)\b", body):
+    if not re.search(
+        r"(?i)(?:\bnpm\b|(?:npm-cli\.js|npm\.cmd))\s+(?:install|i|add|ci)\b",
+        body,
+    ):
         return body
     if "--registry" in body or "registry=" in body:
         return body
     rewritten = re.sub(
-        r"(?i)(\bnpm\s+(?:install|i|add|ci))\b",
+        r"(?i)((?:\bnpm\b|npm-cli\.js|npm\.cmd)\s+(?:install|i|add|ci))\b",
         rf"\1 --registry={NPM_MIRROR_REGISTRY}",
         body,
         count=1,
     )
     return _WithProxyUnset(rewritten)
+
+
+def WrapPlaywrightInstallRun(body: str) -> str:
+    """Redirect ``playwright install`` browser downloads through npmmirror.
+
+    Playwright's browser binary download is ~150 MB and the upstream
+    CDN (``playwright.download.prss.microsoft.com``) is intermittently
+    unreachable from the build host (proxy SSL resets). npmmirror hosts
+    a read-through mirror of the Playwright binaries at
+    ``/mirrors/playwright``; setting ``PLAYWRIGHT_DOWNLOAD_HOST`` to its
+    root makes ``playwright install`` fetch from there instead.
+
+    PLAYWRIGHT_DOWNLOAD_HOST is a Playwright-respected env var read at
+    install time; it does not persist into the final image.
+    """
+
+    if not re.search(r"(?i)\bplaywright\s+install\b", body):
+        return body
+    body = (
+        "PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright "
+        + body
+    )
+    return _WithProxyUnset(body)
+
+
+def WrapHuggingFaceRun(body: str) -> str:
+    """Make huggingface_hub + Kokoro-style downloads go through hf-mirror.
+
+    huggingface_hub honors ``HF_ENDPOINT`` for the model/repo REST API,
+    but Kokoro / `huggingface_hub.file_download` use the xet protocol
+    (``cas-bridge.xethub.hf.co``) for the actual blob bytes, which is
+    a separate CDN with its own TLS issues from this build host. Setting
+    ``HF_HUB_DISABLE_XET=1`` forces the regular HTTP path through
+    ``HF_ENDPOINT=hf-mirror.com``, sidestepping the flaky xet CDN.
+
+    We only trigger the wrap when the RUN body has a hint of HF model
+    download: explicit ``KPipeline``, ``huggingface_hub``,
+    ``transformers``, ``from_pretrained`` etc. The wrap is also a no-op
+    if ``HF_ENDPOINT`` is already set in the body (the upstream author
+    configured a different endpoint).
+    """
+
+    if "HF_ENDPOINT" in body:
+        return body
+    if not re.search(
+        r"(?i)(?:KPipeline|huggingface_hub|transformers|from_pretrained|"
+        r"snapshot_download|AutoModel|AutoTokenizer)",
+        body,
+    ):
+        return body
+    body = (
+        "HF_ENDPOINT=https://hf-mirror.com "
+        "HF_HUB_DISABLE_XET=1 "
+        + body
+    )
+    return _WithProxyUnset(body)
 
 
 def _WithProxyUnset(body: str) -> str:
@@ -1396,12 +1503,19 @@ def RewritePackageManagerRuns(text: str) -> str:
             newBody = WrapCurlWgetRun(newBody)
         if re.search(r"(?i)\bgit\s+clone\b", newBody):
             newBody = WrapGitCloneRun(newBody)
-        if re.search(r"(?i)\bnpm\s+(?:install|i|add|ci)\b", newBody):
+        if re.search(
+            r"(?i)(?:\bnpm\b|npm-cli\.js|npm\.cmd)\s+(?:install|i|add|ci)\b",
+            newBody,
+        ):
             newBody = WrapNpmInstallRun(newBody)
         if re.search(r"(?i)\b(?:cs|coursier)\s+(?:setup|launch|install)\b", newBody):
             newBody = WrapCoursierRun(newBody)
         if "deb.nodesource.com/setup_" in newBody:
             newBody = WrapNodeSourceSetupRun(newBody)
+        if re.search(r"(?i)\bplaywright\s+install\b", newBody):
+            newBody = WrapPlaywrightInstallRun(newBody)
+        if re.search(r"(?i)(?:from\s+\S+\s+import|KPipeline|huggingface_hub)", newBody) and "github.com" not in body:
+            newBody = WrapHuggingFaceRun(newBody)
         if newBody == body:
             rendered.append(logical + "\n")
             continue
@@ -1567,16 +1681,12 @@ def BuildTaskImage(
     try:
         dockerfileText = dockerfile.read_text(encoding="utf-8")
         rewritten = dockerfileText
-        if useMirror:
-            # Mirror wrapping happens regardless of the apt-base optimization:
-            # some skills use apt without ``apt-get update`` (already satisfied
-            # by the base) but the actual install step still goes through the
-            # proxy and benefits from the rewrite.
-            rewritten = RewritePackageManagerRuns(rewritten)
-            # Redirect huggingface_hub to the Chinese mirror so build-time
-            # ``python3 -c "from <pkg> import <Model>; ..."`` model
-            # downloads survive the host's flaky SSL path to huggingface.co.
-            rewritten = InjectHuggingfaceEndpoint(rewritten)
+        # When the apt-base optimization applies, strip the user's original
+        # ``apt-get update &&`` from the *source* text first. The wrap added
+        # below relies on its own ``apt-get update &&`` to refresh against
+        # the mirror sources list it writes; if we strip after wrapping, we
+        # would also strip the wrap's update, leaving the install unable to
+        # resolve packages against the mirror.
         if DockerfileHasAptUpdate(dockerfile):
             canReuseAptBase = aptUpdateMode == "never"
             if (
@@ -1589,11 +1699,25 @@ def BuildTaskImage(
                     aptBaseImages or {}
                 )
             if canReuseAptBase:
-                rewritten = RemoveAptUpdateCommands(rewritten)
+                stripped = RemoveAptUpdateCommands(dockerfileText)
+                rewritten = stripped
                 if aptUpdateMode == "once":
                     rewritten = ReplaceDockerfileBaseImages(
                         rewritten, aptBaseImages or {}
                     )
+        if useMirror:
+            # Mirror wrapping happens regardless of the apt-base optimization:
+            # some skills use apt without ``apt-get update`` (already satisfied
+            # by the base) but the actual install step still goes through the
+            # proxy and benefits from the rewrite. Wrap AFTER the apt-base
+            # text rewriting above so the wrap's own ``apt-get update &&``
+            # is preserved (it is not subject to RemoveAptUpdateCommands
+            # because that already ran on dockerfileText).
+            rewritten = RewritePackageManagerRuns(rewritten)
+            # Redirect huggingface_hub to the Chinese mirror so build-time
+            # ``python3 -c "from <pkg> import <Model>; ..."`` model
+            # downloads survive the host's flaky SSL path to huggingface.co.
+            rewritten = InjectHuggingfaceEndpoint(rewritten)
         if rewritten != dockerfileText:
             toolDirectory = ToolDirectory()
             toolDirectory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2143,12 +2267,20 @@ def BuildArgumentParser() -> argparse.ArgumentParser:
         "--use-mirror",
         dest="use_mirror",
         action="store_true",
+        default=True,
         help=(
             "rewrite apt/dnf/pip install commands in temporary Dockerfiles "
             "to use TUNA mirrors; original sources.list, yum.repos.d, and "
             "pip config are restored before each RUN ends so the final "
-            "image is byte-identical to one built with the upstream archives"
+            "image is byte-identical to one built with the upstream archives. "
+            "On by default; use --no-mirror to disable."
         ),
+    )
+    parser.add_argument(
+        "--no-mirror",
+        dest="use_mirror",
+        action="store_false",
+        help="disable TUNA mirror rewrites (use the upstream archives)",
     )
     parser.add_argument(
         "--log-dir",

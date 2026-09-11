@@ -43,6 +43,10 @@ Patches applied:
      request whose auth cache expires (or was never warmed) hits
      `import prisma` → ModuleNotFoundError → 500 Internal Server
      Error, freezing the agent mid-turn until taskTimeout fires.
+  7. benchflow/agents/registry.py + pi_acp_launcher.py: ensure python3 is
+     available before the Pi settings merge, and make the generated launcher
+     compatible with Python 3.8+. Several SkillsBench images do not ship a
+     `python3` command, while others still use Python 3.8/3.9.
 
 All patches are idempotent: each looks for a marker string (a comment
 or a distinctive post-patch substring) first and aborts that step with a
@@ -101,6 +105,7 @@ REGISTRY_PATH = BENCHFLOW_ROOT / "agents" / "registry.py"
 DOCKER_PATH = BENCHFLOW_ROOT / "sandbox" / "docker.py"
 LITELLM_CONFIG_PATH = BENCHFLOW_ROOT / "providers" / "litellm_config.py"
 LITELLM_RUNTIME_PATH = BENCHFLOW_ROOT / "providers" / "litellm_runtime.py"
+PI_LAUNCHER_PATH = BENCHFLOW_ROOT / "agents" / "pi_acp_launcher.py"
 
 # Marker comments — also serve as the patch "fingerprint" for idempotency.
 # Re-applying the patch on a file that already has the marker is a no-op.
@@ -109,6 +114,12 @@ MARKER_AUTONOMY = "# Patched for KVBench smoke runs: pi autonomous directive"
 MARKER_NO_RMI = "# Patched for kvbench smoke runs: do NOT pass `--rmi all`"
 MARKER_APT_MIRROR = "# Patched for KVBench smoke runs: rewrite apt mirror to tuna"
 MARKER_PI_TIMEOUT = "# Patched for KVBench smoke runs: extend Pi provider timeout"
+MARKER_PYTHON_BOOTSTRAP = (
+    "# Patched for KVBench smoke runs: ensure python3 before Pi setup"
+)
+MARKER_LAUNCHER_COMPAT = (
+    "# Patched for KVBench smoke runs: Python 3.8-compatible Pi launcher"
+)
 
 # Belt-and-braces idempotency markers: post-patch substrings that are unique
 # to the patched state. The session's hand-edits left the actual code
@@ -120,6 +131,11 @@ POST_PATCH_AUTONOMY = "_PI_AUTONOMOUS_DIRECTIVE = ("
 # also present in the upstream ``down --rmi all --volumes`` block.
 POST_PATCH_NO_RMI = '"down",\n                        "--volumes",\n                        "--remove-orphans",'
 POST_PATCH_PI_TIMEOUT = '"timeoutMs": 10800000'
+POST_PATCH_PYTHON_BOOTSTRAP = (
+    "command -v apt-get >/dev/null 2>&1 && apt-get update -qq && "
+    "apt-get install -y -qq python3 >/dev/null 2>&1"
+)
+POST_PATCH_LAUNCHER_COMPAT = "isinstance(value, (str, bytes, bytearray))"
 POST_PATCH_LITELLM_NO_AUTH_CONFIG = (
     '"general_settings": ({"master_key": master_key} if master_key else {})'
 )
@@ -242,6 +258,79 @@ _PIACP_VERSIONED_LINE = (
 def _has_pi_timeout_patch(text: str) -> bool:
     """True iff the Pi provider timeout/retry setting is installed."""
     return MARKER_PI_TIMEOUT in text or POST_PATCH_PI_TIMEOUT in text
+
+
+def _has_python_bootstrap_patch(text: str) -> bool:
+    """True iff registry.py installs python3 before Pi setup commands."""
+    return (
+        MARKER_PYTHON_BOOTSTRAP in text
+        or POST_PATCH_PYTHON_BOOTSTRAP in text
+    )
+
+
+def _build_python_bootstrap_block() -> str:
+    """Return the python3 bootstrap placed before the Pi install/settings."""
+    return (
+        "            "
+        + MARKER_PYTHON_BOOTSTRAP
+        + "\n"
+        + "            f\"( command -v python3 >/dev/null 2>&1 || "
+        + "( command -v apt-get >/dev/null 2>&1 && apt-get update -qq && "
+        + "apt-get install -y -qq python3 >/dev/null 2>&1 ) ) && \"\n"
+    )
+
+
+def _has_launcher_compat_patch(text: str) -> bool:
+    """True iff the Pi launcher avoids Python 3.10-only union syntax."""
+    return (
+        MARKER_LAUNCHER_COMPAT in text
+        and "from typing import Optional" in text
+        and "def _positive_int(value: object) -> Optional[int]:" in text
+        and POST_PATCH_LAUNCHER_COMPAT in text
+    )
+
+
+def patch_launcher() -> str:
+    """Make pi_acp_launcher.py runnable on Python 3.8 and newer."""
+    if not PI_LAUNCHER_PATH.exists():
+        return f"[pi_acp_launcher.py] not found at {PI_LAUNCHER_PATH}"
+    text = PI_LAUNCHER_PATH.read_text()
+    if _has_launcher_compat_patch(text):
+        return "[pi_acp_launcher.py] Python 3.8 compatibility already applied, skip"
+
+    importAnchor = "from pathlib import Path\n"
+    functionAnchor = "def _positive_int(value: object) -> int | None:\n"
+    unionAnchor = "isinstance(value, str | bytes | bytearray)"
+    if importAnchor not in text or functionAnchor not in text or unionAnchor not in text:
+        return (
+            "[pi_acp_launcher.py] Python-version compatibility anchors not found — "
+            "launcher layout changed; manual patch needed"
+        )
+
+    text = text.replace(
+        importAnchor,
+        importAnchor + "from typing import Optional\n",
+        1,
+    )
+    text = text.replace(
+        functionAnchor,
+        MARKER_LAUNCHER_COMPAT
+        + "\n"
+        + "def _positive_int(value: object) -> Optional[int]:\n",
+        1,
+    )
+    text = text.replace(unionAnchor, POST_PATCH_LAUNCHER_COMPAT, 1)
+    PI_LAUNCHER_PATH.write_text(text)
+    return (
+        "[pi_acp_launcher.py] replaced Python 3.10-only union syntax with "
+        "Python 3.8-compatible annotations"
+    )
+
+
+def check_launcher() -> bool:
+    if not PI_LAUNCHER_PATH.exists():
+        return False
+    return _has_launcher_compat_patch(PI_LAUNCHER_PATH.read_text())
 
 
 def _build_pi_timeout_block() -> str:
@@ -367,6 +456,27 @@ def patch_registry() -> str:
             "SDK timeout retries"
         )
 
+    # Sub-patch: install python3 before the timeout/settings merge. The
+    # generated launcher also needs python3, and several task images do not
+    # include it by default. Put this before pi-acp installation so every
+    # subsequent Python-backed setup step is safe.
+    if _has_python_bootstrap_patch(text):
+        msgs.append("[registry.py] python3 bootstrap already applied, skip")
+    else:
+        if _PIACP_VERSIONED_LINE not in text:
+            return (
+                "[registry.py] pinned pi-acp install line not found — "
+                "cannot place the python3 bootstrap"
+            )
+        text = text.replace(
+            _PIACP_VERSIONED_LINE,
+            _build_python_bootstrap_block() + _PIACP_VERSIONED_LINE,
+            1,
+        )
+        msgs.append(
+            "[registry.py] added python3 bootstrap before Pi setup/install steps"
+        )
+
     # Sub-patch: prepend apt-mirror rewrite so apt-get update hits tuna
     if _has_apt_mirror_patch(text):
         msgs.append("[registry.py] apt-mirror rewrite already applied, skip")
@@ -399,6 +509,7 @@ def check_registry() -> bool:
         _has_autonomy_patch(text)
         and _has_piacp_pin(text)
         and _has_pi_timeout_patch(text)
+        and _has_python_bootstrap_patch(text)
         and _has_apt_mirror_patch(text)
     )
 
@@ -660,7 +771,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         missing: list[str] = []
         if not check_registry():
-            missing.append("registry.py: pi-acp pin + autonomous directive + apt mirror")
+            missing.append(
+                "registry.py: pi-acp pin + autonomous directive + timeout + "
+                "python3 bootstrap + apt mirror"
+            )
+        if not check_launcher():
+            missing.append("pi_acp_launcher.py: Python 3.8 compatibility")
         if not check_docker():
             missing.append("docker.py: --rmi all removal")
         if not check_litellm():
@@ -677,6 +793,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Apply path
     print(patch_registry())
+    print(patch_launcher())
     print(patch_docker())
     print(patch_litellm())
     return 0
