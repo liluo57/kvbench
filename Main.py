@@ -43,14 +43,17 @@ def Main() -> None:
 
     MAX_SAMPLES = 64
     tasks = [
-        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        # VTShuffleTask(maxSamples=MAX_SAMPLES),
-        # MusiqueTask(maxSamples=MAX_SAMPLES),
-        # SamsumTask(maxSamples=MAX_SAMPLES),
-        # WikimQATask(maxSamples=MAX_SAMPLES),
+        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        VTShuffleTask(maxSamples=MAX_SAMPLES),
+        MusiqueTask(maxSamples=MAX_SAMPLES),
+        SamsumTask(maxSamples=MAX_SAMPLES),
+        WikimQATask(maxSamples=MAX_SAMPLES),
         # FreshGapTask(nCases=MAX_SAMPLES),
-        GovReportTask(maxSamples=MAX_SAMPLES),
+        # GovReportTask(maxSamples=MAX_SAMPLES,nChunks=1,tag='1'),
+        # GovReportTask(maxSamples=MAX_SAMPLES,nChunks=4,tag='4'),
+        # GovReportTask(maxSamples=MAX_SAMPLES,nChunks=8,tag='8'),
+        # GovReportTask(maxSamples=MAX_SAMPLES,nChunks=16,tag='16'),
         # HotpotQATask(maxSamples=MAX_SAMPLES),
         # MultiNewsTask(maxSamples=MAX_SAMPLES),
         # TriviaQATask(maxSamples=MAX_SAMPLES),
@@ -86,10 +89,14 @@ def Main() -> None:
     # ]
     # tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
-    MAX_NEW_TOKENS = 512
+    MAX_NEW_TOKENS = 64
     methods = [
-        DependencyAnalysisMethod(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
-        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS),
+        # DependencyAnalysisMethod(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
+        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0,tag='0'),
+        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.05,tag='0.05'),
+        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.1,tag='0.1'),
+        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.15,tag='0.15'),
+        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.2,tag='0.2'),
         # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
         # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
         # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Tuple
 
 from core.Result import Result
 
-from .bases.KBBase import KBBase, RougeL
+from .bases.KBBase import KBBase, ParagraphChunks, RougeL
 
 
 class GovReportTask(KBBase):
@@ -20,11 +20,39 @@ class GovReportTask(KBBase):
         "\n\nNow, write a one-page summary of the report.\n\nSummary:"
     )
 
+    def __init__(
+        self,
+        dataset=None,
+        maxSamples=-1,
+        startIdx=0,
+        dataDir=None,
+        tag=None,
+        nChunks=1,
+    ):
+        """Create the task, optionally splitting each report into chunks.
+
+        ``nChunks=1`` retains the original single-chunk prompt exactly.
+        Larger values split at paragraph boundaries when available, with a
+        sentence-boundary fallback for the flattened GovReport snapshot.
+        """
+        if not isinstance(nChunks, int) or isinstance(nChunks, bool) or nChunks < 1:
+            raise ValueError("nChunks must be a positive integer")
+        super().__init__(
+            dataset=dataset,
+            maxSamples=maxSamples,
+            startIdx=startIdx,
+            dataDir=dataDir,
+            tag=tag,
+        )
+        self.nChunks = nChunks
+
     def _Build(self, sample: Dict[str, Any]) -> Tuple[List[str], str]:
         context = str(sample.get("context") or "")
         if not context:
             return [], ""
-        return [self.prefixPrompt + context], self.suffixPrompt
+        return ParagraphChunks(
+            context, self.nChunks, prefix=self.prefixPrompt
+        ), self.suffixPrompt
 
     def Evaluate(self, result: Result, metadata: Dict[str, Any]) -> Dict[str, float]:
         prediction = str(result.output or "").lstrip()

@@ -8,6 +8,7 @@ from core.Workflow import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
 from tasks.bases.KBBase import (
     NormalizeAnswer,
+    ParagraphChunks,
     ParseGeneration,
     RougeL,
     TokenEm,
@@ -155,6 +156,40 @@ def test_flatten_answers_handles_scalars_nesting_and_empty_values():
         "0",
         "nested",
     ]
+
+
+def test_paragraph_chunks_preserve_text_and_prefer_paragraph_boundaries():
+    text = "Paragraph one.\n\nParagraph two.\n\nParagraph three.\n\nParagraph four."
+    chunks = ParagraphChunks(text, 2, prefix="Prefix: ")
+
+    assert len(chunks) == 2
+    assert "".join(chunks) == "Prefix: " + text
+    assert chunks[0].endswith("Paragraph two.")
+    assert chunks[1].lstrip().startswith("Paragraph three.")
+
+
+def test_paragraph_chunks_use_sentence_boundaries_for_flattened_text():
+    text = "First sentence. Second sentence! Third sentence? Fourth sentence."
+    chunks = ParagraphChunks(text, 3)
+
+    assert len(chunks) == 3
+    assert "".join(chunks) == text
+    assert all(not chunk or chunk[-1] in ".!?" for chunk in chunks[:-1])
+
+
+def test_govreport_default_and_requested_chunk_counts(tmp_path):
+    from tasks.GovReport import GovReportTask
+
+    context = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+    task = GovReportTask(dataDir=str(tmp_path), nChunks=1)
+    one, suffix = task._Build({"context": context})
+    assert one == [task.prefixPrompt + context]
+    assert suffix == task.suffixPrompt
+
+    splitTask = GovReportTask(dataDir=str(tmp_path), nChunks=3)
+    chunks, _ = splitTask._Build({"context": context})
+    assert len(chunks) == 3
+    assert "".join(chunks) == task.prefixPrompt + context
 
 
 def test_ruler_metric_and_parsing_helpers(tmp_path):
