@@ -30,6 +30,7 @@ from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
 from .ProphetKV import ProphetKV
+from .CacheClip import CacheClip
 __all__ = [
     "CacheblendLmcache",
     "CacheblendRepo",
@@ -39,4 +40,5 @@ __all__ = [
     "HypicMethod",
     "NaiveTransformer",
     "ProphetKV",
+    "CacheClip",
 ]
