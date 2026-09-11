@@ -53,7 +53,7 @@ class OpenAIRequest:
         repr=False
     )
     receivedAt: float = field(default_factory=time.time)
-    # Keep the rendering inputs with the request so a workload can build a
+    # Keep the rendering inputs with the request so a workflow can build a
     # one-off augmented prompt without reaching back into the HTTP endpoint.
     # Defaults preserve compatibility with lightweight test/custom runners
     # that construct OpenAIRequest directly.
@@ -386,7 +386,7 @@ class OpenAIEndpoint:
         self._stopped = False
         # ``finish`` is a graceful end-of-input signal.  A request remains
         # active after it has been handed to vLLM, so the endpoint must not
-        # wake the workload until that request has produced a response.
+        # wake the workflow until that request has produced a response.
         self._finishRequested = False
         self._doneQueued = False
 

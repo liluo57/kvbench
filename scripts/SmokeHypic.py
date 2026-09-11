@@ -28,8 +28,14 @@ def Main() -> None:
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--max-model-len", type=int, default=12000)
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--mem-fraction-static", type=float, default=0.80)
     parser.add_argument("--lines-per-chunk", type=int, default=192)
     parser.add_argument("--pic-mode", default="addition")
+    parser.add_argument(
+        "--task",
+        choices=["niah", "cwe", "vt", "musique", "samsum", "wikimqa"],
+        help="run the first case of a Main.py task instead of the synthetic smoke",
+    )
     parser.add_argument("--full-prefill", action="store_true")
     parser.add_argument(
         "--fresh-gap",
@@ -49,7 +55,7 @@ def Main() -> None:
     method = HypicMethod(
         maxNewTokens=args.max_new_tokens,
         maxModelLen=args.max_model_len,
-        memFractionStatic=0.80,
+        memFractionStatic=args.mem_fraction_static,
         picMode=args.pic_mode,
         fullPrefill=args.full_prefill,
         tag="full_prefill" if args.full_prefill else None,
@@ -79,6 +85,47 @@ def Main() -> None:
     try:
         print("[smoke] initialize", flush=True)
         method.Initialize([args.gpu])
+        if args.task:
+            from tasks import (
+                CWEShuffleTask,
+                MusiqueTask,
+                NIAHShuffleTask,
+                SamsumTask,
+                VTShuffleTask,
+                WikimQATask,
+            )
+
+            taskType = {
+                "niah": NIAHShuffleTask,
+                "cwe": CWEShuffleTask,
+                "vt": VTShuffleTask,
+                "musique": MusiqueTask,
+                "samsum": SamsumTask,
+                "wikimqa": WikimQATask,
+            }[args.task]
+            case = next(taskType(maxSamples=1).Cases())
+            print(
+                f"[smoke] task={args.task} segments="
+                f"{len(case.input.prepare_input)} prepare",
+                flush=True,
+            )
+            method.Prepare([case.input.prepare_input])
+            result = method.Run([case.input.run_input])[0]
+            print(
+                json.dumps(
+                    {
+                        "expected": case.metadata.get("answer"),
+                        "output": result.output,
+                        "performance": result.performance,
+                        "metadata": result.metadata,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                flush=True,
+            )
+            method.Reset()
+            return
         if args.fresh_gap:
             from tasks.FreshGap import FreshGapTask
 

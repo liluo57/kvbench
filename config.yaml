@@ -23,10 +23,27 @@ DatasetPath: /data/lyh/kvbench/data
 # Default model used by the methods when none is passed explicitly.
 ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B
 
+# Shared model sampling policy.
+#   greedy   - deterministic argmax decoding
+#   default  - use the model's generation_config.json (or config.json)
+#   override - use the sampling values listed below
+ModelConfig:
+  mode: default
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+
 # HYPIC's SGLang fork used by methods/Hypic.py. The model itself still comes
 # from the global ModelPath above.
 Hypic:
   RepoPath: /root/hypic
+  # Cap the mamba / linear-attention state pool size per rank. SGLang's
+  # auto-fit (mamba_full_memory_ratio=0.9) defaults to ~300 slots, which on
+  # Qwen3.5-27B eats ~47 GiB per GPU and leaves no room for prefill workspace.
+  # PIC PICache segment count rarely exceeds a few dozen in practice; 32 is
+  # safe for the current agent tasks. Set to -1 to fall back to SGLang's
+  # auto-fit (default when this key is absent).
+  MaxMambaCacheSize: 32
 
 # The benchmark entry point reads its shared runtime settings from this section.
 # Task selection and method parameters remain in Main.py.
@@ -40,7 +57,7 @@ Engine:
   GpuReleaseTimeoutSec: 30
   GpuReleaseStableSeconds: 1
   GpuReleaseMemoryToleranceMiB: 256
-  PairRetries: 1
+  PairRetries: 0
   Tui: true
   Verbose: true
 
@@ -56,9 +73,10 @@ Cacheblend:
 
 # SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:
-  # Dataset mode is the reproducible path. SkillsBenchRepo is needed for local
-  # source runs and is not used to select task ids.
-  SourceMode: dataset
+  # Upload the selected task from this checkout to the remote Docker server.
+  # This is the source mode used by the pre-refactor remote-docker runs and
+  # avoids resolving the dataset through the remote GitHub registry.
+  SourceMode: local
   Dataset: skillsbench@1.1
   SkillsBenchRepo: /root/skillsbench
 

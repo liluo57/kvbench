@@ -12,7 +12,7 @@ class ThroughputMetric(Metric):
     Per inference RUN: ``numOutputTokens / totalTime``. The summary
     additionally reports ``throughput_total_tokens_per_sec`` — the aggregate
     throughput over the whole run (sum tokens / sum time), the more meaningful
-    number for an amortized / batched workload.
+    number for an amortized / batched workflow.
     """
 
     name = "throughput"

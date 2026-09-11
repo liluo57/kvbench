@@ -9,11 +9,11 @@ Case payload contract
 ---------------------
 :class:`NIAHTask`:
     ``input = RAGInput(prepare_input=[], run_input=fullChatPrompt)``
-    ``workload = RAGWorkload`` (skip Prepare, just Run)
+    ``workflow = RAGWorkflow`` (skip Prepare, just Run)
 
 :class:`NIAHShuffleTask`:
     ``input = RAGInput(prepare_input=parts, run_input=shuffled_prompt)``
-    ``workload = RAGWorkload`` (Prepare → Run)
+    ``workflow = RAGWorkflow`` (Prepare → Run)
 
 ``prefix`` (user opener + instruction) and ``suffix`` (question + assistant
 header + answer prefix) are kept in place, so the shuffled prompt stays a
@@ -29,7 +29,7 @@ from typing import Any, Dict, Iterator, List, Tuple
 from core.Config import ModelPath
 from core.Result import Result
 from core.Task import Case
-from workload.RAGWorkload import RAGInput, RAGWorkload
+from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
 from .bases.RulerBase import RulerBase
 from helpers.backends.ModelAdapter import assistant_turn_suffix, user_turn_prefix
@@ -50,7 +50,7 @@ class NIAHTask(RulerBase):
             _, fullPrompt = self._BuildChatParts(s, splitNeedle=True)
             yield Case(
                 input=RAGInput(prepare_input=[], run_input=fullPrompt),
-                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=[], run_input=fullPrompt)),
+                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=[], run_input=fullPrompt)),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 
@@ -89,7 +89,7 @@ class NIAHShuffleTask(NIAHTask):
             run_input = parts[0] + "".join(shuffled) + parts[-1]
             yield Case(
                 input=RAGInput(prepare_input=parts, run_input=run_input),
-                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=parts, run_input=run_input)),
+                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=parts, run_input=run_input)),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 

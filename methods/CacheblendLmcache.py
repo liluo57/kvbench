@@ -61,6 +61,7 @@ from typing import Dict, List, Optional, Sequence
 from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from core.Sampling import ResolveSamplingConfig, VllmSamplingParams
 
 from helpers.backends.Prompt import ComposeReuse
 from helpers.backends.VllmCacheblendPatches import (
@@ -114,6 +115,7 @@ class CacheblendLmcache(Method):
         super().__init__(gpuNums=gpuNums, perfWeight=perfWeight, tag=tag)
         # Model path is config-only — switch models via config.yaml.
         self.modelPath = DefaultModelPath()
+        self.samplingConfig = ResolveSamplingConfig(self.modelPath)
         self.maxNewTokens = maxNewTokens
         self.maxModelLen = maxModelLen
         self.gpuMemoryUtilization = gpuMemoryUtilization
@@ -149,7 +151,7 @@ class CacheblendLmcache(Method):
         self.tokenizer = self.llm.get_tokenizer()
         self.sep = SepTokens(self.tokenizer)
         # First request in a fresh EngineCore: throw away its (corrupt) store.
-        Warmup(self.llm)
+        Warmup(self.llm, self.samplingConfig)
 
     # ---------------------------------------------------------------- Method
     def _SaltTokens(self, prepare: List[str]) -> List[int]:
@@ -363,7 +365,9 @@ class CacheblendLmcache(Method):
             engine.add_request(
                 requestId,
                 tokenIds,
-                SamplingParams(temperature=0, max_tokens=maxTokens),
+                SamplingParams(
+                    **VllmSamplingParams(self.samplingConfig, maxTokens)
+                ),
             )
             requestIds.append(requestId)
 

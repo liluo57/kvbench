@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from core.Sampling import ResolveSamplingConfig
 
 from helpers.backends.Prompt import ComposeInterleavedReuse
 from helpers.backends.TransformersHelper import CacheLayerPairs, TransformersGenerator
@@ -60,6 +61,7 @@ class NaiveTransformer(Method):
         )
         # Model path is config-only — switch models via config.yaml.
         self.modelPath = DefaultModelPath()
+        self.samplingConfig = ResolveSamplingConfig(self.modelPath)
         self.maxNewTokens = maxNewTokens
         self.dtype = dtype
         self._gen = None
@@ -76,6 +78,7 @@ class NaiveTransformer(Method):
             self.gpuIds,
             maxNewTokens=self.maxNewTokens,
             dtype=self.dtype,
+            samplingConfig=self.samplingConfig,
         )
 
     def Close(self) -> None:

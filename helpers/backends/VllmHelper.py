@@ -20,7 +20,9 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
+
+from core.Sampling import VllmSamplingParams
 
 _VllmProbeCache: Dict[str, bool] = {}
 
@@ -181,7 +183,10 @@ class VllmGeneration:
 
 
 def Generate(
-    llm, promptText: str, maxNewTokens: int
+    llm,
+    promptText: str,
+    maxNewTokens: int,
+    samplingConfig: Optional[Mapping[str, Any]] = None,
 ) -> VllmGeneration:
     """Generate one prompt and return its native vLLM stop metadata.
 
@@ -200,11 +205,14 @@ def Generate(
     - ``finishReason`` / ``stopReason`` — copied from the final vLLM
       :class:`CompletionOutput`, without going through the OpenAI endpoint.
     """
-    return GenerateBatch(llm, [promptText], maxNewTokens)[0]
+    return GenerateBatch(llm, [promptText], maxNewTokens, samplingConfig)[0]
 
 
 def GenerateBatch(
-    llm, promptTexts: List[str], maxNewTokens: int
+    llm,
+    promptTexts: List[str],
+    maxNewTokens: int,
+    samplingConfig: Optional[Mapping[str, Any]] = None,
 ) -> List[VllmGeneration]:
     """Generate a batch of prompts concurrently on the V1 engine.
 
@@ -231,7 +239,9 @@ def GenerateBatch(
         engine.add_request(
             requestId,
             prompt,
-            SamplingParams(temperature=0, max_tokens=maxNewTokens),
+            SamplingParams(
+                **VllmSamplingParams(samplingConfig, maxNewTokens)
+            ),
         )
         requestIds.append(requestId)
 

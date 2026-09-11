@@ -1,7 +1,7 @@
 """Cross-cutting helpers grouped by concern.
 
 This package is a deliberate ``helpers/`` catch-all: it is the only place
-outside :mod:`core` that tasks, methods, and workloads depend on. Three
+outside :mod:`core` that tasks, methods, and workflows depend on. Three
 loosely-coupled subsystems live here today:
 
 1. **Backend adapters** — talk to model runtimes.
@@ -10,7 +10,8 @@ loosely-coupled subsystems live here today:
      probe, LLM construction (with a sanitized model dir for the 1M model's
      dual-chunk config), and a Generate() that returns TTFT.
    - :mod:`helpers.TransformersHelper` — the plain HF ``transformers``
-     generator (owned model + tokenizer, manual greedy decode with real TTFT).
+     generator (owned model + tokenizer, manual ModelConfig-aware decode with
+     real TTFT).
    - :mod:`helpers.VllmCacheblendPatches` — runtime wiring for vLLM + LMCache
      CacheBlend.
    - :mod:`helpers.ModelAdapter` — the **single chat-template truth source**:

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 from .Result import Result
 
 if TYPE_CHECKING:
-    from .Workload import Workload
+    from .Workflow import Workflow
 
 
 @dataclass
@@ -15,29 +15,29 @@ class Case:
     """A single evaluation sample.
 
     A Case combines:
-    - input: The raw benchmark data (type defined by Workload, e.g. RAGInput)
-    - workload: A stateful execution policy that maps input to Method calls
+    - input: The raw benchmark data (type defined by Workflow, e.g. RAGInput)
+    - workflow: A stateful execution policy that maps input to Method calls
     - metadata: Extra info for Task.Evaluate (e.g. expected answer)
 
-    The Workload produces Actions (Prepare/Run) that the Engine executes.
+    The Workflow produces Actions (Prepare/Run) that the Engine executes.
     This design supports both static RAG (prepare→run) and dynamic multi-agent
     scenarios where the execution graph emerges at runtime.
 
     Attributes:
-        input: Input data for this workload. Type is defined by the Workload.
-        workload: Stateful execution policy. Decides how to map input to
+        input: Input data for this workflow. Type is defined by the Workflow.
+        workflow: Stateful execution policy. Decides how to map input to
             a sequence of Method.Prepare/Run calls.
         metadata: Extra information needed for correctness evaluation
             (e.g. the expected answer).
     """
 
     input: Any = None
-    workload: "Workload" = None  # type: ignore
+    workflow: "Workflow" = None  # type: ignore
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class Task(ABC):
-    """A benchmark workload.
+    """A benchmark workflow.
 
     A task owns the generation of evaluation cases and the correctness check.
     It is deliberately *not* responsible for latency / memory measurement —

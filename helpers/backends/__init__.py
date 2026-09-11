@@ -7,7 +7,8 @@ Modules:
   LLM construction (with a sanitized model dir for the 1M model's
   dual-chunk config), and ``Generate()`` returning TTFT.
 - :mod:`helpers.backends.TransformersHelper` — plain HF ``transformers``
-  generator (owned model + tokenizer, manual greedy decode with real TTFT).
+  generator (owned model + tokenizer, manual ModelConfig-aware decode with
+  real TTFT).
 - :mod:`helpers.backends.VllmCacheblendPatches` — runtime wiring for
   vLLM + LMCache CacheBlend.
 - :mod:`helpers.backends.ModelAdapter` — the **single chat-template truth

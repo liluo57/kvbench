@@ -55,7 +55,7 @@ KVBench abstracts the **evaluation workflow**:
         +--------------+--------------+
       Task / Case                  Method
           |                           |
-       Workload                 KV optimization
+       Workflow                 KV optimization
       (Actions)                     logic
           +-------------+-------------+
                         |
@@ -77,7 +77,7 @@ The default suite is CPU-only and does not load a model or require a GPU:
 pytest -q
 ```
 
-Regression tests cover the core contracts, batch/Workload execution loop,
+Regression tests cover the core contracts, batch/Workflow execution loop,
 metrics, prompt-reuse matching, task helpers, and scheduler failure paths.
 
 # Summary

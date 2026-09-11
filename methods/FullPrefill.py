@@ -26,6 +26,7 @@ from typing import List, Optional, Sequence
 from core.Config import ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from core.Sampling import ResolveSamplingConfig
 
 from helpers.backends.TransformersHelper import TransformersGenerator
 from helpers.backends.VllmHelper import CreateLlm, EncodeIds, GenerateBatch
@@ -57,6 +58,7 @@ class _FullPrefillBase(Method):
         )
         # Model path is config-only — switch models via config.yaml.
         self.modelPath = DefaultModelPath()
+        self.samplingConfig = ResolveSamplingConfig(self.modelPath)
         self.maxNewTokens = maxNewTokens
         self.dtype = dtype
 
@@ -122,6 +124,7 @@ class FullPrefillTransformer(_FullPrefillBase):
             self.gpuIds,
             maxNewTokens=self.maxNewTokens,
             dtype=self.dtype,
+            samplingConfig=self.samplingConfig,
         )
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
@@ -195,7 +198,9 @@ class FullPrefillVllm(_FullPrefillBase):
         )
 
     def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
-        batchOut = GenerateBatch(self.llm, data, self.maxNewTokens)
+        batchOut = GenerateBatch(
+            self.llm, data, self.maxNewTokens, self.samplingConfig
+        )
         results = []
         for generation, prompt in zip(batchOut, data):
             nInput = len(EncodeIds(self.llm, prompt))

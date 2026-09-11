@@ -24,11 +24,11 @@ Case payload contract
 ---------------------
 :class:`VTTask`:
     ``input = RAGInput(prepare_input=[], run_input=fullChatPrompt)``
-    ``workload = RAGWorkload`` (skip Prepare, just Run)
+    ``workflow = RAGWorkflow`` (skip Prepare, just Run)
 
 :class:`VTShuffleTask`:
     ``input = RAGInput(prepare_input=segments, run_input=shuffled_prompt)``
-    ``workload = RAGWorkload`` (Prepare → Run)
+    ``workflow = RAGWorkflow`` (Prepare → Run)
 
 ``chain`` is the test example's assignments, each paired with the noise that
 follows it. ``head`` (few-shot example + test instruction) and ``tail`` (test
@@ -42,7 +42,7 @@ from typing import Any, Dict, Iterator, List
 from core.Config import ModelPath
 from core.Result import Result
 from core.Task import Case
-from workload.RAGWorkload import RAGInput, RAGWorkload
+from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
 from .bases.RulerBase import RulerBase
 from helpers.backends.ModelAdapter import assistant_turn_suffix, user_turn_prefix
@@ -67,7 +67,7 @@ class VTTask(RulerBase):
             fullPrompt = self._FullChat(body, answerPrefix)
             yield Case(
                 input=RAGInput(prepare_input=[], run_input=fullPrompt),
-                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=[], run_input=fullPrompt)),
+                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=[], run_input=fullPrompt)),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 
@@ -132,6 +132,6 @@ class VTShuffleTask(VTTask):
             run_input = segments[0] + "".join(chain) + segments[-1]
             yield Case(
                 input=RAGInput(prepare_input=segments, run_input=run_input),
-                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=segments, run_input=run_input)),
+                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=segments, run_input=run_input)),
                 metadata=self._Metadata(i, s, fullPrompt),
             )

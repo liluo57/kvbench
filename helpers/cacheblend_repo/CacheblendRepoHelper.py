@@ -100,6 +100,10 @@ class CacheBlendWorker:
         from vllm import LLM, SamplingParams
 
         self.args = args
+        try:
+            self.samplingConfig = json.loads(args.sampling_config or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid --sampling_config JSON") from exc
         self._torch = __import__("torch")
         print(f"[cacheblend-helper] loading model {args.model} ...", flush=True)
         # The CacheBlend hooks live only in the xformers attention backend; the
@@ -164,6 +168,35 @@ class CacheBlendWorker:
         self._retainWrappers = []
         self._installRetainOutputCapture()
         print("[cacheblend-helper] ready", flush=True)
+
+    def _SamplingParams(self, maxTokens: int):
+        # This worker runs in the original CacheBlend venv, which intentionally
+        # does not install KVBench's optional YAML dependency. Keep this tiny
+        # translation local; the parent has already resolved ModelConfig and
+        # passes the resulting canonical dictionary over JSON.
+        config = self.samplingConfig
+        if (
+            not config
+            or config.get("mode") == "greedy"
+            or not bool(config.get("do_sample", False))
+            or float(config.get("temperature", 1.0)) == 0
+        ):
+            return self.sampling_params(temperature=0, max_tokens=maxTokens)
+
+        kwargs = {"max_tokens": maxTokens}
+        for key in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
+        ):
+            if key in config:
+                kwargs[key] = config[key]
+        return self.sampling_params(**kwargs)
 
     def _installRetainOutputCapture(self):
         """Wrap the concrete attention classes, reusing their native hack_kv capture."""
@@ -356,7 +389,7 @@ class CacheBlendWorker:
         self.cfm["check"] = False
         self.llm.generate(
             prompt_token_ids=[ids],
-            sampling_params=self.sampling_params(temperature=0, max_tokens=1),
+            sampling_params=self._SamplingParams(1),
         )
         out = []
         for layer in self.layers:
@@ -387,7 +420,7 @@ class CacheBlendWorker:
         self.cfm["check"] = False
         self.llm.generate(
             prompt_token_ids=idsList,
-            sampling_params=self.sampling_params(temperature=0, max_tokens=1),
+            sampling_params=self._SamplingParams(1),
         )
         # ``hack_kv`` is stable until the next generate. Slice-clone directly
         # from it below; cloning the whole group first would temporarily double
@@ -470,8 +503,8 @@ class CacheBlendWorker:
         t0 = time.perf_counter()
         out = self.llm.generate(
             prompt_token_ids=[fullIds],
-            sampling_params=self.sampling_params(
-                temperature=0, max_tokens=self.args.max_new_tokens + (1 if retain_output else 0)
+            sampling_params=self._SamplingParams(
+                self.args.max_new_tokens + (1 if retain_output else 0)
             ),
         )
         r = out[0]
@@ -844,6 +877,7 @@ def Main():
     ap.add_argument("--max_model_len", type=int, default=32768)
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.7)
     ap.add_argument("--recomp_ratio", type=float, default=0.15)
+    ap.add_argument("--sampling_config", default="{}")
     ap.add_argument("--max_num_seqs", type=int, default=64)
     ap.add_argument("--max_collect_tokens", type=int, default=3500,
                     help="token budget per batched collect generate")

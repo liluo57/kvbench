@@ -1,6 +1,6 @@
-"""Shared machinery for the knowledge-base tasks (musique / wikimqa / samsum).
+"""Shared machinery for knowledge-base and local LongBench tasks.
 
-These are the knowledge-base workloads the original CacheBlend repo evaluates
+These are the knowledge-base workflows the original CacheBlend repo evaluates
 on (``example/blend_musique.py``, ``blend_wikimqa.py``, ``blend_samsum.py``).
 The KVBench tasks reuse the same data and prompt layout, but the tasks
 themselves are independent of the CacheBlend method. Each resolves its data by
@@ -17,10 +17,14 @@ Data shape (the original ``inputs/*.json``):
     samsum:             ``{"ctxs": [{"title", "text"}], "question", "answers", ...}``
     (wikimqa's ``answers`` is nested: ``[["answer"]]``)
 
+LongBench snapshots use one JSON object per line with ``input``, ``context``
+and ``answers`` fields.  The loader below accepts both the original JSON array
+files and these local JSONL snapshots.
+
 Case payload contract (consumed by every Method)
 -------------------------------------------------
 ``input = RAGInput(prepare_input=chunks, run_input=fullPrompt)``
-``workload = RAGWorkload`` (Prepare → Run)
+``workflow = RAGWorkflow`` (Prepare → Run)
 ``metadata`` = ``{"answers", "question", "n_chunks", ...}``
 
 The ``suffix`` (the fresh question fused against the cached knowledge base) is
@@ -41,7 +45,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from core.Config import DatasetDir, ModelPath
 from core.Result import Result
 from core.Task import Case, Task
-from workload.RAGWorkload import RAGInput, RAGWorkload
+from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
 from helpers.backends.ModelAdapter import assistant_turn_suffix, user_turn_prefix
 
@@ -146,6 +150,25 @@ def _FlattenAnswers(answers) -> List[str]:
     return flat
 
 
+def PassageChunks(context: str, *, prefix: str = "") -> List[str]:
+    """Split a LongBench context into reusable ``Passage`` chunks.
+
+    The LongBench QA and MultiNews records mark documents as ``Passage:`` or
+    ``Passage N:``.  Keeping those boundaries lets the cache methods prefill
+    each document independently while ``"".join(result)`` still reconstructs
+    the exact original prompt.  A context without such markers remains one
+    chunk.
+    """
+    context = str(context)
+    parts = [part for part in re.split(
+        r"(?m)(?=^Passage(?: \d+)?:[ \t]*$)", context
+    ) if part]
+    if len(parts) <= 1:
+        return [prefix + context] if context else []
+    parts[0] = prefix + parts[0]
+    return parts
+
+
 # ---------------------------------------------------------------------------
 # Knowledge-base base task
 # ---------------------------------------------------------------------------
@@ -177,13 +200,27 @@ class KBBase(Task):
 
     # ---------------------------------------------------------------- data
     def _LoadSamples(self) -> List[Dict[str, Any]]:
-        files = sorted(self.dataDir.glob("*.json"))
+        files = sorted(
+            [*self.dataDir.glob("*.json"), *self.dataDir.glob("*.jsonl")]
+        )
         if not files:
             raise FileNotFoundError(
-                f"no *.json files under {self.dataDir} "
+                f"no *.json or *.jsonl files under {self.dataDir} "
                 f"(dataset={self.dataset!r})"
             )
-        data = json.load(open(files[0], encoding="utf-8"))
+        source = files[0]
+        if source.suffix == ".jsonl":
+            with source.open(encoding="utf-8") as stream:
+                data = [
+                    json.loads(line)
+                    for line in stream
+                    if line.strip()
+                ]
+        else:
+            with source.open(encoding="utf-8") as stream:
+                data = json.load(stream)
+        if not isinstance(data, list):
+            raise ValueError(f"expected a list of samples in {source}")
         samples = data[self.startIdx:]
         if self.maxSamples != -1:
             samples = samples[: self.maxSamples]
@@ -202,16 +239,21 @@ class KBBase(Task):
                 "".join(chunks) + suffix,
                 modelPath=modelPath, thinking=False,
             )
+            metadata = {
+                "case_id": i,
+                "question": s.get("question", s.get("input")),
+                "answers": _FlattenAnswers(s.get("answers")),
+                "n_chunks": len(chunks),
+                "dataset": self.dataset,
+            }
+            if "length" in s:
+                metadata["length"] = s["length"]
+            if "_id" in s:
+                metadata["sample_id"] = s["_id"]
             yield Case(
                 input=RAGInput(prepare_input=chunks, run_input=fullPrompt),
-                workload=RAGWorkload(case_id=i, data=RAGInput(prepare_input=chunks, run_input=fullPrompt)),
-                metadata={
-                    "case_id": i,
-                    "question": s.get("question"),
-                    "answers": _FlattenAnswers(s.get("answers")),
-                    "n_chunks": len(chunks),
-                    "dataset": self.dataset,
-                },
+                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=chunks, run_input=fullPrompt)),
+                metadata=metadata,
             )
 
     # ------------------------------------------------------------- evaluate

@@ -3,14 +3,14 @@ from decimal import Decimal
 
 from core.Config import ModelPath
 from core.Result import Result
-from core.Workload import ActionKind, ActionResult
+from core.Workflow import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
 from tasks.KVCommTasks import _extract_choice, _extract_number, _extract_python
-from workload import AgentSpec, MultiAgentFullConnectionInput, MultiAgentFullConnectionWorkload
+from workflow import AgentSpec, MultiAgentFullConnectionInput, MultiAgentFullConnectionWorkflow
 
 
 def _BuildExpectedPrompt(spec, task, priorOutputs, priorAgents):
-    """Mirror :meth:`MultiAgentFullConnectionWorkload._BuildPrompt`'s
+    """Mirror :meth:`MultiAgentFullConnectionWorkflow._BuildPrompt`'s
     user-prompt construction so the test can predict the input to
     :func:`ModelAdapter.render_chat`.
     """
@@ -25,7 +25,7 @@ def _BuildExpectedPrompt(spec, task, priorOutputs, priorAgents):
     return userPrompt
 
 
-class MultiAgentWorkloadTest(unittest.TestCase):
+class MultiAgentWorkflowTest(unittest.TestCase):
     def _run(self, decision):
         modelPath = ModelPath()
         agents = [
@@ -33,7 +33,7 @@ class MultiAgentWorkloadTest(unittest.TestCase):
             AgentSpec("B", "b {task}"),
             AgentSpec("C", "c {task}"),
         ]
-        w = MultiAgentFullConnectionWorkload(
+        w = MultiAgentFullConnectionWorkflow(
             1, MultiAgentFullConnectionInput(
                 "TASK", agents, decision,
                 modelPath=modelPath,

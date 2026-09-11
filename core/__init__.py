@@ -1,16 +1,18 @@
 """KVBench core abstractions.
 
-Public surface (what tasks / methods / workloads may import):
+Public surface (what tasks / methods / workflows may import):
 
 - :class:`Case`, :class:`Task` (:mod:`core.Task`) — the task contract.
 - :class:`Method` (:mod:`core.Method`) — the KV-cache method contract.
 - :class:`Metric` (:mod:`core.Metrics`) — the metric contract.
 - :class:`Result` + metric key constants (:mod:`core.Result`) — the result
   data currency shared across the framework.
-- :class:`Workload`, :class:`Action`, :class:`ActionKind`,
-  :class:`ActionResult` (:mod:`core.Workload`) — the workload contract.
+- :class:`Workflow`, :class:`Action`, :class:`ActionKind`,
+  :class:`ActionResult` (:mod:`core.Workflow`) — the workflow contract.
 - :func:`LoadConfig`, :func:`Get`, :func:`ModelPath`, :func:`DatasetDir`
   (:mod:`core.Config`) — config helpers.
+- :func:`ResolveSamplingConfig` (:mod:`core.Sampling`) — shared model
+  sampling policy resolution.
 
 Deliberately **not** re-exported from this barrel:
 
@@ -25,8 +27,9 @@ from .Config import DatasetDir, Get, LoadConfig, ModelPath
 from .Metrics import Metric
 from .Method import Method
 from .Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from .Sampling import ResolveSamplingConfig
 from .Task import Case, Task
-from .Workload import Action, ActionKind, ActionResult, Workload
+from .Workflow import Action, ActionKind, ActionResult, Workflow
 
 __all__ = [
     "Action",
@@ -41,8 +44,9 @@ __all__ = [
     "ModelPath",
     "NumOutputTokensKey",
     "Result",
+    "ResolveSamplingConfig",
     "Task",
     "TotalTimeKey",
     "TtftKey",
-    "Workload",
+    "Workflow",
 ]

@@ -11,11 +11,11 @@ The request path is:
 BenchFlow agent
   -> HTTP request
   -> KVBench OpenAI-compatible endpoint
-  -> Workload.next()
+  -> Workflow.next()
   -> Action(RUN, retainOutput=True)
   -> KVBench Engine / Worker
   -> Method.Run()
-  -> Workload.observe()
+  -> Workflow.observe()
   -> KVBench endpoint response
   -> BenchFlow agent
 ```
@@ -41,7 +41,7 @@ task Skill's full document is not the system-level available-Skills index. It
 appears later, after the agent issues a tool call such as
 `read({"path":".../SKILL.md"})`, as the matching `tool` message body.
 
-`AgentBenchFlowWorkload` recognizes only those tool-call/response pairs. Local
+`AgentBenchFlowWorkflow` recognizes only those tool-call/response pairs. Local
 task-bundled documents are sent as a `PREPARE` action and are also inserted
 verbatim into the first provider prompt. The prompt is then rendered again
 with the model's native chat template:
@@ -115,7 +115,7 @@ restores BenchFlow's default of three total attempts.
 The model id defaults to the basename of KVBench's configured `ModelPath` and
 is sent to BenchFlow as `vllm/<model-id>`. The Method controls generation
 limits; the example `Main.py` configuration uses `maxNewTokens=4096` for the
-agent workload.
+agent workflow.
 
 BenchFlow 0.7.5 currently inserts its host-side LiteLLM provider proxy even
 when usage tracking is disabled. In that setup the URL above is the proxy's

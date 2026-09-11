@@ -447,11 +447,21 @@ class Scheduler:
                         "error": reason, "log_path": worker.logPath,
                     })
                     self.recoverCurrentPair(worker, reason, "task_timeout")
-                    self.terminateWorker(worker)
-                    worker.state = "failed"
+                    # A timed-out backend can be stuck inside a native/CUDA
+                    # call and never process the graceful SIGTERM.  It must
+                    # not remain counted as an active worker indefinitely:
+                    # the timed-out pair has already been recovered above,
+                    # so the only safe action is to tear down this process
+                    # group and let the scheduler replace it if needed.
+                    self.terminateWorker(worker, force=True)
+                    worker.state = "stopping"
+                    worker.deadline = None
                 elif worker.state == "stopping":
-                    self.terminateWorker(worker)
-                    worker.deadline = now + min(5.0, self.engine.shutdownGracePeriod)
+                    # ``stopWorker`` first gives an orderly worker a grace
+                    # period.  Once that expires, escalate exactly once;
+                    # SIGKILL cannot be ignored by a hung backend.
+                    self.terminateWorker(worker, force=True)
+                    worker.deadline = None
 
             if worker.process.is_alive():
                 continue

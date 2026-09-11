@@ -1,4 +1,4 @@
-"""Small Workload bridge between a real BenchFlow rollout and KVBench."""
+"""Small Workflow bridge between a real BenchFlow rollout and KVBench."""
 
 import copy
 import json
@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from core.Config import ModelPath
 from core.Result import Result, TtftKey
-from core.Workload import Action, ActionKind, ActionResult, Workload
+from core.Workflow import Action, ActionKind, ActionResult, Workflow
 
 from helpers.backends import ModelAdapter
 from helpers.benchflow import BenchflowRunner, RemoteBenchflowRunner
@@ -157,7 +157,7 @@ def _AugmentMessagesWithSkills(
 
 @dataclass
 class AgentBenchFlowInput:
-    """Per-case configuration passed to :class:`AgentBenchFlowWorkload`."""
+    """Per-case configuration passed to :class:`AgentBenchFlowWorkflow`."""
 
     task_id: str
     source_mode: str = "dataset"
@@ -181,6 +181,10 @@ class AgentBenchFlowInput:
     #: Number of BenchFlow task retries after the initial attempt. Zero means
     #: that BenchFlow runs each selected task exactly once.
     retry_attempts: int = 0
+    #: Stop the external rollout after the first completed model RUN. This is
+    #: useful for collecting first-RUN system metrics without running the
+    #: rest of the agent trajectory.
+    first_run_only: bool = False
     remote_endpoint: Optional[str] = None
     remote_advertise_host: Optional[str] = None
     remote_auth_token_env: str = "KVBENCH_REMOTE_TOKEN"
@@ -191,7 +195,7 @@ class AgentBenchFlowInput:
     endpoint_url: str = field(default="", init=False)
 
 
-class AgentBenchFlowWorkload(Workload):
+class AgentBenchFlowWorkflow(Workflow):
     """Convert each external agent request into an ordinary RUN Action."""
 
     def __init__(
@@ -322,7 +326,7 @@ class AgentBenchFlowWorkload(Workload):
         if self._pending is not None:
             if self._pendingKind != ActionKind.RUN or self._pendingActionSent:
                 raise RuntimeError(
-                    "AgentBenchFlowWorkload.next() called before the prior "
+                    "AgentBenchFlowWorkflow.next() called before the prior "
                     "action was observed"
                 )
             self._pendingActionSent = True
@@ -426,11 +430,11 @@ class AgentBenchFlowWorkload(Workload):
     def observe(self, results: List[ActionResult]) -> None:
         if len(results) != 1:
             raise ValueError(
-                "AgentBenchFlowWorkload expects exactly one ActionResult per "
+                "AgentBenchFlowWorkflow expects exactly one ActionResult per "
                 f"step, got {len(results)}"
             )
         if self._pending is None:
-            raise RuntimeError("AgentBenchFlowWorkload observed a result without a pending request")
+            raise RuntimeError("AgentBenchFlowWorkflow observed a result without a pending request")
         if self._pendingKind == ActionKind.PREPARE:
             # PREPARE has no model result and must not release the provider's
             # request.  The next step runs the same complete prompt.
@@ -439,7 +443,7 @@ class AgentBenchFlowWorkload(Workload):
             self._pendingActionSent = False
             return
         if self._pendingKind != ActionKind.RUN:
-            raise RuntimeError("AgentBenchFlowWorkload has an invalid pending action")
+            raise RuntimeError("AgentBenchFlowWorkflow has an invalid pending action")
         result = results[0].result
         self._lastResult = result
         if not self._firstRunObserved:
@@ -458,13 +462,24 @@ class AgentBenchFlowWorkload(Workload):
             promptLength = result.metadata.get("n_input")
             if promptLength is not None:
                 self._firstRunPromptLength = int(promptLength)
+        if self._data.first_run_only:
+            # The first RUN result has already been recorded by Worker for
+            # system metrics. Do not send it back to BenchFlow: doing so would
+            # allow the agent to issue another provider request. Closing the
+            # runner here also releases the in-flight provider request.
+            self._pending = None
+            self._pendingKind = None
+            self._pendingActionSent = False
+            self._finalResult = self._BuildFinalResult()
+            self._finished = True
+            return
         request = self._pending
         self._pending = None
         self._pendingKind = None
         self._pendingActionSent = False
         output = "" if result.output is None else str(result.output)
         if self._runner is None:
-            raise RuntimeError("AgentBenchFlowWorkload has no BenchFlow runner")
+            raise RuntimeError("AgentBenchFlowWorkflow has no BenchFlow runner")
         try:
             # Keep compatibility with lightweight/custom runners that expose
             # the original respond(request, output) contract. The native
@@ -570,7 +585,7 @@ class AgentBenchFlowWorkload(Workload):
         """Surface the captured first-RUN statistics on ``metadata``.
 
         Only writes keys that were actually observed. A case that fails before
-        its first inference result returns to the workload leaves the
+        its first inference result returns to the workflow leaves the
         attributes at ``None`` and contributes no entry, so the per-case
         mean in the report simply excludes it. The same holds per key: a
         Method that does not report ``n_input`` omits the prompt length while
@@ -599,5 +614,5 @@ class AgentBenchFlowWorkload(Workload):
 __all__ = [
     "AgentBenchFlowInput",
     "AgentBenchFlowPreRunError",
-    "AgentBenchFlowWorkload",
+    "AgentBenchFlowWorkflow",
 ]

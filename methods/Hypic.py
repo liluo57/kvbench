@@ -28,6 +28,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from core.Config import Get, ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
+from core.Sampling import ResolveSamplingConfig, SglangSamplingParams
 from helpers.backends.Prompt import ComposeInterleavedReuse
 
 
@@ -37,13 +38,94 @@ _PIC_MODES = {
     "transition_rope",
     "transition_rope_recompute",
 }
-_DEFAULT_MAX_MAMBA_CACHE_SIZE = 128
 _WARMUP_TAIL = "\n[KVBench HYPIC cache warmup]\n"
 
 
 def _HypicRepoPath() -> Path:
     config = Get("Hypic", {}) or {}
     return Path(config.get("RepoPath") or "/root/hypic").expanduser().resolve()
+
+
+def _MaxMambaCacheSize() -> Optional[int]:
+    """Resolve Hypic.MaxMambaCacheSize from config.
+
+    Returns the resolved slot count, or ``None`` to let SGLang auto-fit.
+    ``-1`` means auto-fit; any other integer must be a positive slot count.
+    """
+    cfg = Get("Hypic", {}) or {}
+    val = cfg.get("MaxMambaCacheSize", 32)
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise TypeError(
+            "Hypic.MaxMambaCacheSize must be an integer or -1 "
+            f"(got {type(val).__name__}: {val!r})"
+        )
+    if val == -1:
+        return None
+    if val < 1:
+        raise ValueError(
+            f"Hypic.MaxMambaCacheSize must be a positive integer or -1 "
+            f"(got {val})"
+        )
+    return int(val)
+
+
+def _BuildHypicEngineKwargs(
+    modelPath: str,
+    gpuIds: Sequence[int],
+    *,
+    dtype: str,
+    maxModelLen: int,
+    memFractionStatic: float,
+    picMode: str,
+    separator: str,
+    fullPrefill: bool,
+) -> Dict[str, Any]:
+    """Build SGLang options while keeping PIC and prefix caching independent.
+
+    ``fullPrefill`` is the no-PIC control path: it submits the original prompt
+    as one ordinary request, but ordinary radix prefix caching remains enabled.
+    The latter is important for workloads whose later requests share a literal
+    prompt prefix, such as multi-turn agent runs.
+    """
+    engineKwargs: Dict[str, Any] = dict(
+        model_path=modelPath,
+        dtype=dtype,
+        tp_size=len(gpuIds),
+        context_length=maxModelLen,
+        max_prefill_tokens=maxModelLen,
+        max_running_requests=1,
+        mem_fraction_static=memFractionStatic,
+        trust_remote_code=True,
+        enable_multimodal=False,
+        page_size=1,
+        chunked_prefill_size=-1,
+        cuda_graph_backend_prefill="disabled",
+        log_level="error",
+    )
+    if fullPrefill:
+        # Disable only position-independent composition. Keep the normal radix
+        # cache so an exact prompt prefix can still be reused across requests.
+        engineKwargs.update(
+            pic_enable=False,
+            disable_radix_cache=False,
+            mamba_radix_cache_strategy="no_buffer",
+            disable_overlap_schedule=True,
+        )
+    else:
+        engineKwargs.update(
+            pic_enable=True,
+            pic_mode=picMode,
+            pic_separator_str=separator,
+        )
+        # Cap the mamba / linear-attention state pool size from
+        # Hypic.MaxMambaCacheSize (config.yaml). SGLang's auto-fit defaults to
+        # ~300 slots, which on Qwen3.5-27B eats ~47 GiB per GPU; the explicit
+        # cap keeps room for prefill workspace. ``None`` falls through to
+        # SGLang auto-fit.
+        maxMambaCacheSize = _MaxMambaCacheSize()
+        if maxMambaCacheSize is not None:
+            engineKwargs["max_mamba_cache_size"] = maxMambaCacheSize
+    return engineKwargs
 
 
 def _CreateHypicEngine(
@@ -55,7 +137,6 @@ def _CreateHypicEngine(
     memFractionStatic: float,
     picMode: str,
     separator: str,
-    maxMambaCacheSize: int,
     fullPrefill: bool,
 ):
     """Import HYPIC lazily and create its SGLang engine on ``gpuIds``.
@@ -85,36 +166,16 @@ def _CreateHypicEngine(
             f"imported sglang from {loaded}, expected the HYPIC checkout at {pythonDir}"
         )
 
-    engineKwargs = dict(
-        model_path=modelPath,
+    engineKwargs = _BuildHypicEngineKwargs(
+        modelPath,
+        gpuIds,
         dtype=dtype,
-        tp_size=len(gpuIds),
-        context_length=maxModelLen,
-        max_prefill_tokens=maxModelLen,
-        max_running_requests=1,
-        mem_fraction_static=memFractionStatic,
-        trust_remote_code=True,
-        enable_multimodal=False,
-        page_size=1,
-        chunked_prefill_size=-1,
-        cuda_graph_backend_prefill="disabled",
-        log_level="error",
+        maxModelLen=maxModelLen,
+        memFractionStatic=memFractionStatic,
+        picMode=picMode,
+        separator=separator,
+        fullPrefill=fullPrefill,
     )
-    if fullPrefill:
-        # Match HYPIC's own full-recompute control: neither PIC nor the normal
-        # radix prefix cache may satisfy any part of the measured request.
-        engineKwargs.update(
-            pic_enable=False,
-            disable_radix_cache=True,
-            mamba_radix_cache_strategy="no_buffer",
-        )
-    else:
-        engineKwargs.update(
-            pic_enable=True,
-            pic_mode=picMode,
-            pic_separator_str=separator,
-            max_mamba_cache_size=maxMambaCacheSize,
-        )
     return sgl.Engine(**engineKwargs)
 
 
@@ -150,7 +211,6 @@ class HypicMethod(Method):
         dtype: str = "bfloat16",
         picMode: str = "addition",
         separator: str = "<<PIC_SEP>>",
-        maxMambaCacheSize: int = _DEFAULT_MAX_MAMBA_CACHE_SIZE,
         fullPrefill: bool = False,
         tag: Optional[str] = None,
     ):
@@ -176,23 +236,22 @@ class HypicMethod(Method):
             )
         if not separator:
             raise ValueError("separator must not be empty")
-        if isinstance(maxMambaCacheSize, bool) or not isinstance(
-            maxMambaCacheSize, int
-        ):
-            raise TypeError("maxMambaCacheSize must be an integer")
-        if maxMambaCacheSize < 1:
-            raise ValueError("maxMambaCacheSize must be at least 1")
         if not isinstance(fullPrefill, bool):
             raise TypeError("fullPrefill must be a bool")
 
+        # Validate Hypic.MaxMambaCacheSize up-front so a bad value fails at
+        # construction rather than at engine launch. Resolution itself happens
+        # in _BuildHypicEngineKwargs at launch time.
+        _MaxMambaCacheSize()
+
         self.modelPath = DefaultModelPath()
+        self.samplingConfig = ResolveSamplingConfig(self.modelPath)
         self.maxNewTokens = maxNewTokens
         self.maxModelLen = maxModelLen
         self.memFractionStatic = float(memFractionStatic)
         self.dtype = dtype
         self.picMode = picMode
         self.separator = separator
-        self.maxMambaCacheSize = maxMambaCacheSize
         self.fullPrefill = fullPrefill
         self.engine = None
         self._states: List[Dict[str, Any]] = []
@@ -209,7 +268,6 @@ class HypicMethod(Method):
             memFractionStatic=self.memFractionStatic,
             picMode=self.picMode,
             separator=self.separator,
-            maxMambaCacheSize=self.maxMambaCacheSize,
             fullPrefill=self.fullPrefill,
         )
 
@@ -337,11 +395,9 @@ class HypicMethod(Method):
         matchedPreparedSegments: int = 0,
     ) -> Result:
         nInput = int(meta.get("prompt_tokens", 0) or 0)
-        numCached = (
-            0
-            if fullPrefill
-            else int(meta.get("cached_tokens", 0) or 0)
-        )
+        # The no-PIC control path can still hit ordinary radix prefix cache.
+        # Report that hit instead of treating fullPrefill as "no cache at all".
+        numCached = int(meta.get("cached_tokens", 0) or 0)
         metadata: Dict[str, Any] = {
             "backend": self.backend,
             "n_input": nInput,
@@ -382,12 +438,9 @@ class HypicMethod(Method):
 
         stream = self.engine.generate(
             prompt,
-            sampling_params={
-                "temperature": 1.0,
-                "top_p": 0.95,
-                "top_k": 20,
-                "max_new_tokens": maxNewTokens,
-            },
+            sampling_params=SglangSamplingParams(
+                self.samplingConfig, maxNewTokens
+            ),
             stream=True,
         )
         for chunk in stream:
