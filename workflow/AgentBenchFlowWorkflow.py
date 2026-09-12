@@ -189,6 +189,7 @@ class AgentBenchFlowInput:
     remote_advertise_host: Optional[str] = None
     remote_auth_token_env: str = "KVBENCH_REMOTE_TOKEN"
     remote_connect_timeout: float = 10.0
+    remote_upload_timeout: float = 300.0
     remote_poll_interval: float = 1.0
     remote_artifact_download_retries: int = 3
     #: Filled after the runner starts; useful to callers and diagnostics.
@@ -367,6 +368,7 @@ class AgentBenchFlowWorkflow(Workflow):
                         advertiseHost=self._data.remote_advertise_host,
                         remoteAuthTokenEnv=self._data.remote_auth_token_env,
                         remoteConnectTimeout=self._data.remote_connect_timeout,
+                        remoteUploadTimeout=self._data.remote_upload_timeout,
                         remotePollInterval=self._data.remote_poll_interval,
                         artifactDownloadRetries=(
                             self._data.remote_artifact_download_retries

@@ -99,6 +99,10 @@ AgentBenchFlow:
     # KVBenchAdvertiseHost: 10.0.0.21
     AuthTokenEnv: KVBENCH_REMOTE_TOKEN
     ConnectTimeoutSec: 10
+    # Source upload includes remote-side archive extraction before the HTTP
+    # response is returned. Keep this separate from control-plane timeouts;
+    # radar-vital-signs contains ~14 MiB of binary recordings.
+    UploadTimeoutSec: 300
     PollIntervalSec: 1
     ArtifactDownloadRetries: 3
 

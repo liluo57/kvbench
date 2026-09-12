@@ -144,6 +144,8 @@ AgentBenchFlow:
     # KVBenchAdvertiseHost: 10.0.0.21
     AuthTokenEnv: KVBENCH_REMOTE_TOKEN
     ConnectTimeoutSec: 10
+    # Upload + remote-side source extraction timeout.
+    UploadTimeoutSec: 300
     PollIntervalSec: 1
     ArtifactDownloadRetries: 3
 ```

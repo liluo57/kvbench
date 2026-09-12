@@ -1,6 +1,7 @@
 """Remote BenchFlow control-plane and same-host A/B integration tests."""
 
 import io
+import importlib
 import json
 import os
 import sys
@@ -17,6 +18,11 @@ from scripts.RemoteDockerRuntimeServer import (
     CreateServer,
     PROTOCOL_VERSION,
     RemoteRunManager,
+)
+
+
+remoteBenchflowModule = importlib.import_module(
+    "helpers.benchflow.RemoteBenchflowRunner"
 )
 
 
@@ -318,6 +324,56 @@ rollout = jobs_dir / 'fake-job' / (task_id + '__remote')
         server.server_close()
         manager.Close()
         serverThread.join(timeout=2)
+
+
+def test_remote_runner_uses_dedicated_source_upload_timeout(monkeypatch, tmp_path):
+    seen = {}
+
+    class Response:
+        status = 200
+
+        @staticmethod
+        def read():
+            return b'{"state":"ready"}'
+
+    class Connection:
+        def __init__(self, host, port, timeout):
+            seen["timeout"] = timeout
+
+        def putrequest(self, method, path):
+            pass
+
+        def putheader(self, name, value):
+            pass
+
+        def endheaders(self):
+            pass
+
+        def send(self, chunk):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(remoteBenchflowModule.http.client, "HTTPConnection", Connection)
+    archivePath = tmp_path / "source.tar.gz"
+    archivePath.write_bytes(b"source archive")
+    runner = RemoteBenchflowRunner(
+        taskId="demo-task",
+        modelPath="/models/test-model",
+        sourceMode="local",
+        skillsbenchDir=tmp_path,
+        remoteEndpoint="http://127.0.0.1:9000",
+        remoteConnectTimeout=3,
+        remoteUploadTimeout=123,
+    )
+    runner.remoteRunId = "run-id"
+
+    assert runner._UploadSource(archivePath) == {"state": "ready"}
+    assert seen["timeout"] == pytest.approx(123)
 
 
 def test_remote_control_endpoint_requires_bearer_token(tmp_path):

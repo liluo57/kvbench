@@ -104,6 +104,9 @@ class AgentBenchFlowTask(Task):
             "AuthTokenEnv", "KVBENCH_REMOTE_TOKEN"
         )
         self.remoteConnectTimeout = float(remote.get("ConnectTimeoutSec", 10))
+        self.remoteUploadTimeout = float(remote.get("UploadTimeoutSec", 300))
+        if self.remoteUploadTimeout <= 0:
+            raise ValueError("upload_timeout_sec must be positive")
         self.remotePollInterval = float(remote.get("PollIntervalSec", 1))
         self.remoteArtifactDownloadRetries = int(
             remote.get("ArtifactDownloadRetries", 3)
@@ -244,6 +247,7 @@ class AgentBenchFlowTask(Task):
                 ),
                 remote_auth_token_env=str(self.remoteAuthTokenEnv),
                 remote_connect_timeout=self.remoteConnectTimeout,
+                remote_upload_timeout=self.remoteUploadTimeout,
                 remote_poll_interval=self.remotePollInterval,
                 remote_artifact_download_retries=(
                     self.remoteArtifactDownloadRetries

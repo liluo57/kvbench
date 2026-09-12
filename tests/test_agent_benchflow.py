@@ -746,7 +746,10 @@ def test_task_loads_benchflow_configuration_and_keeps_task_tag(
         "SkillsBenchRepo": str(fakeSkillsbench),
         "Agent": "opencode",
         "Sandbox": "remote-docker",
-        "RemoteDocker": {"Endpoint": "http://127.0.0.1:9000"},
+        "RemoteDocker": {
+            "Endpoint": "http://127.0.0.1:9000",
+            "UploadTimeoutSec": 123,
+        },
         "SkillMode": "no-skill",
         "ProviderHost": "host.docker.internal",
         "RetryAttempts": 2,
@@ -765,6 +768,7 @@ def test_task_loads_benchflow_configuration_and_keeps_task_tag(
     assert case.input.source_mode == "local"
     assert case.input.provider_host == "host.docker.internal"
     assert case.input.retry_attempts == 2
+    assert case.input.remote_upload_timeout == pytest.approx(123)
     assert case.input.first_run_only is True
 
 

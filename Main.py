@@ -39,23 +39,10 @@ from tasks import (
 
 
 def Main() -> None:
-    taskIds = [
-        'debug-trl-grpo',
-        'earthquake-phase-association',
-        'fix-build-google-auto',
-        'fix-visual-stability',
-        'flink-query',
-        'glm-lake-mendota',
-        'latex-formula-extraction',
-        'lean4-proof',
-        'multilingual-video-dubbing',
-        'seismic-phase-picking',
-        'software-dependency-audit',
-        'spring-boot-jakarta-migration',
-        'suricata-custom-exfil',
-    ]
+    taskIds = ['fix-druid-loophole-cve','fix-erlang-ssh-cve','quantum-numerical-simulation','radar-vital-signs']
 
-    tasks = [AgentBenchFlowTask(taskId, firstRunOnly=False) for taskId in taskIds]
+
+    tasks = [AgentBenchFlowTask(taskId, firstRunOnly=True) for taskId in taskIds]
 
     MAX_NEW_TOKENS = 40960
     methods = [
@@ -67,6 +54,30 @@ def Main() -> None:
             picMode="addition",
             tag="addition",
         ),
+        # HypicMethod(
+        #     maxNewTokens=MAX_NEW_TOKENS,
+        #     gpuNums=2,
+        #     maxModelLen=256000,
+        #     memFractionStatic=0.90,
+        #     picMode="transition",
+        #     tag="transition",
+        # ),
+        # HypicMethod(
+        #     maxNewTokens=MAX_NEW_TOKENS,
+        #     gpuNums=2,
+        #     maxModelLen=256000,
+        #     memFractionStatic=0.90,
+        #     picMode="transition_rope",
+        #     tag="transition_rope",
+        # ),
+        # HypicMethod(
+        #     maxNewTokens=MAX_NEW_TOKENS,
+        #     gpuNums=2,
+        #     maxModelLen=256000,
+        #     memFractionStatic=0.90,
+        #     picMode="transition_rope_recompute",
+        #     tag="transition_rope_recompute",
+        # ),
         HypicMethod(
             maxNewTokens=MAX_NEW_TOKENS,
             gpuNums=2,
