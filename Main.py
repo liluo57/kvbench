@@ -43,17 +43,17 @@ def Main() -> None:
 
     MAX_SAMPLES = 64
     tasks = [
-        # NIAHShuffleTask(maxSamples=MAX_SAMPLES),
-        # CWEShuffleTask(maxSamples=MAX_SAMPLES),
-        # VTShuffleTask(maxSamples=MAX_SAMPLES),
-        # MusiqueTask(maxSamples=MAX_SAMPLES),
-        # SamsumTask(maxSamples=MAX_SAMPLES),
-        # WikimQATask(maxSamples=MAX_SAMPLES),
+        NIAHShuffleTask(maxSamples=MAX_SAMPLES),
+        CWEShuffleTask(maxSamples=MAX_SAMPLES),
+        VTShuffleTask(maxSamples=MAX_SAMPLES),
+        MusiqueTask(maxSamples=MAX_SAMPLES),
+        SamsumTask(maxSamples=MAX_SAMPLES),
+        WikimQATask(maxSamples=MAX_SAMPLES),
         # FreshGapTask(nCases=MAX_SAMPLES),
-        GovReportTask(maxSamples=MAX_SAMPLES, nChunks=1, maxSampleLength=32768, tag="1"),
-        GovReportTask(maxSamples=MAX_SAMPLES, nChunks=4, maxSampleLength=32768, tag="4"),
-        GovReportTask(maxSamples=MAX_SAMPLES, nChunks=8, maxSampleLength=32768, tag="8"),
-        GovReportTask(maxSamples=MAX_SAMPLES, nChunks=16, maxSampleLength=32768, tag="16"),
+        # GovReportTask(maxSamples=MAX_SAMPLES, nChunks=1, maxSampleLength=32768, tag="1"),
+        # GovReportTask(maxSamples=MAX_SAMPLES, nChunks=4, maxSampleLength=32768, tag="4"),
+        # GovReportTask(maxSamples=MAX_SAMPLES, nChunks=8, maxSampleLength=32768, tag="8"),
+        # GovReportTask(maxSamples=MAX_SAMPLES, nChunks=16, maxSampleLength=32768, tag="16"),
         # HotpotQATask(maxSamples=MAX_SAMPLES),
         # MultiNewsTask(maxSamples=MAX_SAMPLES),
         # TriviaQATask(maxSamples=MAX_SAMPLES),
@@ -89,7 +89,7 @@ def Main() -> None:
     # ]
     # tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
-    MAX_NEW_TOKENS = 512
+    MAX_NEW_TOKENS = 64
     methods = [
         # DependencyAnalysisMethod(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
         CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0,tag='0'),

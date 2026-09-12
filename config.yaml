@@ -21,7 +21,7 @@
 DatasetPath: /data/lyh/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B
+ModelPath: /data1/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-4b
 
 # Shared model sampling policy.
 #   greedy   - deterministic argmax decoding
@@ -51,7 +51,7 @@ Engine:
   AvailableGpuIds: auto
   BatchSize: 1
   OutputRoot: outputs
-  InitializeTimeoutSec: 600
+  InitializeTimeoutSec: 6000
   TaskTimeoutSec: 18000
   ShutdownGracePeriodSec: 30
   GpuReleaseTimeoutSec: 30
@@ -78,7 +78,7 @@ AgentBenchFlow:
   # avoids resolving the dataset through the remote GitHub registry.
   SourceMode: local
   Dataset: skillsbench@1.1
-  SkillsBenchRepo: /root/skillsbench
+  SkillsBenchRepo: /data/lyh/skillsbench
 
   # BenchFlow 0.7.5 currently provides pi-acp, opencode, and mimo, but not
   # qwen-code. pi-acp has the skill path needed for with-skill runs and uses
