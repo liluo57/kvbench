@@ -2,7 +2,10 @@ from types import SimpleNamespace
 
 import torch
 
-from helpers.cacheblend_repo.CacheblendRepoHelper import CacheBlendWorker
+from helpers.cacheblend_repo.CacheblendRepoHelper import (
+    CacheBlendWorker,
+    _indexed_causal_mask,
+)
 
 
 class _Tokenizer:
@@ -56,3 +59,21 @@ def test_reserve_rejects_prompt_beyond_model_limit():
         assert "exceeds max_model_len" in str(exc)
     else:
         raise AssertionError("oversized reserve unexpectedly succeeded")
+
+
+def test_indexed_causal_mask_keeps_aligned_stride_for_single_selected_token():
+    keyLen = 13
+    cfm = {
+        "imp_indices": torch.tensor([5]),
+        "org_seq_len": keyLen,
+        "kv_cache_dtype": torch.float32,
+        "_num_kv_heads": 8,
+        "_num_queries_per_kv": 4,
+    }
+
+    mask = _indexed_causal_mask(cfm, lambda: None)
+
+    assert mask.shape == (1, 8, 4, 1, keyLen)
+    assert mask.stride(-2) == 16
+    assert torch.all(mask[..., 0, :6] == 0)
+    assert torch.all(mask[..., 0, 6:] == torch.finfo(torch.float32).min)
