@@ -192,6 +192,45 @@ def test_govreport_default_and_requested_chunk_counts(tmp_path):
     assert "".join(chunks) == task.prefixPrompt + context
 
 
+def test_govreport_max_sample_length_filters_complete_prompts(tmp_path, monkeypatch):
+    from tasks.GovReport import GovReportTask
+
+    (tmp_path / "govreport.jsonl").write_text(
+        "\n".join(
+            json.dumps({"context": context, "answers": ["summary"]})
+            for context in ("short report.", "oversized report.")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        ModelAdapter,
+        "render_user_prompt",
+        lambda userContent, **kwargs: userContent,
+    )
+
+    class FakeTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return [0] * (2 if "short report" in text else 5)
+
+    monkeypatch.setattr(
+        ModelAdapter, "_tokenizer", lambda modelPath: FakeTokenizer()
+    )
+
+    for nChunks in (1, 4, 8, 16):
+        filtered = GovReportTask(
+            dataDir=str(tmp_path),
+            nChunks=nChunks,
+            maxSampleLength=4,
+        )
+        cases = list(filtered.Cases())
+        assert [case.metadata["case_id"] for case in cases] == [0]
+
+    unfiltered = GovReportTask(dataDir=str(tmp_path), maxSampleLength=0)
+    assert len(list(unfiltered.Cases())) == 2
+
+
 def test_ruler_metric_and_parsing_helpers(tmp_path):
     assert StringMatchAll("Alpha and beta", ["alpha", "missing"]) == 0.5
     assert ExactMatch(" Answer \n", ["answer", "other"]) == 1.0

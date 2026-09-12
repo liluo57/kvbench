@@ -28,7 +28,7 @@ ModelPath: /data/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B
 #   default  - use the model's generation_config.json (or config.json)
 #   override - use the sampling values listed below
 ModelConfig:
-  mode: default
+  mode: greedy #default
   temperature: 1.0
   top_p: 0.95
   top_k: 20

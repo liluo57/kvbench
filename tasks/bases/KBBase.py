@@ -293,6 +293,15 @@ class KBBase(Task):
         return samples
 
     # ---------------------------------------------------------------- cases
+    def _ShouldSkipPrompt(self, fullPrompt: str, modelPath: str) -> bool:
+        """Return whether a rendered prompt should be excluded.
+
+        Most tasks have no prompt-length restriction.  Long-context tasks can
+        override this hook after the model-specific chat template has been
+        applied, which keeps the filter aligned with what the backend sees.
+        """
+        return False
+
     def Cases(self) -> Iterator[Case]:
         from helpers.backends.ModelAdapter import render_user_prompt
         modelPath = ModelPath()
@@ -305,6 +314,8 @@ class KBBase(Task):
                 "".join(chunks) + suffix,
                 modelPath=modelPath, thinking=False,
             )
+            if self._ShouldSkipPrompt(fullPrompt, modelPath):
+                continue
             metadata = {
                 "case_id": i,
                 "question": s.get("question", s.get("input")),
