@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
+from helpers.benchflow.SkillMode import NormalizeSkillMode
 
 
 class BenchflowRunner:
@@ -57,8 +58,6 @@ class BenchflowRunner:
             raise ValueError("dataset is required when sourceMode='dataset'")
         if sourceMode == "local" and not skillsbenchDir:
             raise ValueError("skillsbenchDir is required when sourceMode='local'")
-        if skillMode not in {"with-skill", "no-skill"}:
-            raise ValueError("skillMode must be 'with-skill' or 'no-skill'")
         if not providerHost:
             raise ValueError("providerHost must not be empty")
 
@@ -69,7 +68,7 @@ class BenchflowRunner:
         self.skillsbenchDir = Path(skillsbenchDir) if skillsbenchDir else None
         self.agent = agent
         self.sandbox = sandbox
-        self.skillMode = skillMode
+        self.skillMode = NormalizeSkillMode(skillMode, field="skillMode")
         self.providerHost = providerHost
         self.endpointHost = endpointHost
         self.port = int(port)

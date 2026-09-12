@@ -62,6 +62,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -69,9 +71,36 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-BENCHFLOW_ROOT = Path(
+_LEGACY_BENCHFLOW_ROOT = Path(
     "/data/lyh/.local/cpython-3.13.9/lib/python3.13/site-packages/benchflow"
 )
+
+
+def _ResolveBenchflowRoot() -> Path:
+    """Find the BenchFlow package used by the invoking Python interpreter.
+
+    The original smoke-run host used ``/data/lyh``.  Keep that path as a
+    fallback for the remote host, but prefer an explicit override or the
+    package import path so the same script works in the local ``/root``
+    environment as well.
+    """
+    configured = os.environ.get("KVBENCH_BENCHFLOW_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    try:
+        spec = importlib.util.find_spec("benchflow")
+    except (ImportError, ModuleNotFoundError, ValueError):
+        spec = None
+    if spec is not None:
+        locations = spec.submodule_search_locations
+        if locations:
+            return Path(next(iter(locations))).resolve()
+        if spec.origin:
+            return Path(spec.origin).resolve().parent
+    return _LEGACY_BENCHFLOW_ROOT
+
+
+BENCHFLOW_ROOT = _ResolveBenchflowRoot()
 REGISTRY_PATH = BENCHFLOW_ROOT / "agents" / "registry.py"
 DOCKER_PATH = BENCHFLOW_ROOT / "sandbox" / "docker.py"
 LITELLM_CONFIG_PATH = BENCHFLOW_ROOT / "providers" / "litellm_config.py"
@@ -98,7 +127,9 @@ MARKER_LAUNCHER_COMPAT = (
 # checking both gives us a robust "already applied" check.
 POST_PATCH_PIACP = "pi-acp@0.0.32"
 POST_PATCH_AUTONOMY = "_PI_AUTONOMOUS_DIRECTIVE = ("
-POST_PATCH_NO_RMI = "--volumes"  # this string only appears in the patched block
+# Include the adjacent ``--remove-orphans`` argument: ``--volumes`` alone is
+# also present in the upstream ``down --rmi all --volumes`` block.
+POST_PATCH_NO_RMI = '"down",\n                        "--volumes",\n                        "--remove-orphans",'
 POST_PATCH_PI_TIMEOUT = '"timeoutMs": 10800000'
 POST_PATCH_PYTHON_BOOTSTRAP = (
     "command -v apt-get >/dev/null 2>&1 && apt-get update -qq && "
@@ -173,10 +204,11 @@ def _build_piacp_block() -> str:
         + "            f\"mkdir -p {shlex.quote(str(Path(_PI_AUTONOMY_FILE).parent))} && \"\n"
         + "            f\"printf '%s\\\\n' {shlex.quote(_PI_AUTONOMOUS_DIRECTIVE)}"
         + " > {shlex.quote(_PI_AUTONOMY_FILE)} && \"\n"
-        + "            f\"sed -i.bak "
-        + "\"'s|if (params.sessionPath) args.push(\\\"--session\\\", params.sessionPath);|\"\n"
-        + "            f\"if (true) args.push(\\\"--append-system-prompt\\\", \\\"{_PI_AUTONOMY_FILE}\\\");\"\n"
-        + "            f\" if (params.sessionPath) args.push(\\\"--session\\\", params.sessionPath);|' \"\n"
+        + (
+            "            f\"sed -i.bak 's|if (params.sessionPath) args.push(\\\"--session\\\", params.sessionPath);|\"\n"
+            "            f\"if (true) args.push(\\\"--append-system-prompt\\\", \\\"{_PI_AUTONOMY_FILE}\\\");\"\n"
+            "            f\" if (params.sessionPath) args.push(\\\"--session\\\", params.sessionPath);|' \"\n"
+        )
         + "            f\"{_BENCHFLOW_JS_AGENT_PREFIX}/lib/node_modules/pi-acp/dist/index.js && \"\n"
     )
 

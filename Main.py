@@ -40,7 +40,6 @@ from tasks import (
 
 
 def Main() -> None:
-
     MAX_SAMPLES = 64
     tasks = [
         NIAHShuffleTask(maxSamples=MAX_SAMPLES),
@@ -89,7 +88,7 @@ def Main() -> None:
     # ]
     # tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
-    MAX_NEW_TOKENS = 64
+    MAX_NEW_TOKENS = 40960
     methods = [
         # DependencyAnalysisMethod(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
         CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0,tag='0'),

@@ -320,6 +320,22 @@ def test_runner_builds_real_benchflow_dataset_command(tmp_path):
     assert "vllm/Qwen3.8-27B" in command
 
 
+def test_runner_normalizes_without_skill_alias_for_benchflow(tmp_path):
+    runner = BenchflowRunner(
+        taskId="citation-check",
+        modelPath="/models/model",
+        sourceMode="dataset",
+        dataset="skillsbench@1.1",
+        skillMode="WithoutSkill",
+        jobsDir=tmp_path / "case",
+    )
+
+    command = runner.BuildCommand()
+
+    assert runner.skillMode == "no-skill"
+    assert command[command.index("--skill-mode") + 1] == "no-skill"
+
+
 def test_runner_builds_local_tasks_dir_command(tmp_path):
     repo = tmp_path / "skillsbench"
     runner = BenchflowRunner(
@@ -593,6 +609,32 @@ def test_workflow_prepares_only_skill_documents_before_the_original_run_prompt()
     ]
 
 
+def test_without_skill_does_not_read_or_prepare_skill_documents():
+    skill = "---\nname: demo-skill\n---\n\nUse the skill.\n"
+    first = _request("first rendered prompt")
+    second = _request(
+        "second rendered prompt",
+        _skill_messages("/home/agent/.pi/agent/skills/demo/SKILL.md", skill),
+    )
+    runner = _FakeRunner([first, second])
+    workflow = AgentBenchFlowWorkflow(
+        case_id=3,
+        data=AgentBenchFlowInput(
+            task_id="citation-check",
+            skill_mode="WithoutSkill",
+        ),
+        runner=runner,
+    )
+
+    assert workflow.next()[0].kind == ActionKind.RUN
+    workflow.observe([ActionResult(3, Result(output="first output"))])
+
+    secondAction = workflow.next()[0]
+    assert secondAction.kind == ActionKind.RUN
+    assert secondAction.data == "second rendered prompt"
+    assert workflow._skillDocuments == []
+
+
 def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
     skillPath = (
         tmp_path
@@ -746,8 +788,11 @@ def test_task_loads_benchflow_configuration_and_keeps_task_tag(
         "SkillsBenchRepo": str(fakeSkillsbench),
         "Agent": "opencode",
         "Sandbox": "remote-docker",
-        "RemoteDocker": {"Endpoint": "http://127.0.0.1:9000"},
-        "SkillMode": "no-skill",
+        "RemoteDocker": {
+            "Endpoint": "http://127.0.0.1:9000",
+            "UploadTimeoutSec": 123,
+        },
+        "SkillMode": "WithoutSkill",
         "ProviderHost": "host.docker.internal",
         "RetryAttempts": 2,
     }
@@ -765,6 +810,7 @@ def test_task_loads_benchflow_configuration_and_keeps_task_tag(
     assert case.input.source_mode == "local"
     assert case.input.provider_host == "host.docker.internal"
     assert case.input.retry_attempts == 2
+    assert case.input.remote_upload_timeout == pytest.approx(123)
     assert case.input.first_run_only is True
 
 

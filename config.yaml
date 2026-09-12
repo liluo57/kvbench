@@ -48,7 +48,9 @@ Hypic:
 # The benchmark entry point reads its shared runtime settings from this section.
 # Task selection and method parameters remain in Main.py.
 Engine:
-  AvailableGpuIds: auto
+  # GPU 0 reports a bogus 100% utilization; use the explicit physical pool.
+  # This machine exposes eight devices numbered 0 through 7.
+  AvailableGpuIds: [0, 1, 2, 3, 4, 5, 6, 7]
   BatchSize: 1
   OutputRoot: outputs
   InitializeTimeoutSec: 6000
@@ -85,7 +87,10 @@ AgentBenchFlow:
   # BenchFlow's normal ACP/provider routing.
   Agent: pi-acp
   Sandbox: remote-docker
-  SkillMode: with-skill
+  # BenchFlow modes: with-skill (normal) or no-skill.  WithoutSkill,
+  # without-skill, and without_skill are accepted aliases for no-skill; in
+  # that mode BenchFlow removes task-bundled skills from the agent sandbox.
+  SkillMode: without-skill
 
   # To move BenchFlow + Docker to another runtime host, change Sandbox above
   # to remote-docker and start scripts/RemoteDockerRuntimeServer.py there.
@@ -97,6 +102,10 @@ AgentBenchFlow:
     # KVBenchAdvertiseHost: 10.0.0.21
     AuthTokenEnv: KVBENCH_REMOTE_TOKEN
     ConnectTimeoutSec: 10
+    # Source upload includes remote-side archive extraction before the HTTP
+    # response is returned. Keep this separate from control-plane timeouts;
+    # radar-vital-signs contains ~14 MiB of binary recordings.
+    UploadTimeoutSec: 300
     PollIntervalSec: 1
     ArtifactDownloadRetries: 3
 

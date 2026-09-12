@@ -12,6 +12,10 @@ from core.Workflow import Action, ActionKind, ActionResult, Workflow
 
 from helpers.backends import ModelAdapter
 from helpers.benchflow import BenchflowRunner, RemoteBenchflowRunner
+from helpers.benchflow.SkillMode import (
+    NormalizeSkillMode,
+    SKILL_MODE_WITH_SKILL,
+)
 from helpers.endpoint import OpenAIRequest
 
 
@@ -189,10 +193,14 @@ class AgentBenchFlowInput:
     remote_advertise_host: Optional[str] = None
     remote_auth_token_env: str = "KVBENCH_REMOTE_TOKEN"
     remote_connect_timeout: float = 10.0
+    remote_upload_timeout: float = 300.0
     remote_poll_interval: float = 1.0
     remote_artifact_download_retries: int = 3
     #: Filled after the runner starts; useful to callers and diagnostics.
     endpoint_url: str = field(default="", init=False)
+
+    def __post_init__(self) -> None:
+        self.skill_mode = NormalizeSkillMode(self.skill_mode)
 
 
 class AgentBenchFlowWorkflow(Workflow):
@@ -244,7 +252,7 @@ class AgentBenchFlowWorkflow(Workflow):
         reads them. Without a checkout, dataset-mode runs use the request
         history fallback in :meth:`next` instead.
         """
-        if self._data.skill_mode != "with-skill" or not self._data.skillsbench_dir:
+        if self._data.skill_mode != SKILL_MODE_WITH_SKILL or not self._data.skillsbench_dir:
             return []
         skillsRoot = (
             Path(self._data.skillsbench_dir)
@@ -293,7 +301,7 @@ class AgentBenchFlowWorkflow(Workflow):
 
     def _BuildFirstRunPrompt(self, request: OpenAIRequest) -> str:
         """Return the initial provider prompt with bundled Skills included."""
-        if self._data.skill_mode != "with-skill" or not self._skillDocuments:
+        if self._data.skill_mode != SKILL_MODE_WITH_SKILL or not self._skillDocuments:
             return request.prompt
 
         documents = [
@@ -367,6 +375,7 @@ class AgentBenchFlowWorkflow(Workflow):
                         advertiseHost=self._data.remote_advertise_host,
                         remoteAuthTokenEnv=self._data.remote_auth_token_env,
                         remoteConnectTimeout=self._data.remote_connect_timeout,
+                        remoteUploadTimeout=self._data.remote_upload_timeout,
                         remotePollInterval=self._data.remote_poll_interval,
                         artifactDownloadRetries=(
                             self._data.remote_artifact_download_retries
@@ -402,14 +411,22 @@ class AgentBenchFlowWorkflow(Workflow):
             return None
 
         self._pending = request
-        newDocuments = self._RememberSkillDocuments(
-            _ExtractSkillDocuments(request.messages)
+        # A no-skill rollout must not even retain skill text if a custom agent
+        # sends an unexpected SKILL.md tool exchange. BenchFlow's no-skill
+        # sandbox removes the files; this guard keeps the KVBench side equally
+        # strict and prevents PREPARE/prompt injection from becoming a second
+        # way for skill documents to reach the model.
+        newDocuments = (
+            self._RememberSkillDocuments(_ExtractSkillDocuments(request.messages))
+            if self._data.skill_mode == SKILL_MODE_WITH_SKILL
+            else []
         )
         # A local task can be prepared before the first RUN.  In dataset mode,
         # the first Skill body becomes visible only after the agent has read it;
         # in either case the data sent to Method.Prepare is *only* Skill text.
-        shouldPrepare = bool(newDocuments) or (
-            bool(self._skillDocuments) and not self._skillsPrepared
+        shouldPrepare = self._data.skill_mode == SKILL_MODE_WITH_SKILL and (
+            bool(newDocuments)
+            or (bool(self._skillDocuments) and not self._skillsPrepared)
         )
         if shouldPrepare:
             self._pendingKind = ActionKind.PREPARE
