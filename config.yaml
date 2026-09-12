@@ -43,7 +43,7 @@ Hypic:
   # PIC PICache segment count rarely exceeds a few dozen in practice; 32 is
   # safe for the current agent tasks. Set to -1 to fall back to SGLang's
   # auto-fit (default when this key is absent).
-  MaxMambaCacheSize: 128
+  MaxMambaCacheSize: 32
 
 # The benchmark entry point reads its shared runtime settings from this section.
 # Task selection and method parameters remain in Main.py.
@@ -87,7 +87,10 @@ AgentBenchFlow:
   # BenchFlow's normal ACP/provider routing.
   Agent: pi-acp
   Sandbox: remote-docker
-  SkillMode: with-skill
+  # BenchFlow modes: with-skill (normal) or no-skill.  WithoutSkill,
+  # without-skill, and without_skill are accepted aliases for no-skill; in
+  # that mode BenchFlow removes task-bundled skills from the agent sandbox.
+  SkillMode: without-skill
 
   # To move BenchFlow + Docker to another runtime host, change Sandbox above
   # to remote-docker and start scripts/RemoteDockerRuntimeServer.py there.

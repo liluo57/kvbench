@@ -113,6 +113,16 @@ def test_remote_server_forwards_benchflow_retry_attempts(tmp_path):
     assert command[index:index + 2] == ["--retry-attempts", "2"]
 
 
+def test_remote_server_normalizes_without_skill_mode(tmp_path):
+    manager = RemoteRunManager(workRoot=tmp_path / "runtime")
+    record = manager.CreateRun(_spec(skill_mode="WithoutSkill"))
+
+    command = manager._BuildCommand(record)
+
+    assert record.spec["skill_mode"] == "no-skill"
+    assert command[command.index("--skill-mode") + 1] == "no-skill"
+
+
 def test_remote_server_rejects_client_agent_env_override_attempts(tmp_path):
     manager = RemoteRunManager(workRoot=tmp_path / "runtime")
     with pytest.raises(ApiError, match="reserved key BENCHFLOW_PROVIDER_BASE_URL"):

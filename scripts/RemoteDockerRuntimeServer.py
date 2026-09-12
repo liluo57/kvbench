@@ -74,6 +74,38 @@ _AGENT_ENV_RESERVED_KEYS = frozenset(
 )
 
 
+def NormalizeSkillMode(value: str) -> str:
+    """Normalize KVBench's readable alias to BenchFlow's CLI spelling.
+
+    This server is intentionally copyable to a host without the KVBench
+    checkout, so keep this small protocol-level helper self-contained.
+    """
+
+    aliases = {
+        "with-skill": "with-skill",
+        "with_skill": "with-skill",
+        "withskill": "with-skill",
+        "no-skill": "no-skill",
+        "no_skill": "no-skill",
+        "noskill": "no-skill",
+        "without-skill": "no-skill",
+        "without_skill": "no-skill",
+        "withoutskill": "no-skill",
+    }
+    if not isinstance(value, str):
+        raise ValueError(
+            "skill_mode must be 'with-skill' or 'no-skill' "
+            "(WithoutSkill is also accepted)"
+        )
+    normalized = aliases.get(value.strip().casefold())
+    if normalized is None:
+        raise ValueError(
+            "skill_mode must be 'with-skill' or 'no-skill' "
+            "(WithoutSkill is also accepted)"
+        )
+    return normalized
+
+
 class ApiError(RuntimeError):
     def __init__(self, status: int, message: str):
         super().__init__(message)
@@ -404,9 +436,10 @@ class RemoteRunManager:
                 raise ApiError(400, f"{name} must not be empty")
             return value
 
-        skillMode = nonempty("skill_mode")
-        if skillMode not in {"with-skill", "no-skill"}:
-            raise ApiError(400, "skill_mode must be 'with-skill' or 'no-skill'")
+        try:
+            skillMode = NormalizeSkillMode(nonempty("skill_mode"))
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
 
         return {
             "protocol_version": PROTOCOL_VERSION,

@@ -39,21 +39,20 @@ from tasks import (
 
 
 def Main() -> None:
-    taskIds = ['fix-druid-loophole-cve','fix-erlang-ssh-cve','quantum-numerical-simulation','radar-vital-signs']
+    taskIds = ['court-form-filling','energy-market-pricing','fix-visual-stability','gravitational-wave-detection','lab-unit-harmonization','manufacturing-fjsp-optimization','mario-coin-counting','paper-anonymizer','powerlifting-coef-calc','r2r-mpc-control','sec-financial-report','setup-fuzzing-py','tictoc-unnecessary-abort-detection','travel-planning']
 
-
-    tasks = [AgentBenchFlowTask(taskId, firstRunOnly=True) for taskId in taskIds]
+    tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
     MAX_NEW_TOKENS = 40960
     methods = [
-        HypicMethod(
-            maxNewTokens=MAX_NEW_TOKENS,
-            gpuNums=2,
-            maxModelLen=256000,
-            memFractionStatic=0.90,
-            picMode="addition",
-            tag="addition",
-        ),
+        # HypicMethod(
+        #     maxNewTokens=MAX_NEW_TOKENS,
+        #     gpuNums=2,
+        #     maxModelLen=256000,
+        #     memFractionStatic=0.90,
+        #     picMode="addition",
+        #     tag="addition",
+        # ),
         # HypicMethod(
         #     maxNewTokens=MAX_NEW_TOKENS,
         #     gpuNums=2,
@@ -70,22 +69,22 @@ def Main() -> None:
         #     picMode="transition_rope",
         #     tag="transition_rope",
         # ),
+        HypicMethod(
+            maxNewTokens=MAX_NEW_TOKENS,
+            gpuNums=1,
+            maxModelLen=256000,
+            memFractionStatic=0.90,
+            picMode="transition_rope_recompute",
+            tag="transition_rope_recompute",
+        ),
         # HypicMethod(
         #     maxNewTokens=MAX_NEW_TOKENS,
         #     gpuNums=2,
         #     maxModelLen=256000,
-        #     memFractionStatic=0.90,
-        #     picMode="transition_rope_recompute",
-        #     tag="transition_rope_recompute",
+        #     memFractionStatic=0.80,
+        #     fullPrefill=True,
+        #     tag="full_prefill",
         # ),
-        HypicMethod(
-            maxNewTokens=MAX_NEW_TOKENS,
-            gpuNums=2,
-            maxModelLen=256000,
-            memFractionStatic=0.80,
-            fullPrefill=True,
-            tag="full_prefill",
-        ),
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]

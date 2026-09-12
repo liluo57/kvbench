@@ -87,7 +87,11 @@ checkout is used for task enumeration and `--tasks-dir`; task parsing,
 environment setup, skill provisioning, agent lifecycle, tool execution,
 verification, and official artifacts remain BenchFlow responsibilities. The
 `with-skill` and `no-skill` modes are passed to BenchFlow without changing the
-agent prompt in KVBench.
+agent prompt in KVBench. `SkillMode: no-skill` is the baseline condition in
+which BenchFlow strips task-bundled skills from the Docker build context and
+does not deploy them to the agent sandbox. KVBench also accepts
+`SkillMode: WithoutSkill` as an alias and, in that mode, does not read or
+prepare any `SKILL.md` content itself.
 
 For the currently installed BenchFlow 0.7.x, the equivalent command for one
 dataset task is:

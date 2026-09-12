@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 from core.Config import Get
 from core.Result import Result
 from core.Task import Case, Task
+from helpers.benchflow.SkillMode import NormalizeSkillMode
 from workflow.AgentBenchFlowWorkflow import AgentBenchFlowInput, AgentBenchFlowWorkflow
 
 
@@ -60,9 +61,9 @@ class AgentBenchFlowTask(Task):
             )
         self.agent = abf.get("Agent", "pi-acp")
         self.sandbox = abf.get("Sandbox", "docker")
-        self.skillMode = abf.get("SkillMode", "with-skill")
-        if self.skillMode not in {"with-skill", "no-skill"}:
-            raise ValueError("skill_mode must be 'with-skill' or 'no-skill'")
+        self.skillMode = NormalizeSkillMode(
+            abf.get("SkillMode", "with-skill")
+        )
         self.providerHost = abf.get("ProviderHost", "127.0.0.1")
         self.endpointHost = abf.get("EndpointHost", "0.0.0.0")
         self.port = int(abf.get("Port", 0))
