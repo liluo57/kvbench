@@ -18,10 +18,10 @@
 #              (fields: ctxs[{title,text}], question, answers)
 #   samsum/    cacheblend's summarization dataset (samsum.json)
 #   wikimqa/   cacheblend's wiki multi-hop QA dataset (wikimqa_s.json)
-DatasetPath: /data/lyh/kvbench/data
+DatasetPath: /root/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /root/autodl-tmp/models/Qwen3.8-27b
+ModelPath: /root/autodl-tmp/models/Qwen3-4b
 
 # Shared model sampling policy.
 #   greedy   - deterministic argmax decoding
