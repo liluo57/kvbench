@@ -33,6 +33,11 @@ ModelConfig:
   top_p: 0.95
   top_k: 20
 
+# System-vLLM options for the FullPrefillVllm baseline.
+FullPrefillVllm:
+  # Maximum number of sequences vLLM allocates decode/Mamba cache blocks for.
+  MaxNumSeqs: 32
+
 # HYPIC's SGLang fork used by methods/Hypic.py. The model itself still comes
 # from the global ModelPath above.
 Hypic:
@@ -91,7 +96,7 @@ AgentBenchFlow:
   # BenchFlow modes: with-skill (normal) or no-skill.  WithoutSkill,
   # without-skill, and without_skill are accepted aliases for no-skill; in
   # that mode BenchFlow removes task-bundled skills from the agent sandbox.
-  SkillMode: without-skill
+  SkillMode: with-skill
 
   # To move BenchFlow + Docker to another runtime host, change Sandbox above
   # to remote-docker and start scripts/RemoteDockerRuntimeServer.py there.

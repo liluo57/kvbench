@@ -62,32 +62,6 @@ def Main() -> None:
         # KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
     ]
 
-    # skillsbench_root = Get("AgentBenchFlow", {}).get("SkillsBenchRepo")
-    # task_ids =['manufacturing-codebook-normalization', 'manufacturing-equipment-maintenance', 'manufacturing-fjsp-optimization', 'mario-coin-counting', 'mars-clouds-clustering', 'offer-letter-generator', 'organize-messy-files', 'paper-anonymizer', 'parallel-tfidf-search', 'paratransit-routing', 'pddl-airport-planning', 'pddl-tpp-planning', 'pdf-excel-diff', 'powerlifting-coef-calc', 'pptx-reference-formatting', 'protein-expression-analysis', 'python-scala-translation', 'quantum-numerical-simulation', 'r2r-mpc-control', 'radar-vital-signs', 'react-performance-debugging', 'reserves-at-risk-calc', 'sales-pivot-analysis', 'sec-financial-report', 'seismic-phase-picking', 'setup-fuzzing-py', 'shock-analysis-demand', 'shock-analysis-supply', 'simpo-code-reproduction', 'software-dependency-audit', 'syzkaller-ppdev-syzlang', 'threejs-structure-parser', 'threejs-to-obj', 'tictoc-unnecessary-abort-detection', 'travel-planning', 'video-silence-remover', 'weighted-gdp-calc', 'xlsx-recover-data', 'fix-build-google-auto', 'fix-visual-stability']
-    
-    # tasks = [
-    #     AgentBenchFlowTask(
-    #         source_mode="local",
-    #         skillsbench_dir=skillsbench_root,
-    #         task_ids=[task_id],
-    #         agent="pi-acp",
-    #         skill_mode="with-skill",
-    #         thinking=True,
-    #         result_json_timeout=18000,
-    #         bench_extra_args=[
-    #             "--agent-idle-timeout", "18000",
-    #             "--config-override",
-    #             '{"agent":{"timeout_sec":18000}}',
-    #             # LiteLLM's built-in completion fallback is 600s unless the
-    #             # proxy receives an explicit REQUEST_TIMEOUT. Agent turns in
-    #             # this benchmark can legitimately take longer than that.
-    #             "--agent-env", "REQUEST_TIMEOUT=18000",
-    #         ],
-    #     )
-    #     for task_id in task_ids
-    # ]
-    # tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
-
     MAX_NEW_TOKENS = 64
     methods = [
         DependencyAnalysisMethod(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
