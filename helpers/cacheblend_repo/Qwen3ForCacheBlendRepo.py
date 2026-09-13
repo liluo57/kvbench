@@ -57,7 +57,10 @@ from transformers import AutoConfig, LlamaConfig
 
 from vllm.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models import ModelRegistry
 # Importing ``vllm.model_executor.models.llama`` cold triggers its own import
@@ -134,6 +137,20 @@ class Qwen3Attention(LlamaAttention):
                 head_dim,
                 self.total_num_heads,
                 self.total_num_kv_heads,
+                bias=bias,
+                linear_method=linear_method,
+            )
+            # ``LlamaAttention`` built ``o_proj`` using the derived head dim
+            # (hidden_size // num_heads).  Qwen3-4B has hidden_size=2560,
+            # num_heads=32, but explicitly declares head_dim=128, so its
+            # attention output is 4096 wide and the checkpoint's o_proj is
+            # [2560, 4096].  Rebuild this projection together with the other
+            # head-dimension-dependent modules.  For Qwen3-8B the declared
+            # head_dim already equals the derived value, so this branch is
+            # skipped and the existing construction remains unchanged.
+            self.o_proj = RowParallelLinear(
+                self.total_num_heads * head_dim,
+                hidden_size,
                 bias=bias,
                 linear_method=linear_method,
             )
@@ -243,12 +260,36 @@ class Qwen3ForCausalLM(LlamaForCausalLM):
     """Qwen3 LM head — the patched ``LlamaForCausalLM`` with a Qwen3 stack.
 
     ``load_weights`` (stacks q/k/v and routes the extra ``q_norm`` /
-    ``k_norm`` weights), ``compute_logits`` and ``sample`` are all inherited.
+    ``k_norm`` weights) is inherited.  Qwen3-4B ties its output projection to
+    ``model.embed_tokens`` and consequently has no ``lm_head.weight`` in the
+    checkpoint, so logits need the same conditional handling as Qwen2.
     """
 
     def __init__(self, config, linear_method=None, lora_config=None):
         super().__init__(config, linear_method, lora_config=lora_config)
         self.model = Qwen3Model(config, linear_method, lora_config=lora_config)
+        if getattr(config, "tie_word_embeddings", False):
+            # The parent always constructs an independent lm_head.  It is not
+            # present in tied Qwen3 checkpoints and must not be used for
+            # logits; remove it as well to avoid retaining an unused ~0.8 GiB
+            # parameter matrix for Qwen3-4B.
+            del self.lm_head
+
+    def compute_logits(self, hidden_states, sampling_metadata):
+        if getattr(self.config, "tie_word_embeddings", False):
+            lm_head_weight = self.model.embed_tokens.weight
+        else:
+            lm_head_weight = self.lm_head.weight
+        return self.logits_processor(lm_head_weight, hidden_states,
+                                     sampling_metadata)
+
+    def load_weights(self, weights):
+        if getattr(self.config, "tie_word_embeddings", False):
+            # Be robust to checkpoints that redundantly contain lm_head even
+            # though the tied embedding is the authoritative output weight.
+            weights = ((name, weight) for name, weight in weights
+                       if "lm_head.weight" not in name)
+        super().load_weights(weights)
 
 
 def register_qwen3() -> None:

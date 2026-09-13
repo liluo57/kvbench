@@ -40,11 +40,7 @@ from tasks import (
 
 
 def Main() -> None:
-    # taskIds = ['paper-anonymizer','energy-market-pricing','tictoc-unnecessary-abort-detection','fix-visual-stability','lab-unit-harmonization']
-
-    # tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
-
-    MAX_SAMPLES = 4
+    MAX_SAMPLES = 64
     tasks = [
         NIAHShuffleTask(maxSamples=MAX_SAMPLES),
         CWEShuffleTask(maxSamples=MAX_SAMPLES),
@@ -110,11 +106,13 @@ def Main() -> None:
         #     tag="full_prefill",
         # ),
         # FullPrefillVllm(
-        #     gpuNums=1, perfWeight=2, maxNewTokens=40960,
+        #     gpuNums=2, perfWeight=2, maxNewTokens=40960,
         #     gpuMemoryUtilization=0.85,
         #     maxModelLen=256000,
+        #     enforceEager=True,
         #     languageModelOnly=True,
         # ),
+
     ]
 
     metrics = [TTFTMetric(), ThroughputMetric()]
