@@ -33,6 +33,11 @@ ModelConfig:
   top_p: 0.95
   top_k: 20
 
+# System-vLLM options for the FullPrefillVllm baseline.
+FullPrefillVllm:
+  # Maximum number of sequences vLLM allocates decode/Mamba cache blocks for.
+  MaxNumSeqs: 32
+
 # HYPIC's SGLang fork used by methods/Hypic.py. The model itself still comes
 # from the global ModelPath above.
 Hypic:
@@ -48,9 +53,7 @@ Hypic:
 # The benchmark entry point reads its shared runtime settings from this section.
 # Task selection and method parameters remain in Main.py.
 Engine:
-  # GPU 0 reports a bogus 100% utilization; use the explicit physical pool.
-  # This machine exposes eight devices numbered 0 through 7.
-  AvailableGpuIds: [0, 1, 2, 3, 4, 5, 6, 7]
+  AvailableGpuIds: 'auto'
   BatchSize: 1
   OutputRoot: outputs
   InitializeTimeoutSec: 600
@@ -90,7 +93,7 @@ AgentBenchFlow:
   # BenchFlow modes: with-skill (normal) or no-skill.  WithoutSkill,
   # without-skill, and without_skill are accepted aliases for no-skill; in
   # that mode BenchFlow removes task-bundled skills from the agent sandbox.
-  SkillMode: without-skill
+  SkillMode: with-skill
 
   # To move BenchFlow + Docker to another runtime host, change Sandbox above
   # to remote-docker and start scripts/RemoteDockerRuntimeServer.py there.

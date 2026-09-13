@@ -21,15 +21,37 @@ Both ``Run`` methods process their whole batch in one call:
 irrelevant.
 """
 
-from typing import List, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence
 
-from core.Config import ModelPath as DefaultModelPath
+from core.Config import Get, ModelPath as DefaultModelPath
 from core.Method import Method
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig
 
 from helpers.backends.TransformersHelper import TransformersGenerator
 from helpers.backends.VllmHelper import CreateLlm, EncodeIds, GenerateBatch
+
+
+def _ConfiguredMaxNumSeqs() -> Optional[int]:
+    """Read the optional FullPrefillVllm max sequence count from config."""
+    config = Get("FullPrefillVllm", {}) or {}
+    if not isinstance(config, Mapping):
+        raise TypeError("FullPrefillVllm config must be a mapping")
+
+    value = config.get("MaxNumSeqs")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(
+            "FullPrefillVllm.MaxNumSeqs must be a positive integer "
+            f"(got {type(value).__name__}: {value!r})"
+        )
+    if value < 1:
+        raise ValueError(
+            "FullPrefillVllm.MaxNumSeqs must be a positive integer "
+            f"(got {value})"
+        )
+    return value
 
 
 class _FullPrefillBase(Method):
@@ -180,7 +202,11 @@ class FullPrefillVllm(_FullPrefillBase):
         # None -> CreateLlm auto-detects ``<model>/chat_template.jinja``.
         self.chatTemplate = chatTemplate
         self.languageModelOnly = languageModelOnly
-        self.maxNumSeqs = maxNumSeqs
+        # An explicit constructor value is useful for programmatic callers;
+        # normal runs read the backend limit from config.yaml.
+        self.maxNumSeqs = (
+            _ConfiguredMaxNumSeqs() if maxNumSeqs is None else maxNumSeqs
+        )
         self.llm = None
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:

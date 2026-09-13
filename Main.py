@@ -39,11 +39,19 @@ from tasks import (
 
 
 def Main() -> None:
-    taskIds = ['court-form-filling','energy-market-pricing','fix-visual-stability','gravitational-wave-detection','lab-unit-harmonization','manufacturing-fjsp-optimization','mario-coin-counting','paper-anonymizer','powerlifting-coef-calc','r2r-mpc-control','sec-financial-report','setup-fuzzing-py','tictoc-unnecessary-abort-detection','travel-planning']
+    # taskIds = ['paper-anonymizer','energy-market-pricing','tictoc-unnecessary-abort-detection','fix-visual-stability','lab-unit-harmonization']
 
-    tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
+    # tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
-    MAX_NEW_TOKENS = 40960
+    MAX_SAMPLES = 4
+    tasks = [
+        KVCommMMLUTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommGSM8KTask(maxSamples=MAX_SAMPLES, agentCount=3),
+        KVCommHumanEvalTask(maxSamples=MAX_SAMPLES, agentCount=5),
+        KVCommCopyTask(nCases=MAX_SAMPLES, agentCount=5),
+    ]
+
+    MAX_NEW_TOKENS = 512
     methods = [
         # HypicMethod(
         #     maxNewTokens=MAX_NEW_TOKENS,
@@ -71,19 +79,25 @@ def Main() -> None:
         # ),
         HypicMethod(
             maxNewTokens=MAX_NEW_TOKENS,
-            gpuNums=1,
+            gpuNums=2,
             maxModelLen=256000,
             memFractionStatic=0.90,
             picMode="transition_rope_recompute",
             tag="transition_rope_recompute",
         ),
-        # HypicMethod(
-        #     maxNewTokens=MAX_NEW_TOKENS,
-        #     gpuNums=2,
+        HypicMethod(
+            maxNewTokens=MAX_NEW_TOKENS,
+            gpuNums=2,
+            maxModelLen=256000,
+            memFractionStatic=0.80,
+            fullPrefill=True,
+            tag="full_prefill",
+        ),
+        # FullPrefillVllm(
+        #     gpuNums=1, perfWeight=2, maxNewTokens=40960,
+        #     gpuMemoryUtilization=0.85,
         #     maxModelLen=256000,
-        #     memFractionStatic=0.80,
-        #     fullPrefill=True,
-        #     tag="full_prefill",
+        #     languageModelOnly=True,
         # ),
     ]
 

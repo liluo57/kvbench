@@ -2,6 +2,7 @@ import sys
 import types
 
 from helpers.backends.VllmHelper import GenerateBatch
+from methods.FullPrefill import FullPrefillVllm
 
 
 class _SamplingParams:
@@ -54,3 +55,18 @@ def test_generate_batch_returns_native_stop_metadata(monkeypatch):
     assert result.finishReason == "length"
     assert result.stopReason is None
     assert engine.requests[0][2].kwargs == {"temperature": 0, "max_tokens": 10}
+
+
+def test_full_prefill_vllm_reads_max_num_seqs_from_config(monkeypatch):
+    monkeypatch.setattr(
+        "methods.FullPrefill.Get",
+        lambda key, default=None: (
+            {"MaxNumSeqs": 32}
+            if key == "FullPrefillVllm"
+            else default
+        ),
+    )
+
+    method = FullPrefillVllm()
+
+    assert method.maxNumSeqs == 32
