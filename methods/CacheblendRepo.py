@@ -29,9 +29,10 @@ and the recomputation ratio ``recompRatio`` (0.15 default;
 >0 repairs cross-chunk attention in a chunk-isolated knowledge base), and
 ``fullPrefill`` — when True every query is a plain full prefill (no cache, no
 fusion), serving as the control group against the fused runs. The repo path
-comes **only** from ``config.yaml`` (``Cacheblend.Repo.RepoPath``); the model
-path comes from the framework-wide top-level ``ModelPath`` (same as every other
-method). The constructor raises if the repo path is missing.
+and worker memory setting come **only** from ``config.yaml``
+(``Cacheblend.Repo.RepoPath`` and ``Cacheblend.Repo.GpuMemoryUtilization``);
+the model path comes from the framework-wide top-level ``ModelPath`` (same as
+every other method). The constructor raises if the repo path is missing.
 """
 
 import json
@@ -77,7 +78,6 @@ class CacheblendRepo(Method):
         *,
         maxNewTokens: int = 64,
         maxModelLen: int = 32768,
-        gpuMemoryUtilization: float = 0.7,
         recompRatio: float = 0.15,
         fullPrefill: bool = False,
         startTimeout: float = 1800.0,
@@ -91,6 +91,20 @@ class CacheblendRepo(Method):
         )
         self.maxNewTokens = maxNewTokens
         self.maxModelLen = maxModelLen
+
+        cacheblend = Get("Cacheblend", {}) or {}
+        repo = cacheblend.get("Repo", {}) or {}
+        gpuMemoryUtilization = repo.get("GpuMemoryUtilization", 0.7)
+        try:
+            gpuMemoryUtilization = float(gpuMemoryUtilization)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Cacheblend.Repo.GpuMemoryUtilization must be a number in (0, 1]"
+            ) from exc
+        if not 0 < gpuMemoryUtilization <= 1:
+            raise ValueError(
+                "Cacheblend.Repo.GpuMemoryUtilization must be a number in (0, 1]"
+            )
         self.gpuMemoryUtilization = gpuMemoryUtilization
         self.recompRatio = recompRatio
         self.fullPrefill = fullPrefill
@@ -98,7 +112,6 @@ class CacheblendRepo(Method):
 
         # Repo path comes from config.yaml; model path from the framework-wide
         # ``ModelPath`` (the same source every other method uses).
-        repo = (Get("Cacheblend", {}) or {}).get("Repo", {}) or {}
         repoPath = repo.get("RepoPath")
         if not repoPath:
             raise RuntimeError(

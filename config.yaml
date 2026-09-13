@@ -48,9 +48,7 @@ Hypic:
 # The benchmark entry point reads its shared runtime settings from this section.
 # Task selection and method parameters remain in Main.py.
 Engine:
-  # GPU 0 reports a bogus 100% utilization; use the explicit physical pool.
-  # This machine exposes eight devices numbered 0 through 7.
-  AvailableGpuIds: [0, 1, 2, 3, 4, 5, 6, 7]
+  AvailableGpuIds: 'auto'
   BatchSize: 1
   OutputRoot: outputs
   InitializeTimeoutSec: 6000
@@ -72,6 +70,9 @@ Cacheblend:
   Repo:
     # The original CacheBlend repo clone (holds vllm_blend + .venv).
     RepoPath: /data/lyh/cache-blend/CacheBlend
+    # Fraction of each GPU reserved by the CacheBlend/vLLM worker. CacheBlend
+    # keeps additional chunk KV outside vLLM's own KV cache, so leave headroom.
+    GpuMemoryUtilization: 0.7
 
 # SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:

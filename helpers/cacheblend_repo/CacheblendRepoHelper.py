@@ -950,7 +950,7 @@ def Main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--max_new_tokens", type=int, default=64)
     ap.add_argument("--max_model_len", type=int, default=32768)
-    ap.add_argument("--gpu_memory_utilization", type=float, default=0.7)
+    ap.add_argument("--gpu_memory_utilization", type=float, default=0.8)
     ap.add_argument("--recomp_ratio", type=float, default=0.15)
     ap.add_argument("--sampling_config", default="{}")
     ap.add_argument("--max_num_seqs", type=int, default=64)

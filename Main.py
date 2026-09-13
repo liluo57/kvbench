@@ -88,15 +88,15 @@ def Main() -> None:
     # ]
     # tasks = [AgentBenchFlowTask(taskId) for taskId in taskIds]
 
-    MAX_NEW_TOKENS = 40960
+    MAX_NEW_TOKENS = 64
     methods = [
-        # DependencyAnalysisMethod(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0,tag='0'),
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.05,tag='0.05'),
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.1,tag='0.1'),
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.15,tag='0.15'),
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.2,tag='0.2'),
-        CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
+        DependencyAnalysisMethod(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0,tag='0'),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.05,tag='0.05'),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.1,tag='0.1'),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.15,tag='0.15'),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, recompRatio=0.2,tag='0.2'),
+        # CacheblendRepo(gpuNums=1, perfWeight=4, maxNewTokens=MAX_NEW_TOKENS, fullPrefill=True, tag="full_prefill"),
         # FullPrefillVllm(gpuNums=2, perfWeight=2, maxNewTokens=MAX_NEW_TOKENS),
         # NaiveTransformer(gpuNums=1, perfWeight=1, maxNewTokens=MAX_NEW_TOKENS),
         # FullPrefillVllm(
