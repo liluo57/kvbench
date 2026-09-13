@@ -48,8 +48,9 @@ class FreshGapTask(Task):
         nCases: int = 4,
         linesPerChunk: int = 192,
         tag: Optional[str] = None,
+        maxNewTokens: int = 64,
     ):
-        super().__init__(tag=tag)
+        super().__init__(tag=tag, maxNewTokens=maxNewTokens)
         self.nCases = nCases
         self.linesPerChunk = linesPerChunk
         modelPath = ModelPath()

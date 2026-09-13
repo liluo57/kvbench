@@ -58,8 +58,8 @@ import os
 import time
 from typing import Dict, List, Optional, Sequence
 
-from core.Config import ModelPath as DefaultModelPath
-from core.Method import Method
+from core.Config import MaxModelLen, ModelPath as DefaultModelPath
+from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig, VllmSamplingParams
 
@@ -103,8 +103,6 @@ class CacheblendLmcache(Method):
         gpuNums: int = 1,
         perfWeight: float = 1.0,
         *,
-        maxNewTokens: int = 64,
-        maxModelLen: int = 40960,
         gpuMemoryUtilization: float = 0.7,
         recompRatio: float = 0.15,
         maxLocalCpuSize: float = 5.0,
@@ -116,8 +114,7 @@ class CacheblendLmcache(Method):
         # Model path is config-only — switch models via config.yaml.
         self.modelPath = DefaultModelPath()
         self.samplingConfig = ResolveSamplingConfig(self.modelPath)
-        self.maxNewTokens = maxNewTokens
-        self.maxModelLen = maxModelLen
+        self.maxModelLen = MaxModelLen()
         self.gpuMemoryUtilization = gpuMemoryUtilization
         self.recompRatio = recompRatio
         self.maxLocalCpuSize = maxLocalCpuSize
@@ -239,7 +236,12 @@ class CacheblendLmcache(Method):
         if validCtx:
             self._GenerateBatch(validCtx, maxTokens=1)  # store all KV together
 
-    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
+    def Run(
+        self,
+        data: List[str],
+        retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
+    ) -> List[Result]:
         """Generate a batch of prompts, submitting all at once.
 
         Each case's token stream is assembled from its prepared state (the same
@@ -247,6 +249,7 @@ class CacheblendLmcache(Method):
         then submitted to :meth:`_GenerateBatch` in one call so the V1 engine
         generates them concurrently.
         """
+        maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         # LMCache owns prefix-cache lifetime; generated-output retention is not
         # currently exposed by the in-process connector.
         _ = retainOutput
@@ -283,7 +286,7 @@ class CacheblendLmcache(Method):
             nInput = len(ids)
             metas.append({"n_input": nInput})
 
-        batchOut = self._GenerateBatch(tokenStreams, self.maxNewTokens)
+        batchOut = self._GenerateBatch(tokenStreams, maxNewTokens)
         results = []
         for (text, ttft, nTokens, totalTime, numCached), meta in zip(
             batchOut, metas

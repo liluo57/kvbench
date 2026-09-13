@@ -25,6 +25,7 @@ class AgentBenchFlowTask(Task):
     """
 
     name = "agent_benchflow"
+    defaultMaxNewTokens = 40960
 
     # Each task id owns an independent BenchFlow rollout.  A broken rollout
     # must not prevent the remaining task ids from being evaluated.
@@ -36,7 +37,12 @@ class AgentBenchFlowTask(Task):
     # inspect` per instance.
     _validatedTaskKeys: set = set()
 
-    def __init__(self, task_id: str, firstRunOnly: bool = False):
+    def __init__(
+        self,
+        task_id: str,
+        firstRunOnly: bool = False,
+        maxNewTokens: int = 40960,
+    ):
         """Create one task from the shared AgentBenchFlow config.
 
         Task selection remains in ``Main.py``; runtime behavior is configured
@@ -45,7 +51,7 @@ class AgentBenchFlowTask(Task):
         """
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id must be a non-empty string")
-        super().__init__(tag=task_id)
+        super().__init__(tag=task_id, maxNewTokens=maxNewTokens)
         self.firstRunOnly = bool(firstRunOnly)
         abf = Get("AgentBenchFlow", {}) or {}
         self.sourceMode = abf.get("SourceMode", "dataset")

@@ -1,6 +1,6 @@
 """LongBench MultiNews summarization task with local data only."""
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.Result import Result
 
@@ -11,12 +11,31 @@ class MultiNewsTask(KBBase):
     """Summarize multiple news passages and score with ROUGE-L."""
 
     name = "multinews"
+    defaultMaxNewTokens = 512
     defaultDataset = "multinews"
     prefixPrompt = (
         "You are given several news passages. Write a one-page summary of all "
         "news. \n\nNews:\n"
     )
     suffixPrompt = "\n\nNow, write a one-page summary of all the news.\n\nSummary:"
+
+    def __init__(
+        self,
+        dataset: Optional[str] = None,
+        maxSamples: int = -1,
+        startIdx: int = 0,
+        dataDir: Optional[str] = None,
+        tag: Optional[str] = None,
+        maxNewTokens: int = 512,
+    ):
+        super().__init__(
+            dataset=dataset,
+            maxSamples=maxSamples,
+            startIdx=startIdx,
+            dataDir=dataDir,
+            tag=tag,
+            maxNewTokens=maxNewTokens,
+        )
 
     def _Build(self, sample: Dict[str, Any]) -> Tuple[List[str], str]:
         context = str(sample.get("context") or "")

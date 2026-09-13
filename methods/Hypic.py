@@ -25,8 +25,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from core.Config import Get, ModelPath as DefaultModelPath
-from core.Method import Method
+from core.Config import Get, MaxModelLen, ModelPath as DefaultModelPath
+from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig, SglangSamplingParams
 from helpers.backends.Prompt import ComposeInterleavedReuse
@@ -205,14 +205,13 @@ class HypicMethod(Method):
         gpuNums: int = 1,
         perfWeight: float = 1.0,
         *,
-        maxNewTokens: int = 64,
-        maxModelLen: int = 25600,
         memFractionStatic: float = 0.80,
         dtype: str = "bfloat16",
         picMode: str = "addition",
         separator: str = "<<PIC_SEP>>",
         fullPrefill: bool = False,
         tag: Optional[str] = None,
+        **legacy,
     ):
         super().__init__(
             gpuNums=gpuNums,
@@ -220,14 +219,15 @@ class HypicMethod(Method):
             maxGpuNums=None,
             tag=tag,
         )
-        if isinstance(maxNewTokens, bool) or not isinstance(maxNewTokens, int):
-            raise TypeError("maxNewTokens must be an integer")
-        if maxNewTokens < 1:
-            raise ValueError("maxNewTokens must be at least 1")
-        if isinstance(maxModelLen, bool) or not isinstance(maxModelLen, int):
-            raise TypeError("maxModelLen must be an integer")
-        if maxModelLen < 1:
-            raise ValueError("maxModelLen must be at least 1")
+        # Accept the former Method-owned maxNewTokens keyword without using it
+        # so old scripts fail over to the new Task-owned budget gracefully.
+        legacy.pop("maxNewTokens", None)
+        if legacy:
+            unexpected = next(iter(legacy))
+            raise TypeError(
+                f"HypicMethod.__init__() got an unexpected keyword argument "
+                f"{unexpected!r}"
+            )
         if not 0.0 < float(memFractionStatic) < 1.0:
             raise ValueError("memFractionStatic must be between 0 and 1")
         if picMode not in _PIC_MODES:
@@ -246,8 +246,7 @@ class HypicMethod(Method):
 
         self.modelPath = DefaultModelPath()
         self.samplingConfig = ResolveSamplingConfig(self.modelPath)
-        self.maxNewTokens = maxNewTokens
-        self.maxModelLen = maxModelLen
+        self.maxModelLen = MaxModelLen()
         self.memFractionStatic = float(memFractionStatic)
         self.dtype = dtype
         self.picMode = picMode
@@ -291,7 +290,9 @@ class HypicMethod(Method):
         self,
         data: List[str],
         retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
+        maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._states) != len(data):
             self._states = [{"prepare": []} for _ in data]
 
@@ -304,7 +305,7 @@ class HypicMethod(Method):
             )
             if self.fullPrefill:
                 output, ttft, total, nTokens, meta = self._Generate(
-                    runInput, maxNewTokens=self.maxNewTokens
+                    runInput, maxNewTokens=maxNewTokens
                 )
                 results.append(
                     self._Result(
@@ -338,7 +339,7 @@ class HypicMethod(Method):
                 else runInput
             )
             output, ttft, total, nTokens, meta = self._Generate(
-                prompt, maxNewTokens=self.maxNewTokens
+                prompt, maxNewTokens=maxNewTokens
             )
 
             if retain:

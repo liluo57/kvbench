@@ -22,6 +22,7 @@ import os
 import time
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from core.Method import ResolveMaxNewTokens
 from core.Result import Result
 from helpers.backends.Prompt import ComposeInterleavedReuseSpans
 from helpers.backends.TransformersHelper import CacheLayerPairs
@@ -341,7 +342,6 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
         gpuNums: int = 1,
         perfWeight: float = 1.0,
         *,
-        maxNewTokens: int = 64,
         dtype: str = "bfloat16",
         skipK: int = 16,
         tag: Optional[str] = None,
@@ -349,7 +349,6 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
         super().__init__(
             gpuNums=gpuNums,
             perfWeight=perfWeight,
-            maxNewTokens=maxNewTokens,
             dtype=dtype,
             tag=tag,
         )
@@ -367,7 +366,9 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
         self,
         data: List[str],
         retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
+        maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._chunks) != len(data):
             self._chunks = [[] for _ in data]
 
@@ -383,6 +384,7 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
             # prefill used for attention dependency measurements.
             text, ttft, _, nTokens, fullCache, _ = self._gen.Generate(
                 ids,
+                maxNewTokens=maxNewTokens,
                 returnCache=True,
             )
             # Pass ownership through a mutable holder so _Analyze can clear

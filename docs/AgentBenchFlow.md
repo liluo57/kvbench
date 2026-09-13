@@ -117,9 +117,9 @@ KVBench's `Engine.PairRetries`: `0` runs each BenchFlow task once, while `2`
 restores BenchFlow's default of three total attempts.
 
 The model id defaults to the basename of KVBench's configured `ModelPath` and
-is sent to BenchFlow as `vllm/<model-id>`. The Method controls generation
-limits; the example `Main.py` configuration uses `maxNewTokens=4096` for the
-agent workflow.
+is sent to BenchFlow as `vllm/<model-id>`. `AgentBenchFlowTask` controls its
+generation limit; its constructor defaults to `maxNewTokens=40960` and can be
+overridden per task.
 
 BenchFlow 0.7.5 currently inserts its host-side LiteLLM provider proxy even
 when usage tracking is disabled. In that setup the URL above is the proxy's

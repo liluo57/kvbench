@@ -21,7 +21,10 @@
 DatasetPath: /root/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /root/autodl-tmp/models/Qwen3-4b
+ModelPath: /root/autodl-tmp/models/Mistral-7B-Instruct-v0.2
+
+# Shared context-window limit used by every model backend.
+MaxModelLen: 256000
 
 # Shared model sampling policy.
 #   greedy   - deterministic argmax decoding
@@ -79,7 +82,6 @@ Cacheblend:
     # keeps additional chunk KV outside vLLM's own KV cache, so leave headroom.
     GpuMemoryUtilization: 0.7
 
-# SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:
   # Upload the selected task from this checkout to the remote Docker server.
   # This is the source mode used by the pre-refactor remote-docker runs and

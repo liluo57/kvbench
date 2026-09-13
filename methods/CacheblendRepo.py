@@ -46,8 +46,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from core.Config import Get, ModelPath as DefaultModelPath
-from core.Method import Method
+from core.Config import Get, MaxModelLen, ModelPath as DefaultModelPath
+from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig
 
@@ -76,8 +76,6 @@ class CacheblendRepo(Method):
         gpuNums: int = 1,
         perfWeight: float = 1.0,
         *,
-        maxNewTokens: int = 64,
-        maxModelLen: int = 32768,
         recompRatio: float = 0.15,
         fullPrefill: bool = False,
         startTimeout: float = 1800.0,
@@ -89,8 +87,7 @@ class CacheblendRepo(Method):
             maxGpuNums=1,
             tag=tag,
         )
-        self.maxNewTokens = maxNewTokens
-        self.maxModelLen = maxModelLen
+        self.maxModelLen = MaxModelLen()
 
         cacheblend = Get("Cacheblend", {}) or {}
         repo = cacheblend.get("Repo", {}) or {}
@@ -170,7 +167,6 @@ class CacheblendRepo(Method):
                 str(helperScript),
                 "--repo_root", str(self.repoRoot),
                 "--model", self.modelPath,
-                "--max_new_tokens", str(self.maxNewTokens),
                 "--max_model_len", str(self.maxModelLen),
                 "--gpu_memory_utilization", str(self.gpuMemoryUtilization),
                 "--recomp_ratio", str(self.recompRatio),
@@ -254,8 +250,14 @@ class CacheblendRepo(Method):
         if flat:
             self._Request({"op": "collect", "chunks": flat})
 
-    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
+    def Run(
+        self,
+        data: List[str],
+        retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
+    ) -> List[Result]:
         """Run a batch of prompts, fusing cached and fresh spans in prompt order."""
+        maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._chunks) != len(data):
             self._chunks = [[] for _ in data]
         results: List[Result] = []
@@ -285,7 +287,11 @@ class CacheblendRepo(Method):
         for i, (prompt, chunks) in enumerate(zip(data, self._chunks)):
             retain = bool(retainOutput[i]) if retainOutput is not None and i < len(retainOutput) else False
             if self.fullPrefill:
-                result = self._runFull(prompt, retain_output=retain)
+                result = self._runFull(
+                    prompt,
+                    retain_output=retain,
+                    maxNewTokens=maxNewTokens,
+                )
                 results.append(result)
                 if retain and result.output and result.output not in chunks:
                     chunks.append(result.output)
@@ -294,7 +300,11 @@ class CacheblendRepo(Method):
             wireParts, reordered = plans[i]
 
             if wireParts is None:
-                result = self._runFull(prompt, retain_output=retain)
+                result = self._runFull(
+                    prompt,
+                    retain_output=retain,
+                    maxNewTokens=maxNewTokens,
+                )
                 results.append(result)
                 if retain and result.output and result.output not in chunks:
                     chunks.append(result.output)
@@ -305,6 +315,7 @@ class CacheblendRepo(Method):
                     "op": "fuse",
                     "parts": wireParts,
                     "retain_output": retain,
+                    "max_new_tokens": maxNewTokens,
                 }
             )
 
@@ -338,8 +349,21 @@ class CacheblendRepo(Method):
 
         return parts, reuseOrder != chunks
 
-    def _runFull(self, prompt: str, *, retain_output: bool = False) -> Result:
-        resp = self._Request({"op": "full", "text": prompt, "retain_output": retain_output})
+    def _runFull(
+        self,
+        prompt: str,
+        *,
+        retain_output: bool = False,
+        maxNewTokens: Optional[int] = None,
+    ) -> Result:
+        resp = self._Request(
+            {
+                "op": "full",
+                "text": prompt,
+                "retain_output": retain_output,
+                "max_new_tokens": ResolveMaxNewTokens(maxNewTokens),
+            }
+        )
         return self._Result(resp, full=True)
 
     def _Result(self, resp: Dict[str, Any], *, full: bool, reordered: bool = False) -> Result:

@@ -334,13 +334,19 @@ class CacheBlendWorker:
             runner.max_context_len_to_capture = 0
         return (runner, old)
 
-    def _generateWithRetention(self, fullIds, retain_output=False):
+    def _generateWithRetention(
+        self, fullIds, retain_output=False, max_new_tokens=None
+    ):
         if not retain_output:
-            return self._Generate(fullIds)
+            return self._Generate(fullIds, max_new_tokens=max_new_tokens)
         self._beginRetainOutput()
         state = self._setRetainEager(True)
         try:
-            return self._Generate(fullIds, retain_output=True)
+            return self._Generate(
+                fullIds,
+                retain_output=True,
+                max_new_tokens=max_new_tokens,
+            )
         finally:
             self._retainCollector = None
             if state is not None and state[1] is not None:
@@ -573,20 +579,32 @@ class CacheBlendWorker:
         }
 
     # ---------------------------------------------------------------- fuse
-    def _Generate(self, fullIds: list, retain_output=False):
+    def _Generate(
+        self,
+        fullIds: list,
+        retain_output=False,
+        max_new_tokens=None,
+    ):
         """Decode ``fullIds``, returning the standard result dict."""
+        maxNewTokens = (
+            self.args.max_new_tokens
+            if max_new_tokens is None
+            else int(max_new_tokens)
+        )
+        if maxNewTokens < 1:
+            raise ValueError("max_new_tokens must be at least 1")
         t0 = time.perf_counter()
         out = self.llm.generate(
             prompt_token_ids=[fullIds],
             sampling_params=self._SamplingParams(
-                self.args.max_new_tokens + (1 if retain_output else 0)
+                maxNewTokens + (1 if retain_output else 0)
             ),
         )
         r = out[0]
         ttft = r.metrics.first_token_time - r.metrics.first_scheduled_time
         resp = r.outputs[0]
         token_ids = list(resp.token_ids)
-        visible_ids = token_ids[:self.args.max_new_tokens]
+        visible_ids = token_ids[:maxNewTokens]
         retained = self._endRetainOutput() if retain_output else None
         retained_tokens = 0
         if retain_output and retained is not None:
@@ -695,7 +713,12 @@ class CacheBlendWorker:
             "requested": maximum,
         }
 
-    def Fuse(self, parts: list, retain_output: bool = False):
+    def Fuse(
+        self,
+        parts: list,
+        retain_output: bool = False,
+        max_new_tokens=None,
+    ):
         """Fuse cached and fresh spans appearing anywhere in one prompt.
 
         ``parts`` has the form::
@@ -789,7 +812,11 @@ class CacheBlendWorker:
         self.cfm["recomp_ratio"] = effectiveRatio
         try:
             generationStart = time.perf_counter()
-            resp = self._generateWithRetention(fullIds, retain_output=retain_output)
+            resp = self._generateWithRetention(
+                fullIds,
+                retain_output=retain_output,
+                max_new_tokens=max_new_tokens,
+            )
         finally:
             self.cfm["recomp_ratio"] = oldRatio
 
@@ -816,7 +843,13 @@ class CacheBlendWorker:
             )
         return resp
 
-    def FuseSuffix(self, chunks: list, suffix: str, retain_output: bool = False):
+    def FuseSuffix(
+        self,
+        chunks: list,
+        suffix: str,
+        retain_output: bool = False,
+        max_new_tokens=None,
+    ):
         """Legacy contiguous-prefix + fresh-suffix fuse path."""
         requestStart = time.perf_counter()
         if not chunks:
@@ -870,7 +903,11 @@ class CacheBlendWorker:
         self.engine.model.old_kvs = oldKvs
 
         generationStart = time.perf_counter()
-        resp = self._generateWithRetention(fullIds, retain_output=retain_output)
+        resp = self._generateWithRetention(
+            fullIds,
+            retain_output=retain_output,
+            max_new_tokens=max_new_tokens,
+        )
         setupTime = generationStart - requestStart
         resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
         resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
@@ -878,7 +915,7 @@ class CacheBlendWorker:
         resp["reuse_ratio"] = self._reuseRatio(len(fullIds), reusedTokens)
         return resp
 
-    def Full(self, text: str, retain_output: bool = False):
+    def Full(self, text: str, retain_output: bool = False, max_new_tokens=None):
         """Generate the whole prompt from scratch (no reuse of cached KVs)."""
         requestStart = time.perf_counter()
         ids = self.tokenizer.encode(text, add_special_tokens=False)
@@ -888,7 +925,11 @@ class CacheBlendWorker:
         self.cfm["check"] = False
         self.engine.model.old_kvs = [[None, None]] * len(self.layers)
         generationStart = time.perf_counter()
-        resp = self._generateWithRetention(ids, retain_output=retain_output)
+        resp = self._generateWithRetention(
+            ids,
+            retain_output=retain_output,
+            max_new_tokens=max_new_tokens,
+        )
         setupTime = generationStart - requestStart
         resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
         resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
@@ -917,17 +958,30 @@ class CacheBlendWorker:
                     _stdout(self.Reserve(req.get("parts_batch", [])))
                 elif op == "fuse":
                     if "parts" in req:
-                        _stdout(self.Fuse(req["parts"], bool(req.get("retain_output", False))))
+                        _stdout(
+                            self.Fuse(
+                                req["parts"],
+                                bool(req.get("retain_output", False)),
+                                req.get("max_new_tokens"),
+                            )
+                        )
                     else:
                         _stdout(
                             self.FuseSuffix(
                                 req["chunks"],
                                 req.get("suffix", ""),
                                 bool(req.get("retain_output", False)),
+                                req.get("max_new_tokens"),
                             )
                         )
                 elif op == "full":
-                    _stdout(self.Full(req["text"], bool(req.get("retain_output", False))))
+                    _stdout(
+                        self.Full(
+                            req["text"],
+                            bool(req.get("retain_output", False)),
+                            req.get("max_new_tokens"),
+                        )
+                    )
                 elif op == "reset":
                     _stdout(self.Reset())
                 elif op == "close":

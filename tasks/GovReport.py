@@ -11,6 +11,7 @@ class GovReportTask(KBBase):
     """Summarize a government report and score with ROUGE-L."""
 
     name = "govreport"
+    defaultMaxNewTokens = 512
     defaultDataset = "govreport"
     prefixPrompt = (
         "You are given a report by a government agency. Write a one-page "
@@ -29,6 +30,7 @@ class GovReportTask(KBBase):
         tag=None,
         nChunks=1,
         maxSampleLength=0,
+        maxNewTokens: int = 512,
     ):
         """Create the task, optionally splitting each report into chunks.
 
@@ -54,6 +56,7 @@ class GovReportTask(KBBase):
             startIdx=startIdx,
             dataDir=dataDir,
             tag=tag,
+            maxNewTokens=maxNewTokens,
         )
         self.nChunks = nChunks
         self.maxSampleLength = maxSampleLength

@@ -1,5 +1,6 @@
 """Spawn-safe method worker and the single-pair evaluation loop."""
 
+import inspect
 import os
 import sys
 import time
@@ -222,9 +223,11 @@ def _ProcessBatch(
                 for action in stepActions
             ]
         else:
-            results = method.Run(
+            results = _RunMethod(
+                method,
                 [action.data for action in stepActions],
                 [action.retainOutput for action in stepActions],
+                getattr(task, "maxNewTokens", 64),
             )
             if len(results) != len(stepActions):
                 raise RuntimeError(
@@ -281,6 +284,32 @@ def _ProcessBatch(
             taskScores.setdefault(name, []).append(float(value))
     method.Reset()
     return len(batch)
+
+
+def _RunMethod(
+    method: Method,
+    data: List[str],
+    retainOutput: List[bool],
+    maxNewTokens: int,
+) -> List[Result]:
+    """Run a Method with the owning Task's generation budget.
+
+    Older third-party Methods may still implement the two-argument Run
+    contract. Keep them usable while all built-in Methods receive the new
+    Task-owned value explicitly.
+    """
+    try:
+        parameters = inspect.signature(method.Run).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    acceptsBudget = any(
+        parameter.name == "maxNewTokens"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if acceptsBudget:
+        return method.Run(data, retainOutput, maxNewTokens=maxNewTokens)
+    return method.Run(data, retainOutput)
 
 
 def _HasUnsuccessfulExternalRun(batch: List[Case]) -> bool:

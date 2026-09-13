@@ -182,6 +182,7 @@ class Engine:
                     "index": index,
                     "class": f"{type(task).__module__}.{type(task).__qualname__}",
                     "name": task.Label,
+                    "max_new_tokens": getattr(task, "maxNewTokens", 64),
                 }
                 for index, task in enumerate(tasks)
             ],

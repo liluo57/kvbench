@@ -257,8 +257,9 @@ class KBBase(Task):
         startIdx: int = 0,
         dataDir: Optional[str] = None,
         tag: Optional[str] = None,
+        maxNewTokens: int = 64,
     ):
-        super().__init__(tag=tag)
+        super().__init__(tag=tag, maxNewTokens=maxNewTokens)
         self.dataset = dataset or self.defaultDataset
         self.maxSamples = maxSamples
         self.startIdx = startIdx

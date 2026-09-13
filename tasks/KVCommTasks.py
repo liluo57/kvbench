@@ -120,8 +120,15 @@ def _cycle(names, count, template):
 
 class KVCommMMLUTask(Task):
     name = "kvcomm_mmlu"
-    def __init__(self, maxSamples=None, agentCount=5, tag: Optional[str] = None):
-        super().__init__(tag=tag)
+    defaultMaxNewTokens = 512
+    def __init__(
+        self,
+        maxSamples=None,
+        agentCount=5,
+        tag: Optional[str] = None,
+        maxNewTokens=512,
+    ):
+        super().__init__(tag=tag, maxNewTokens=maxNewTokens)
         self.maxSamples, self.agentCount = maxSamples, agentCount
         self._rows = None
     def Cases(self) -> Iterator[Case]:
@@ -146,8 +153,15 @@ class KVCommMMLUTask(Task):
 
 class KVCommGSM8KTask(Task):
     name = "kvcomm_gsm8k"
-    def __init__(self, maxSamples=None, agentCount=3, tag: Optional[str] = None):
-        super().__init__(tag=tag)
+    defaultMaxNewTokens = 512
+    def __init__(
+        self,
+        maxSamples=None,
+        agentCount=3,
+        tag: Optional[str] = None,
+        maxNewTokens=512,
+    ):
+        super().__init__(tag=tag, maxNewTokens=maxNewTokens)
         self.maxSamples, self.agentCount = maxSamples, agentCount
         self._rows = None
     def Cases(self):
@@ -173,8 +187,15 @@ class KVCommGSM8KTask(Task):
 
 class KVCommHumanEvalTask(Task):
     name = "kvcomm_humaneval"
-    def __init__(self, maxSamples=None, agentCount=5, tag: Optional[str] = None):
-        super().__init__(tag=tag)
+    defaultMaxNewTokens = 512
+    def __init__(
+        self,
+        maxSamples=None,
+        agentCount=5,
+        tag: Optional[str] = None,
+        maxNewTokens=512,
+    ):
+        super().__init__(tag=tag, maxNewTokens=maxNewTokens)
         self.maxSamples, self.agentCount = maxSamples, agentCount
         self._rows = None
     def Cases(self):
@@ -228,8 +249,16 @@ class KVCommHumanEvalTask(Task):
 
 class KVCommCopyTask(Task):
     name = "kvcomm_copy"
-    def __init__(self, nCases=100, agentCount=5, seed=42, tag: Optional[str] = None):
-        super().__init__(tag=tag)
+    defaultMaxNewTokens = 512
+    def __init__(
+        self,
+        nCases=100,
+        agentCount=5,
+        seed=42,
+        tag: Optional[str] = None,
+        maxNewTokens=512,
+    ):
+        super().__init__(tag=tag, maxNewTokens=maxNewTokens)
         self.nCases, self.agentCount, self.seed = nCases, agentCount, seed
     def Cases(self):
         rng = random.Random(self.seed)
