@@ -17,13 +17,13 @@ from typing import Any, Dict, Iterator, List
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DEFAULT_MODEL = (
     "/data1/ly/.cache/huggingface/hub/models--meta-llama--"
     "Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659"
 )
 DEFAULT_DATASET_ROOT = str(ROOT / "data")
-DEFAULT_CACHEBLEND_ROOT = "/data1/ly/Projects/CacheBlend"
-
 TASK_CHOICES = ("cwe", "vt", "wikimqa", "triviaqa", "hotpotqa", "musique")
 
 
@@ -68,15 +68,33 @@ class FixedTokenChunkTask:
         return self.inner.Label
 
     def Cases(self) -> Iterator[Any]:
+        # Engine workers use multiprocessing ``spawn`` and therefore do not
+        # inherit the coordinator's in-memory Config override.  Task prompt
+        # builders call ModelPath() for chat boundaries, so restore the same
+        # model path inside the worker before constructing Cases.
+        from core import Config
+
+        config = copy.deepcopy(Config.LoadConfig())
+        config["ModelPath"] = str(Path(self.model_path).expanduser().resolve())
+        Config._ConfigCache[Config.DefaultConfigPath] = config
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_path)
         for case in self.inner.Cases():
             original = list(case.input.prepare_input)
+            # CWE/VT shuffle tasks expose ``[head, *documents, tail]`` as
+            # prepare segments for legacy cacheblend-style methods.  ProphetKV
+            # needs a genuinely fresh query span during Run, so keep the final
+            # question/assistant tail out of the offline cache.  Knowledge-base
+            # tasks already pass documents only in prepare_input and are left
+            # unchanged.
+            prepare_source = original
+            if self.inner.Label in {"cwe_shuffle", "vt_shuffle"} and len(original) > 1:
+                prepare_source = original[:-1]
             chunks: List[str] = []
-            for text in original:
+            for text in prepare_source:
                 chunks.extend(split_by_tokens(text, tokenizer, self.chunk_size))
-            if "".join(chunks) != "".join(original):
+            if "".join(chunks) != "".join(prepare_source):
                 raise AssertionError("temporary token split changed PREPARE text")
             case.input.prepare_input = chunks
             # RAGWorkflow keeps the same RAGInput privately.
@@ -94,7 +112,7 @@ def parser_for(mode: str) -> argparse.ArgumentParser:
     parser.add_argument("--gpu-id", type=int, required=True)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT)
-    parser.add_argument("--cacheblend-root", default=DEFAULT_CACHEBLEND_ROOT)
+    parser.add_argument("--cacheblend-repo", default="/data1/ly/Projects/CacheBlend", help="original CacheBlend checkout containing .venv/bin/python")
     parser.add_argument(
         "--output-root",
         default=str(ROOT / "outputs" / ("prophetkv_smoke" if smoke else "prophetkv_full")),
@@ -115,7 +133,7 @@ def parser_for(mode: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--tasks", nargs="+", choices=TASK_CHOICES, default=list(TASK_CHOICES)
     )
-    default_methods = ["full", "prophet1", "prophet20"] if smoke else [
+    default_methods = ["full", "naive", "cacheblend", "prophet1", "prophet20"] if smoke else [
         "full", "naive", "cacheblend", "prophet20"
     ]
     parser.add_argument(
@@ -137,7 +155,11 @@ def configure(args: argparse.Namespace) -> None:
     config["ModelPath"] = str(Path(args.model).expanduser().resolve())
     config["DatasetPath"] = str(Path(args.dataset_root).expanduser().resolve())
     config["ModelConfig"] = {"mode": "greedy"}
-    config["Cacheblend"] = {"Repo": {"RepoPath": str(Path(args.cacheblend_root).expanduser().resolve())}}
+    cacheblend = copy.deepcopy(config.get("Cacheblend") or {})
+    cacheblend_repo = copy.deepcopy(cacheblend.get("Repo") or {})
+    cacheblend_repo["RepoPath"] = str(Path(args.cacheblend_repo).expanduser().resolve())
+    cacheblend["Repo"] = cacheblend_repo
+    config["Cacheblend"] = cacheblend
     engine = dict(config.get("Engine") or {})
     engine.update({
         "AvailableGpuIds": [int(args.gpu_id)],
@@ -205,11 +227,7 @@ def build_methods(args: argparse.Namespace) -> List[Any]:
         elif name == "naive":
             methods.append(NaiveTransformer(**common, tag="naive"))
         elif name == "cacheblend":
-            methods.append(CacheblendRepo(
-                gpuNums=1, maxNewTokens=args.max_new_tokens,
-                maxModelLen=args.max_model_len, recompRatio=args.recomp_ratio,
-                tag="cacheblend",
-            ))
+            methods.append(CacheblendRepo(gpuNums=1, maxNewTokens=args.max_new_tokens, maxModelLen=args.max_model_len, recompRatio=args.recomp_ratio, tag=f"r{args.recomp_ratio:.2f}"))
         elif name == "prophet1":
             methods.append(ProphetKV(
                 gpuNums=1, maxNewTokens=args.max_new_tokens,
@@ -237,9 +255,9 @@ def preflight(args: argparse.Namespace) -> None:
         if not directory.is_dir():
             raise FileNotFoundError(f"dataset directory not found: {directory}")
     if "cacheblend" in args.methods:
-        cb = Path(args.cacheblend_root).expanduser()
+        cb = Path(args.cacheblend_repo).expanduser()
         if not (cb / ".venv" / "bin" / "python").is_file():
-            raise FileNotFoundError(f"CacheBlend venv not found: {cb / '.venv/bin/python'}")
+            raise FileNotFoundError("CacheBlend venv not found: " + str(cb / ".venv" / "bin" / "python"))
     if args.max_samples == 0 or args.max_samples < -1:
         raise ValueError("--max-samples must be -1 or positive")
     if args.chunk_size < 0:
@@ -275,10 +293,50 @@ def run(args: argparse.Namespace, mode: str) -> None:
     )
     print("=== KVBench report ===", flush=True)
     print(json.dumps(report.get("cores", report), indent=2, ensure_ascii=False), flush=True)
+    print("=== TTFT speedup vs FullPrefill ===", flush=True)
+    print(json.dumps(ttft_speedup(report), indent=2, ensure_ascii=False), flush=True)
+
+
+def ttft_speedup(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Compute per-task ProphetKV TTFT speedup relative to FullPrefill."""
+    values: Dict[str, Dict[str, float]] = {}
+    for row in report.get("cores", []):
+        task = str(row.get("task", ""))
+        method = str(row.get("method", ""))
+        ttft = row.get("ttft")
+        if task and ttft is not None:
+            try:
+                values.setdefault(task, {})[method] = float(ttft)
+            except (TypeError, ValueError):
+                continue
+    output: List[Dict[str, Any]] = []
+    for task in sorted(values):
+        row = values[task]
+        full = row.get("full_prefill(full)")
+        prophet = row.get("prophetkv(r0.20)")
+        if full is None or prophet is None or full <= 0 or prophet <= 0:
+            continue
+        output.append({
+            "task": task,
+            "full_ttft_sec": full,
+            "prophetkv_ttft_sec": prophet,
+            "speedup_x": full / prophet,
+            "ttft_reduction": 1.0 - prophet / full,
+        })
+    if output:
+        full_mean = sum(item["full_ttft_sec"] for item in output) / len(output)
+        prophet_mean = sum(item["prophetkv_ttft_sec"] for item in output) / len(output)
+        output.append({
+            "task": "__mean_over_tasks__",
+            "full_ttft_sec": full_mean,
+            "prophetkv_ttft_sec": prophet_mean,
+            "speedup_x": full_mean / prophet_mean,
+            "ttft_reduction": 1.0 - prophet_mean / full_mean,
+        })
+    return output
 
 
 def main(mode: str) -> None:
     parser = parser_for(mode)
     args = parser.parse_args()
     run(args, mode)
-
