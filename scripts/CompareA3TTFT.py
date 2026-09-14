@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
 # The driver sits beside this file in KVBench's ``scripts/`` directory.  Use a
 # sibling import so this standalone script works even though ``scripts/`` is
 # intentionally not a Python package.
-import run_a3_kvbench_mistral as driver
+import RunA3KVBenchMistral as driver
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
                         help="Existing path needed by the shared KVBench preflight")
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--output-root", type=Path,
-                        default=Path("outputs/ttft_a3_compare"))
+                        default=Path("outputs/compare_a3_ttft"))
     parser.add_argument("--max-samples", type=int, default=200)
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=64)

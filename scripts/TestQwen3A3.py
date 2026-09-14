@@ -10,11 +10,11 @@ latency fields but doubles the number of generations.
 
 The report is JSON, so it can be archived and compared across revisions::
 
-    python scripts/qwen3_a3_full.py \
+    python scripts/TestQwen3A3.py \
       --model /data1/ly/models/Qwen3-8b \
       --repo-root /data1/ly/Projects/ragkv \
       --python /data1/ly/envs/ragkv/bin/python \
-      --gpu 3 --output outputs/qwen3_a3_full.json
+      --gpu 3 --output outputs/test_qwen3_a3.json
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python", dest="python_path", required=True)
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--output", type=Path,
-                        default=Path("outputs/qwen3_a3_full.json"))
+                        default=Path("outputs/test_qwen3_a3.json"))
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--recomp-ratio", type=float, default=0.15)
