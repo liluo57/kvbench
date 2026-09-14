@@ -142,7 +142,15 @@ def _tokenizer(modelPath: str):
     """
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(modelPath)
+    try:
+        return AutoTokenizer.from_pretrained(modelPath)
+    except Exception:
+        # Qwen3 tokenizer.json can require a newer Rust tokenizers version
+        # than the coordinator environment provides. The slow tokenizer is
+        # compatible with the checkpoint and sufficient for chat rendering.
+        if arch_family(modelPath) not in ("qwen3", "qwen3_5"):
+            raise
+        return AutoTokenizer.from_pretrained(modelPath, use_fast=False)
 
 
 # ---------------------------------------------------------------------------
