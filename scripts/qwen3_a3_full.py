@@ -47,13 +47,15 @@ def parse_args() -> argparse.Namespace:
                         choices=("debug", "sample"))
     parser.add_argument("--with-full-baseline", action="store_true",
                         help="Also run each prompt with no prepared chunks")
+    parser.add_argument("--quick", action="store_true",
+                        help="Run only the smallest reuse case as a smoke test")
     return parser.parse_args()
 
 
-def cases() -> List[Dict[str, Any]]:
+def cases(*, quick: bool = False) -> List[Dict[str, Any]]:
     first = "Document one. Key fact: alpha."
     second = " Document two contains a distractor."
-    return [
+    all_cases = [
         {
             "name": "two_chunks_contiguous",
             "chunks": [first, second],
@@ -79,6 +81,7 @@ def cases() -> List[Dict[str, Any]]:
             "expect_reuse": False,
         },
     ]
+    return all_cases[:1] if quick else all_cases
 
 
 def result_record(result: Any, elapsed: float, *, baseline: bool = False) -> Dict[str, Any]:
@@ -94,6 +97,7 @@ def result_record(result: Any, elapsed: float, *, baseline: bool = False) -> Dic
 
 def main() -> int:
     args = parse_args()
+    selected_cases = cases(quick=args.quick)
     from core import Config as C
     C.LoadConfig()["ModelPath"] = str(Path(args.model).expanduser().resolve())
     from methods.A3Repo import A3Repo
@@ -113,12 +117,13 @@ def main() -> int:
         "gpu": args.gpu,
         "recomp_ratio": args.recomp_ratio,
         "reuse_method": args.reuse_method,
+        "quick": args.quick,
         "cases": [],
     }
     failures: List[str] = []
     try:
         method.Initialize([args.gpu])
-        for case in cases():
+        for case in selected_cases:
             method.Reset()
             started = time.perf_counter()
             method.Prepare([case["chunks"]])
@@ -155,7 +160,7 @@ def main() -> int:
     finally:
         method.Close()
 
-    report["ok"] = not failures and len(report["cases"]) == len(cases())
+    report["ok"] = not failures and len(report["cases"]) == len(selected_cases)
     report["failures"] = failures
     output = args.output.expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
