@@ -4,12 +4,15 @@ The worker is deliberately separate from :mod:`methods.A3Repo`: ragkv
 monkey-patches HuggingFace classes and uses its own flashinfer-backed forward.
 This file only translates KVBench's ``collect``/``reuse``/``full`` requests to
 the official loader and decoding functions.  It does not contain a second A^3
-scorer or fusion algorithm.
+scorer or fusion algorithm.  The precompute and runtime module graphs are
+kept as separate objects, but their parameters and rotary buffers are aliased
+to one checkpoint storage so the worker does not keep two GPU weight copies.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -57,27 +60,132 @@ class A3Worker:
                 sys.path.insert(0, kvbench_root)
             from helpers.a3_repo.Qwen3ForA3Repo import install_qwen3
 
-            load_model, load_model_precompute = install_qwen3(self.repo_root)
+            _, load_model_precompute = install_qwen3(self.repo_root)
         else:
-            from models.loader import load_model, load_model_precompute
+            from models.loader import load_model_precompute
 
         # ragkv's precompute loader temporarily replaces
-        # transformers.<Arch>ForCausalLM.  Restore the public class before
-        # loading the runtime model so both official model variants coexist.
+        # transformers.<Arch>ForCausalLM.  Save the original runtime class,
+        # then restore it after precompute loading.  The two official model
+        # variants have the same parameter layout but different forward
+        # graphs; we instantiate the runtime graph on ``meta`` and bind its
+        # parameters/buffers to the already-loaded precompute tensors below.
+        # This deliberately avoids a second ``from_pretrained`` call (and a
+        # second GPU copy of the checkpoint).
         import transformers
         class_name = f"{arch}ForCausalLM"
-        original_cls = getattr(transformers, class_name)
+        runtime_cls = getattr(transformers, class_name)
         print(f"[a3-repo-helper] loading official precompute model {args.model} ...", flush=True)
         self.precompute_model, self.tokenizer = load_model_precompute(model_args)
-        setattr(transformers, class_name, original_cls)
-        print(f"[a3-repo-helper] loading official runtime model {args.model} ...", flush=True)
-        self.model, runtime_tokenizer = load_model(model_args)
-        # The two loaders use the same tokenizer configuration.  Prefer the
-        # runtime tokenizer if it differs in special-token metadata.
-        self.tokenizer = runtime_tokenizer or self.tokenizer
+        setattr(transformers, class_name, runtime_cls)
+
+        # Native ragkv loaders apply these monkey-patches inside
+        # ``load_model``.  Since we intentionally skip its second
+        # ``from_pretrained`` call, apply the same process-local patch here.
+        # Qwen3's out-of-tree bridge already installs its runtime methods.
+        if arch != "Qwen3":
+            from models.monkeypatch import replace_llama, replace_mistral, replace_qwen
+
+            patch_runtime = {
+                "Llama": replace_llama,
+                "Mistral": replace_mistral,
+                "Qwen2": replace_qwen,
+            }.get(arch)
+            if patch_runtime is None:
+                raise RuntimeError(f"no official runtime patch registered for {arch}")
+            patch_runtime()
+
+        print("[a3-repo-helper] constructing official runtime graph with shared weights ...", flush=True)
+        # Construct only the module graph on meta.  No parameter storage is
+        # allocated here; _share_model_tensors() aliases every parameter and
+        # buffer to the precompute model's already-loaded storage.
+        with self.torch.device("meta"):
+            self.model = runtime_cls(self.precompute_model.config)
+        self._share_model_tensors(self.precompute_model, self.model)
+        self._install_runtime_compat_shims(arch)
         self.model.eval()
         self.precompute_model.eval()
         print(_READY_LINE, flush=True)
+
+    @staticmethod
+    def _replace_named_tensor(root, name, tensor) -> None:
+        """Replace a dotted parameter/buffer attribute without copying data."""
+        parts = name.split(".")
+        parent = root
+        for part in parts[:-1]:
+            parent = getattr(parent, part)
+        setattr(parent, parts[-1], tensor)
+
+    @classmethod
+    def _share_model_tensors(cls, source, target) -> None:
+        """Alias target tensors to source tensors after strict layout checks.
+
+        A3's precompute and runtime classes intentionally have different
+        forward implementations, but for the supported dense architectures
+        their trainable parameter and rotary-buffer layouts must match.  We
+        fail loudly on any mismatch instead of silently falling back to a
+        separately initialized or partially shared model.
+        """
+        source_params = dict(source.named_parameters())
+        target_params = dict(target.named_parameters())
+        if set(source_params) != set(target_params):
+            missing = sorted(set(source_params) - set(target_params))
+            extra = sorted(set(target_params) - set(source_params))
+            raise RuntimeError(
+                "A3 shared-weight parameter layout mismatch: "
+                f"missing_in_runtime={missing[:8]}, extra_in_runtime={extra[:8]}"
+            )
+        for name, source_param in source_params.items():
+            target_param = target_params[name]
+            if tuple(source_param.shape) != tuple(target_param.shape):
+                raise RuntimeError(
+                    f"A3 shared-weight shape mismatch for {name}: "
+                    f"precompute={tuple(source_param.shape)} "
+                    f"runtime={tuple(target_param.shape)}"
+                )
+            cls._replace_named_tensor(target, name, source_param)
+
+        source_buffers = dict(source.named_buffers())
+        target_buffers = dict(target.named_buffers())
+        if set(source_buffers) != set(target_buffers):
+            missing = sorted(set(source_buffers) - set(target_buffers))
+            extra = sorted(set(target_buffers) - set(source_buffers))
+            raise RuntimeError(
+                "A3 shared-weight buffer layout mismatch: "
+                f"missing_in_runtime={missing[:8]}, extra_in_runtime={extra[:8]}"
+            )
+        for name, source_buffer in source_buffers.items():
+            target_buffer = target_buffers[name]
+            if tuple(source_buffer.shape) != tuple(target_buffer.shape):
+                raise RuntimeError(
+                    f"A3 shared-weight buffer shape mismatch for {name}: "
+                    f"precompute={tuple(source_buffer.shape)} "
+                    f"runtime={tuple(target_buffer.shape)}"
+                )
+            cls._replace_named_tensor(target, name, source_buffer)
+
+    @staticmethod
+    def _install_runtime_compat_shims(arch: str) -> None:
+        """Bridge the checked-out ragkv Mistral call to current utilities.
+
+        The official Mistral file calls ``create_flashinfer_mask`` with three
+        positional arguments, while the shared utility in this checkout takes
+        a fourth causal-mode argument.  Patch only the imported module global
+        in this worker process; the ragkv source tree is never modified.
+        """
+        if arch != "Mistral":
+            return
+        import models.mistral.mistral as ragkv_mistral
+
+        if getattr(ragkv_mistral.create_flashinfer_mask, "_kvbench_compat", False):
+            return
+        from models.reuse_utils import create_flashinfer_mask as create_mask
+
+        def compat(query, key, indices, mode=True):
+            return create_mask(query, key, indices, mode)
+
+        compat._kvbench_compat = True
+        ragkv_mistral.create_flashinfer_mask = compat
 
     @staticmethod
     def _arch_name(model_path: str) -> str:
@@ -105,10 +213,10 @@ class A3Worker:
     def _encode(self, text: str):
         return self.tokenizer.encode(text, add_special_tokens=False)
 
-    def _collect_one(self, text: str):
+    def _collect_one(self, text: str, ids=None):
         if text in self.chunk_kv:
             return
-        ids = self._encode(text)
+        ids = list(ids) if ids is not None else self._encode(text)
         if not ids:
             return
         input_ids = self.torch.tensor([ids], device="cuda", dtype=self.torch.long)
@@ -130,9 +238,14 @@ class A3Worker:
         self.chunk_ids[text] = ids
         self.chunk_kv[text] = layers
 
-    def collect(self, chunks):
-        for text in chunks or []:
-            self._collect_one(str(text))
+    def collect(self, chunks, chunk_ids=None):
+        chunks = chunks or []
+        chunk_ids = chunk_ids or []
+        if chunk_ids and len(chunk_ids) != len(chunks):
+            raise ValueError("chunk_ids must align one-to-one with chunks")
+        for index, text in enumerate(chunks):
+            ids = chunk_ids[index] if chunk_ids else None
+            self._collect_one(str(text), ids=ids)
         return {"ok": True, "n_chunks": len(self.chunk_kv)}
 
     def _sampling_args(self):
@@ -160,15 +273,20 @@ class A3Worker:
         }
         stop = [x for x in (self.tokenizer.eos_token_id, self.tokenizer.bos_token_id) if x is not None]
         start = time.perf_counter()
-        text, ttft, _tpot = decode(
-            args,
-            self.model,
-            self.tokenizer,
-            input_state,
-            stop,
-            self.args.max_new_tokens,
-            config,
-        )
+        # ragkv's decode() prints intermediate/generated text to stdout.
+        # Keep that diagnostic stream away from KVBench's JSON-lines protocol;
+        # otherwise a numeric-only answer (for example ``2009``) is parsed as
+        # a JSON integer by the parent adapter instead of as its response.
+        with contextlib.redirect_stdout(sys.stderr):
+            text, ttft, _tpot = decode(
+                args,
+                self.model,
+                self.tokenizer,
+                input_state,
+                stop,
+                self.args.max_new_tokens,
+                config,
+            )
         total = time.perf_counter() - start
         n_tokens = len(self.tokenizer.encode(text, add_special_tokens=False))
         return text, float(ttft), float(total), int(n_tokens)
@@ -181,6 +299,15 @@ class A3Worker:
         }
 
     def full(self, text):
+        """Run a complete prefill through the same patched A3 runtime.
+
+        This is the worker's fallback for prompts without reusable chunks; it
+        is not the paper's selective-reuse path.  ``_full_config`` keeps
+        ``reuse_config`` empty while still passing ragkv's config object, so
+        the monkey-patched model and FlashInfer kernel remain active.  The
+        dedicated ``OfficialVanillaHelper`` uses the same runtime for a clean
+        baseline process and calls ragkv's ``vanilla()`` entry point.
+        """
         ids = self._encode(text)
         output, ttft, total, n_tokens = self._decode(ids, self._full_config())
         return {
@@ -191,9 +318,11 @@ class A3Worker:
             "num_tokens": n_tokens,
             "n_input": len(ids),
             "reuse_ratio": 0.0,
+            "runtime_mode": "ragkv_official_patched",
+            "algorithm": "full_recompute",
         }
 
-    def reuse(self, chunks, suffix):
+    def reuse(self, chunks, suffix, suffix_ids=None):
         if not chunks:
             return self.full(suffix)
         for text in chunks:
@@ -201,7 +330,7 @@ class A3Worker:
                 raise ValueError(f"chunk was not collected: {text[:80]!r}")
 
         chunk_ids = [self.chunk_ids[text] for text in chunks]
-        suffix_ids = self._encode(suffix)
+        suffix_ids = list(suffix_ids) if suffix_ids is not None else self._encode(suffix)
         doc_ids = [token for ids in chunk_ids for token in ids]
         full_ids = doc_ids + suffix_ids
         if not full_ids:
@@ -256,6 +385,8 @@ class A3Worker:
             "num_tokens": n_tokens,
             "n_input": len(full_ids),
             "reuse_ratio": round(n_doc / len(full_ids), 6) if full_ids else 0.0,
+            "runtime_mode": "ragkv_official_patched",
+            "algorithm": "a3_reuse",
             "a3_debug": {
                 "reuse_method": self.args.reuse_method,
                 "doc_tokens": n_doc,
@@ -276,9 +407,13 @@ class A3Worker:
                 request = json.loads(line)
                 op = request.get("op")
                 if op == "collect":
-                    response = self.collect(request.get("chunks", []))
+                    response = self.collect(request.get("chunks", []), request.get("chunk_ids"))
                 elif op == "reuse":
-                    response = self.reuse(request.get("chunks", []), request.get("suffix", ""))
+                    response = self.reuse(
+                        request.get("chunks", []),
+                        request.get("suffix", ""),
+                        request.get("suffix_ids"),
+                    )
                 elif op == "full":
                     response = self.full(request.get("text", ""))
                 elif op == "reset":

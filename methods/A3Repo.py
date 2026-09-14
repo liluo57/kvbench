@@ -43,6 +43,7 @@ from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig
 
 from helpers.backends.Prompt import ComposeReuse
+from helpers.backends.ModelAdapter import user_turn_prefix
 
 
 _ReadyLine = "[a3-repo-helper] ready"
@@ -105,6 +106,12 @@ class A3Repo(Method):
         self._drainThread: Optional[threading.Thread] = None
         self._stderrTail = deque(maxlen=200)
         self._chunks: List[List[str]] = []
+        # A KVBench KB task renders the complete user message through the
+        # model chat template.  Keep a second, prepared representation whose
+        # first chunk includes that literal user-turn prefix, so the official
+        # reuse path can match the rendered Run prompt without changing the
+        # raw-chunk path used by non-chat callers.
+        self._wire_chunks: List[List[str]] = []
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
         super().Initialize(gpuIds)
@@ -202,10 +209,20 @@ class A3Repo(Method):
 
     def Prepare(self, data: List[List[str]]) -> None:
         self._chunks = [[str(chunk) for chunk in (chunks or []) if str(chunk)] for chunks in data]
+        prefix = user_turn_prefix(self.modelPath, thinking=False)
+        self._wire_chunks = []
         flat: List[str] = []
         seen = set()
         for chunks in self._chunks:
+            wire = list(chunks)
+            if wire and prefix and not wire[0].startswith(prefix):
+                wire[0] = prefix + wire[0]
+            self._wire_chunks.append(wire)
             for chunk in chunks:
+                if chunk not in seen:
+                    seen.add(chunk)
+                    flat.append(chunk)
+            for chunk in wire:
                 if chunk not in seen:
                     seen.add(chunk)
                     flat.append(chunk)
@@ -219,10 +236,17 @@ class A3Repo(Method):
     ) -> List[Result]:
         if len(self._chunks) != len(data):
             self._chunks = [[] for _ in data]
+            self._wire_chunks = [[] for _ in data]
         results: List[Result] = []
         for index, prompt in enumerate(data):
             chunks = self._chunks[index]
             order, suffix = ComposeReuse(chunks, prompt)
+            variant = "raw"
+            if not order and index < len(self._wire_chunks):
+                wire_chunks = self._wire_chunks[index]
+                order, suffix = ComposeReuse(wire_chunks, prompt)
+                if order:
+                    variant = "chat_prefixed"
             retain = bool(retainOutput[index]) if retainOutput and index < len(retainOutput) else False
             if order:
                 response = self._request({
@@ -235,15 +259,16 @@ class A3Repo(Method):
             else:
                 response = self._request({"op": "full", "text": prompt, "retain_output": retain})
                 full = True
-            results.append(self._result(response, full=full))
+            results.append(self._result(response, full=full, prompt_variant=variant))
         return results
 
-    def _result(self, response: Dict[str, Any], *, full: bool) -> Result:
+    def _result(self, response: Dict[str, Any], *, full: bool, prompt_variant: str = "raw") -> Result:
         metadata = {
             "reuse_ratio": float(response.get("reuse_ratio", 0.0)),
             "recomp_ratio": self.recompRatio,
             "n_input": response.get("n_input"),
             "official_repo": str(self.repoRoot),
+            "prompt_variant": prompt_variant,
         }
         if response.get("a3_debug") is not None:
             metadata["a3_debug"] = response["a3_debug"]
@@ -261,6 +286,7 @@ class A3Repo(Method):
 
     def Reset(self) -> None:
         self._chunks = []
+        self._wire_chunks = []
         try:
             self._request({"op": "reset"})
         except (BrokenPipeError, RuntimeError):

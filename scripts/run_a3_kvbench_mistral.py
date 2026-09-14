@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
@@ -26,6 +27,15 @@ from typing import Any, Dict, Iterator, List
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# Engine workers use multiprocessing ``spawn``.  Propagate the command-line
+# model override into those fresh interpreters before they render task prompts;
+# otherwise ModelAdapter would fall back to the repository's unrelated global
+# config.yaml model path.
+_spawn_model_path = os.environ.get("KVBENCH_MODEL_PATH")
+if _spawn_model_path:
+    from core import Config as _SpawnConfig
+    _SpawnConfig.LoadConfig()["ModelPath"] = _spawn_model_path
 
 DEFAULT_MODEL = (
     "/data1/ly/.cache/huggingface/hub/"
@@ -77,6 +87,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=200,
                         help="Samples per Task (-1 means all local samples)")
     parser.add_argument("--start-index", type=int, default=0)
+    parser.add_argument("--exclude-indices", type=int, nargs="*", default=[],
+                        help="Original zero-based dataset indices to skip")
     parser.add_argument("--max-new-tokens", type=int, default=64,
                         help="Default generation budget for all methods")
     parser.add_argument("--max-model-len", type=int, default=32768)
@@ -106,6 +118,7 @@ def configure_runtime(args: argparse.Namespace) -> Dict[str, Any]:
     config = copy.deepcopy(Config.LoadConfig())
     config["ModelPath"] = str(Path(args.model).expanduser().resolve())
     config["DatasetPath"] = str(args.dataset_root.expanduser().resolve())
+    os.environ["KVBENCH_MODEL_PATH"] = config["ModelPath"]
     config["ModelConfig"] = {"mode": "greedy"}
     config["A3"] = {
         "Repo": {
@@ -151,6 +164,8 @@ def preflight(args: argparse.Namespace) -> None:
             raise FileNotFoundError(f"{label} not found: {path}")
     if args.max_samples == 0 or args.max_samples < -1:
         raise ValueError("--max-samples must be -1 or a positive integer")
+    if any(index < 0 for index in args.exclude_indices):
+        raise ValueError("--exclude-indices must contain non-negative indices")
     if not 0.0 <= args.recomp_ratio <= 1.0:
         raise ValueError("--recomp-ratio must be in [0, 1]")
     if args.chunk_size < 0:
@@ -224,6 +239,28 @@ class FixedTokenChunkTask:
         return self.inner.Evaluate(result, metadata)
 
 
+class ExcludeIndicesTask:
+    """Filter selected original dataset rows without changing Task/core code."""
+
+    def __init__(self, inner: Any, excluded: List[int], start_index: int):
+        self.inner = inner
+        self.excluded = set(int(index) for index in excluded)
+        self.start_index = int(start_index)
+
+    @property
+    def Label(self) -> str:
+        return self.inner.Label
+
+    def Cases(self) -> Iterator[Any]:
+        for offset, case in enumerate(self.inner.Cases()):
+            if self.start_index + offset in self.excluded:
+                continue
+            yield case
+
+    def Evaluate(self, result: Any, metadata: Dict[str, Any]) -> Dict[str, float]:
+        return self.inner.Evaluate(result, metadata)
+
+
 def build_tasks(args: argparse.Namespace) -> List[Any]:
     from tasks import GovReportTask, HotpotQATask, MultiNewsTask, SamsumTask, TriviaQATask
 
@@ -243,6 +280,8 @@ def build_tasks(args: argparse.Namespace) -> List[Any]:
             maxSamples=args.max_samples,
             startIdx=args.start_index,
         )
+        if name == "govreport" and args.exclude_indices:
+            task = ExcludeIndicesTask(task, args.exclude_indices, args.start_index)
         if args.chunk_size:
             task = FixedTokenChunkTask(task, str(args.model), args.chunk_size)
         tasks.append(task)
@@ -307,6 +346,7 @@ def make_manifest(args: argparse.Namespace, config: Dict[str, Any]) -> Dict[str,
         },
         "max_samples": args.max_samples,
         "start_index": args.start_index,
+        "exclude_indices": list(args.exclude_indices),
         "methods": list(args.methods),
         "recomp_ratio": args.recomp_ratio,
         "max_new_tokens": args.max_new_tokens,
