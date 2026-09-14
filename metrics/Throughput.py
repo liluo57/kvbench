@@ -56,6 +56,9 @@ class ThroughputMetric(Metric):
             stats[f"{self.name}_total_tokens_per_sec"] = None
         return stats
 
+    def Samples(self) -> list[float]:
+        return list(self._samples)
+
     def Reset(self) -> None:
         self._samples = []
         self._totalTokens = 0.0

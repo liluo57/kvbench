@@ -192,6 +192,7 @@ class CacheBlendWorker:
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_model_len=args.max_model_len,
             max_num_seqs=args.max_num_seqs,
+            enforce_eager=args.enforce_eager,
             **({"tokenizer_mode": "slow"} if self._isQwen3 else {}),
         )
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -1008,6 +1009,11 @@ def Main():
     ap.add_argument("--recomp_ratio", type=float, default=0.15)
     ap.add_argument("--sampling_config", default="{}")
     ap.add_argument("--max_num_seqs", type=int, default=64)
+    ap.add_argument(
+        "--enforce_eager",
+        action="store_true",
+        help="disable CUDA-graph decode (diagnostic; CacheBlend normally needs graphs)",
+    )
     ap.add_argument("--max_collect_tokens", type=int, default=3500,
                     help="token budget per batched collect generate")
     args = ap.parse_args()

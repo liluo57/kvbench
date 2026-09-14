@@ -24,6 +24,7 @@ from methods import (
     FullPrefillVllm,
     NaiveTransformer,
 )
+from metrics import ThroughputMetric, TTFTMetric
 from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
 
@@ -142,6 +143,7 @@ def _new_engine(tmp_path, **overrides):
         "gpuReleaseStableSeconds": "GpuReleaseStableSeconds",
         "gpuReleaseMemoryToleranceMiB": "GpuReleaseMemoryToleranceMiB",
         "pairRetries": "PairRetries",
+        "recordAllSamples": "RecordAllSamples",
         "tui": "Tui",
         "verbose": "Verbose",
     }
@@ -152,14 +154,14 @@ def _new_engine(tmp_path, **overrides):
         return Engine()
 
 
-def _run(tmp_path, tasks, methods, gpu_count=2, **kwargs):
+def _run(tmp_path, tasks, methods, gpu_count=2, metrics=None, **kwargs):
     snapshot = [_gpu(index) for index in range(gpu_count)]
     with patch(
         "core.engine.Engine.ResolveGpuIds",
         return_value=(list(range(gpu_count)), snapshot),
     ), patch("core.engine.GpuGovernor.QueryGpus", return_value=snapshot):
         engine = _new_engine(tmp_path, **kwargs)
-        return engine, engine.Evaluate(tasks, methods, [])
+        return engine, engine.Evaluate(tasks, methods, metrics or [])
 
 
 def test_engine_reads_all_runtime_settings_from_config(tmp_path):
@@ -187,8 +189,36 @@ def test_engine_reads_all_runtime_settings_from_config(tmp_path):
     assert engine.gpuReleaseStableSeconds == 1.5
     assert engine.gpuReleaseMemoryTolerance == 17 * 1024 * 1024
     assert engine.pairRetries == 2
+    assert not engine.recordAllSamples
     assert engine.tuiEnabled
     assert engine.verbose
+
+
+def test_engine_reads_raw_sample_reporting_setting(tmp_path):
+    engine = _new_engine(tmp_path, recordAllSamples=True)
+
+    assert engine.recordAllSamples is True
+
+
+def test_engine_passes_raw_sample_reporting_to_worker(tmp_path):
+    engine, report = _run(
+        tmp_path,
+        [FakeTask("raw-samples", "prompt")],
+        [FakeMethod()],
+        gpu_count=1,
+        metrics=[TTFTMetric(), ThroughputMetric()],
+        recordAllSamples=True,
+    )
+
+    assert report["runs"][0]["task_metrics"]["accuracy"]["samples"] == [1.0]
+    assert report["runs"][0]["system_metrics"]["ttft"]["samples"] == [0.1]
+    assert report["runs"][0]["system_metrics"]["throughput"]["samples"] == [10.0]
+    full = json.loads(
+        (engine.outputDir / "results" / "full.json").read_text()
+    )
+    assert full["runs"][0]["system_metrics"]["ttft"]["samples"] == [0.1]
+    manifest = json.loads((engine.outputDir / "manifest.json").read_text())
+    assert manifest["record_all_samples"] is True
 
 
 def test_method_case_batch_limit_is_applied_and_recorded(tmp_path):

@@ -63,7 +63,13 @@ def Main() -> None:
     ]
 
     methods = [
-        DependencyAnalysisMethod(gpuNums=1, perfWeight=1),
+        DependencyAnalysisMethod(gpuNums=1),
+        CacheblendRepo(gpuNums=1, recompRatio=0,tag='0'),
+        CacheblendRepo(gpuNums=1, recompRatio=0.05,tag='0.05'),
+        CacheblendRepo(gpuNums=1, recompRatio=0.1,tag='0.1'),
+        CacheblendRepo(gpuNums=1, recompRatio=0.15,tag='0.15'),
+        CacheblendRepo(gpuNums=1, recompRatio=0.2,tag='0.2'),
+        CacheblendRepo(gpuNums=1, fullPrefill=True, tag="full_prefill"),
         # HypicMethod(
         #     gpuNums=2,
         #     memFractionStatic=0.90,

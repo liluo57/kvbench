@@ -21,6 +21,7 @@ def EvaluatePair(
     metrics: List[Metric],
     batchSize: int,
     externalRunCallback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
+    recordAllSamples: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate one pair entirely inside its method worker."""
     for metric in metrics:
@@ -47,25 +48,34 @@ def EvaluatePair(
             nCases += _ProcessCaseBatch(
                 task, method, metrics, batch, taskScores, methodScores,
                 methodWeights, externalRunCallback=externalRunCallback,
+                recordAllSamples=recordAllSamples,
             )
             batch = []
     if batch:
         nCases += _ProcessCaseBatch(
             task, method, metrics, batch, taskScores, methodScores, methodWeights,
             externalRunCallback=externalRunCallback,
+            recordAllSamples=recordAllSamples,
         )
 
     report: Dict[str, Any] = {
         "method": method.Label,
         "task": task.Label,
         "cases": nCases,
-        "task_metrics": AggregateScores(taskScores),
-        "system_metrics": {metric.name: metric.Summary() for metric in metrics},
+        "task_metrics": AggregateScores(
+            taskScores, includeSamples=recordAllSamples
+        ),
+        "system_metrics": {
+            metric.name: _MetricSummary(metric, recordAllSamples)
+            for metric in metrics
+        },
     }
     if method.method_metrics:
         report["method_metrics"] = {}
         for name, values in methodScores.items():
-            stats = AggregateStats(values, name=name)
+            stats = AggregateStats(
+                values, name=name, includeSamples=recordAllSamples
+            )
             weights = methodWeights[name]
             if values and weights and sum(weights) > 0:
                 stats[f"{name}_mean"] = sum(
@@ -86,6 +96,7 @@ def _ProcessCaseBatch(
     methodScores: Dict[str, List[float]],
     methodWeights: Dict[str, List[float]],
     externalRunCallback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
+    recordAllSamples: bool = False,
 ) -> int:
     """Process a batch, isolating failures for tasks that opt in.
 
@@ -94,6 +105,8 @@ def _ProcessCaseBatch(
     external rollout is scored as zero when it fails, then the worker moves on
     to the next case.
     """
+    partialRunResults: List[Result] = []
+    runResultsCommitted = [False]
     try:
         return _ProcessBatch(
             task,
@@ -104,6 +117,11 @@ def _ProcessCaseBatch(
             methodScores,
             methodWeights,
             externalRunCallback=externalRunCallback,
+            recordAllSamples=recordAllSamples,
+            runResultCallback=(
+                partialRunResults.append if recordAllSamples else None
+            ),
+            runResultsCommitted=runResultsCommitted,
         )
     except BaseException as exc:
         if not getattr(task, "continueOnCaseFailure", False) or len(batch) != 1:
@@ -127,6 +145,10 @@ def _ProcessCaseBatch(
         failureScorer = getattr(task, "CaseFailureScores", None)
         if not callable(failureScorer):
             raise
+        if not runResultsCommitted[0]:
+            _RecordRunResults(
+                partialRunResults, metrics, method, methodScores, methodWeights
+            )
         scores = NormalizeScores(failureScorer(case.metadata, exc))
         for name, value in scores.items():
             taskScores.setdefault(name, []).append(float(value))
@@ -146,9 +168,22 @@ def _ProcessBatch(
     methodScores: Dict[str, List[float]],
     methodWeights: Dict[str, List[float]],
     externalRunCallback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
+    recordAllSamples: bool = False,
+    runResultCallback: Optional[Callable[[Result], None]] = None,
+    runResultsCommitted: Optional[List[bool]] = None,
 ) -> int:
     workflows = [case.workflow for case in batch]
     finalResults: Dict[int, Result] = {}
+    # Keep RUN results grouped by the original Case order.  A normal batched
+    # step is interleaved as case0, case1, ..., and the next step repeats that
+    # pattern; updating metrics immediately would therefore not be Sample
+    # order for workflows with more than one RUN.  Metrics are updated after
+    # the batch has completed, in this case-major order.
+    runResults: List[List[Result]] = [[] for _ in workflows]
+    if runResultsCommitted is not None and not recordAllSamples:
+        # The legacy path records each RUN as it is produced.  Only the raw
+        # sample-reporting path needs the deferred, case-major commit below.
+        runResultsCommitted[0] = True
     reportedExternalRuns: Dict[int, Dict[str, Any]] = {}
 
     def reportExternalRun(caseId: int, descriptor: Any) -> None:
@@ -174,8 +209,8 @@ def _ProcessBatch(
 
     while True:
         stepActions: List[Action] = []
-        workflowSlices: List[Tuple[Workflow, int, int]] = []
-        for workflow in workflows:
+        workflowSlices: List[Tuple[int, Workflow, int, int]] = []
+        for caseIndex, workflow in enumerate(workflows):
             if workflow.finished:
                 continue
             actions = workflow.next()
@@ -198,7 +233,9 @@ def _ProcessBatch(
                 )
             start = len(stepActions)
             stepActions.extend(actions)
-            workflowSlices.append((workflow, start, start + len(actions)))
+            workflowSlices.append(
+                (caseIndex, workflow, start, start + len(actions))
+            )
 
         if not stepActions:
             unfinished = [
@@ -240,21 +277,22 @@ def _ProcessBatch(
             ]
             for stepResult in stepResults:
                 finalResults[stepResult.case_id] = stepResult.result
-                for metric in metrics:
-                    metric.Update(stepResult.result)
-                for name in method.method_metrics:
-                    value = stepResult.result.metadata.get(name)
-                    if value is None:
-                        continue
-                    methodScores[name].append(float(value))
-                    weight = (
-                        stepResult.result.metadata.get("n_input", 1.0)
-                        if name == "reuse_ratio"
-                        else 1.0
+                if runResultCallback is not None:
+                    runResultCallback(stepResult.result)
+                if not recordAllSamples:
+                    _RecordRunResults(
+                        [stepResult.result],
+                        metrics,
+                        method,
+                        methodScores,
+                        methodWeights,
                     )
-                    methodWeights[name].append(float(weight or 0.0))
+            for caseIndex, workflow, start, end in workflowSlices:
+                runResults[caseIndex].extend(
+                    stepResult.result for stepResult in stepResults[start:end]
+                )
 
-        for workflow, start, end in workflowSlices:
+        for _, workflow, start, end in workflowSlices:
             workflow.observe(stepResults[start:end])
 
     missingResults = [
@@ -268,6 +306,16 @@ def _ProcessBatch(
     if missingResults:
         raise RuntimeError(
             f"Workflows finished without a RUN result: {missingResults}"
+        )
+
+    if recordAllSamples:
+        orderedRunResults = [
+            result for caseResults in runResults for result in caseResults
+        ]
+        if runResultsCommitted is not None:
+            runResultsCommitted[0] = True
+        _RecordRunResults(
+            orderedRunResults, metrics, method, methodScores, methodWeights
         )
 
     for case in batch:
@@ -284,6 +332,40 @@ def _ProcessBatch(
             taskScores.setdefault(name, []).append(float(value))
     method.Reset()
     return len(batch)
+
+
+def _RecordRunResults(
+    results: List[Result],
+    metrics: List[Metric],
+    method: Method,
+    methodScores: Dict[str, List[float]],
+    methodWeights: Dict[str, List[float]],
+) -> None:
+    """Commit successful RUN results in the supplied Sample order."""
+    for result in results:
+        for metric in metrics:
+            metric.Update(result)
+        for name in method.method_metrics:
+            value = result.metadata.get(name)
+            if value is None:
+                continue
+            methodScores[name].append(float(value))
+            weight = (
+                result.metadata.get("n_input", 1.0)
+                if name == "reuse_ratio"
+                else 1.0
+            )
+            methodWeights[name].append(float(weight or 0.0))
+
+
+def _MetricSummary(metric: Metric, includeSamples: bool) -> Dict[str, Any]:
+    """Build one metric's report section, optionally exposing raw values."""
+    summary = dict(metric.Summary())
+    if includeSamples:
+        samples = metric.Samples()
+        if samples is not None:
+            summary["samples"] = list(samples)
+    return summary
 
 
 def _RunMethod(
@@ -409,6 +491,7 @@ def _RunOneAttempt(
     eventQueue,
     workerId: str,
     controlConnection=None,
+    recordAllSamples: bool = False,
 ) -> bool:
     """Run :func:`EvaluatePair` once, emitting one of the matching events.
 
@@ -461,6 +544,7 @@ def _RunOneAttempt(
             metrics,
             batchSize,
             externalRunCallback=reportExternalRun,
+            recordAllSamples=recordAllSamples,
         )
     except BaseException as exc:  # keep this worker alive by design
         duration = time.perf_counter() - attemptStart
@@ -527,6 +611,7 @@ def _RunCommandLoop(
     workerId: str,
     methodIndex: int,
     instanceLog: str,
+    recordAllSamples: bool = False,
 ) -> None:
     """Drain coordinator-issued commands until ``shutdown`` or EOF.
 
@@ -559,6 +644,7 @@ def _RunCommandLoop(
                 method, task, taskIndex, methodIndex,
                 attempt, maxAttempts, logPath, metrics, batchSize,
                 eventQueue, workerId, connection,
+                recordAllSamples,
             ):
                 completed = True
                 break
@@ -618,6 +704,7 @@ def WorkerMain(
     connection,
     eventQueue,
     instanceLog: str,
+    recordAllSamples: bool = False,
 ) -> None:
     """Own one initialized method and execute coordinator-issued tasks.
 
@@ -642,6 +729,7 @@ def WorkerMain(
             _RunCommandLoop(
                 method, metrics, batchSize, connection,
                 eventQueue, workerId, methodIndex, instanceLog,
+                recordAllSamples,
             )
     finally:
         _Shutdown(method, connection, eventQueue, workerId)

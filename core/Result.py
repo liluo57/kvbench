@@ -60,14 +60,22 @@ def NormalizeScores(scores: Any) -> Dict[str, float]:
     return dict(scores)
 
 
-def AggregateScores(perCase: Dict[str, List[float]]) -> Dict[str, Any]:
+def AggregateScores(
+    perCase: Dict[str, List[float]], *, includeSamples: bool = False
+) -> Dict[str, Any]:
     """Roll per-case score lists into ``{name: {"mean": ...}}`` per name.
 
     An empty list for a name yields ``{"mean": None}`` so the field is still
     present in the report — callers can distinguish "no data" from "missing
-    metric" without a key check.
+    metric" without a key check. With ``includeSamples``, each score's input-
+    order values are also returned under ``"samples"``.
     """
-    return {
-        name: {"mean": (sum(values) / len(values)) if values else None}
-        for name, values in perCase.items()
-    }
+    result: Dict[str, Any] = {}
+    for name, values in perCase.items():
+        stats: Dict[str, Any] = {
+            "mean": (sum(values) / len(values)) if values else None
+        }
+        if includeSamples:
+            stats["samples"] = list(values)
+        result[name] = stats
+    return result

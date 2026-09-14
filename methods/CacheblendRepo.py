@@ -153,8 +153,17 @@ class CacheblendRepo(Method):
         helperScript = Path(__file__).resolve().parent.parent / "helpers" / "cacheblend_repo" / "CacheblendRepoHelper.py"
         env = dict(os.environ)
         # Keep the subprocess clean: the repo's venv must resolve its own vllm,
-        # and a login shell's LD_PRELOAD / PYTHONPATH must not leak in.
+        # and a login shell's PYTHONPATH must not leak in.  The fork is built
+        # against CUDA 13 while torch ships CUDA 12.8; preload the real driver
+        # library so its unversioned Driver API symbols are globally visible.
         env.pop("LD_PRELOAD", None)
+        for driverCuda in (
+            "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+            "/usr/lib64/libcuda.so.1",
+        ):
+            if Path(driverCuda).exists():
+                env["LD_PRELOAD"] = driverCuda
+                break
         env.pop("PYTHONPATH", None)
         env["CUDA_VISIBLE_DEVICES"] = (
             str(self.gpuIds)

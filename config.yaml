@@ -21,10 +21,10 @@
 DatasetPath: /root/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /root/autodl-tmp/models/Mistral-7B-Instruct-v0.2
+ModelPath: /root/autodl-tmp/models/Qwen3-8b
 
 # Shared context-window limit used by every model backend.
-MaxModelLen: 256000
+MaxModelLen: 32768
 
 # Shared model sampling policy.
 #   greedy   - deterministic argmax decoding
@@ -58,6 +58,9 @@ Hypic:
 Engine:
   AvailableGpuIds: 'auto'
   BatchSize: 1
+  # Include raw per-sample values in each metric section of results/full.json.
+  # Samples are emitted in Task.Cases() order, including when Cases are batched.
+  RecordAllSamples: true
   OutputRoot: outputs
   InitializeTimeoutSec: 6000
   TaskTimeoutSec: 18000
@@ -77,7 +80,7 @@ Engine:
 Cacheblend:
   Repo:
     # The original CacheBlend repo clone (holds vllm_blend + .venv).
-    RepoPath: /data/lyh/cache-blend/CacheBlend
+    RepoPath: /root/autodl-tmp/CacheBlend
     # Fraction of each GPU reserved by the CacheBlend/vLLM worker. CacheBlend
     # keeps additional chunk KV outside vLLM's own KV cache, so leave headroom.
     GpuMemoryUtilization: 0.7

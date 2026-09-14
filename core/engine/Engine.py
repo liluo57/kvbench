@@ -66,6 +66,7 @@ class Engine:
         )
         pairRetries = int(engineConfig.get("PairRetries", 1))
         outputRoot = engineConfig.get("OutputRoot", "outputs")
+        recordAllSamples = bool(engineConfig.get("RecordAllSamples", False))
         tui = bool(engineConfig.get("Tui", True))
         verbose = bool(engineConfig.get("Verbose", True))
 
@@ -94,6 +95,7 @@ class Engine:
         self.gpuReleaseMemoryTolerance = int(gpuReleaseMemoryToleranceMiB) * 1024 * 1024
         self.pairRetries = int(pairRetries)
         self.outputRoot = Path(outputRoot)
+        self.recordAllSamples = recordAllSamples
         self.tuiEnabled = tui
         self.verbose = verbose
         # All Evaluate-time state is declared here as None so static analysis
@@ -146,6 +148,7 @@ class Engine:
             "started_at": datetime.fromtimestamp(ctx.startedWall).astimezone().isoformat(),
             "output_dir": str(self.outputDir.resolve()),
             "batch_size": self.batchSize,
+            "record_all_samples": self.recordAllSamples,
             "effective_batch_sizes": [
                 {
                     "method_index": index,

@@ -89,6 +89,7 @@ class Scheduler:
                 childConnection,
                 self.ctx.eventQueue,
                 instanceLog,
+                self.engine.recordAllSamples,
             ),
         )
         process.start()
