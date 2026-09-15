@@ -10,7 +10,6 @@ import pytest
 
 from core.engine import (
     BenchmarkInitializationError,
-    BenchmarkResourceReleaseError,
     Engine,
 )
 from core.engine.Gpu import GpuInfo
@@ -504,7 +503,7 @@ def test_gpu_is_not_rescheduled_until_nvml_reports_release(tmp_path):
     assert released < secondSpawn
 
 
-def test_gpu_release_timeout_is_a_distinct_fatal_error(tmp_path):
+def test_gpu_release_timeout_quarantines_gpu_without_aborting(tmp_path):
     baseline = [_gpu(0)]
     busy = [GpuInfo(0, "fake", 100, 50, 0.5, 0)]
     with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
@@ -516,15 +515,16 @@ def test_gpu_release_timeout_is_a_distinct_fatal_error(tmp_path):
             gpuReleaseTimeout=0.3,
             gpuReleaseMemoryToleranceMiB=0,
         )
-        with pytest.raises(BenchmarkResourceReleaseError):
-            engine.Evaluate(
-                [FakeTask("task", "text")],
-                [FakeMethod()],
-                [],
-            )
+        report = engine.Evaluate(
+            [FakeTask("task", "text")],
+            [FakeMethod()],
+            [],
+        )
+    assert report["status"] == "completed"
     manifest = json.loads((engine.outputDir / "manifest.json").read_text())
-    assert manifest["status"] == "resource_release_failed"
+    assert manifest["status"] == "completed"
     assert manifest["unreleased_gpus"]
+    assert manifest["unavailable_gpus"]["0"]["error"]
 
 
 def test_new_compute_pid_blocks_gpu_release_even_at_baseline_memory(tmp_path):
@@ -544,12 +544,65 @@ def test_new_compute_pid_blocks_gpu_release_even_at_baseline_memory(tmp_path):
             gpuReleaseTimeout=0.3,
             gpuReleaseMemoryToleranceMiB=0,
         )
-        with pytest.raises(BenchmarkResourceReleaseError, match="98765"):
-            engine.Evaluate([FakeTask("task", "text")], [FakeMethod()], [])
+        report = engine.Evaluate([FakeTask("task", "text")], [FakeMethod()], [])
 
+    assert report["status"] == "completed"
     manifest = json.loads((engine.outputDir / "manifest.json").read_text())
     unreleased = manifest["unreleased_gpus"]["0"]
     assert unreleased["external_compute_pids"] == [98765]
+    assert manifest["unavailable_gpus"]["0"]["external_compute_pids"] == [98765]
+
+
+def test_gpu_release_failure_does_not_stop_other_gpu_workers(tmp_path):
+    baseline = [_gpu(0), _gpu(1)]
+    busy = [GpuInfo(0, "fake", 100, 50, 0.5, 0), _gpu(1)]
+    queryCount = 0
+
+    def query():
+        nonlocal queryCount
+        queryCount += 1
+        # Let both workers start on their own GPU. Once they are running,
+        # keep GPU 0 occupied so only its cooling release fails.
+        return baseline if queryCount <= 2 else busy
+
+    with patch(
+        "core.engine.Engine.ResolveGpuIds",
+        return_value=([0, 1], baseline),
+    ), patch("core.engine.GpuGovernor.QueryGpus", side_effect=query):
+        engine = _new_engine(
+            tmp_path,
+            pairRetries=0,
+            gpuReleaseTimeout=0.3,
+            gpuReleaseMemoryToleranceMiB=0,
+            initializeTimeout=20,
+            taskTimeout=10,
+        )
+        report = engine.Evaluate(
+            [FakeTask("task", "text")],
+            [FakeMethod(failMode="crash"), FakeMethod(failMode="sleep")],
+            [],
+        )
+
+    assert report["status"] == "completed"
+    assert len(report["runs"]) == 1
+    assert report["runs"][0]["method"] == "fake"
+    assert report["failures"][0]["method_index"] == 0
+    manifest = json.loads((engine.outputDir / "manifest.json").read_text())
+    assert set(manifest["unavailable_gpus"]) == {"0"}
+    events = [
+        json.loads(line)
+        for line in (engine.outputDir / "events.jsonl").read_text().splitlines()
+    ]
+    failedRelease = next(
+        event for event in events if event["type"] == "gpu_release_failed"
+    )
+    otherTaskDone = next(
+        event
+        for event in events
+        if event["type"] == "task_done" and event["method_index"] == 1
+    )
+    assert failedRelease["gpu_id"] == 0
+    assert failedRelease["time"] < otherTaskDone["time"]
 
 
 def test_gpu_must_remain_clean_for_stability_window(tmp_path):

@@ -217,6 +217,7 @@ class Engine:
                 self.scheduler.reapDeadWorkers(ctx, now)
                 if self.scheduler.checkShutdown(ctx):
                     break
+                self.scheduler.markUnschedulable(ctx)
                 self.scheduler.dispatchPending(ctx, now)
                 if self.scheduler.finalizeTerminal(ctx):
                     break
@@ -287,7 +288,14 @@ class Engine:
                 "fatal_error": ctx.fatalError,
                 "unreleased_gpus": {
                     str(gpuId): details
-                    for gpuId, details in ctx.coolingGpus.items()
+                    for gpuId, details in {
+                        **ctx.coolingGpus,
+                        **ctx.unavailableGpus,
+                    }.items()
+                },
+                "unavailable_gpus": {
+                    str(gpuId): details
+                    for gpuId, details in ctx.unavailableGpus.items()
                 },
                 "worker_history": ctx.workerHistory,
             })

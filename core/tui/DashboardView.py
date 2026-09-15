@@ -198,12 +198,15 @@ def _render_schedule(view: DashboardView, snapshot: Dict[str, Any]):
             assignments[gpuId] = worker
     selected = set(snapshot.get("gpu_pool", []))
     cooling = set(snapshot.get("cooling_gpus", []))
+    unavailable = set(snapshot.get("unavailable_gpus", []))
     for item in snapshot.get("gpu_snapshot", []):
         gpuId = item["id"]
         worker = assignments.get(gpuId)
         state = "outside pool"
         if gpuId in selected:
-            if worker:
+            if gpuId in unavailable:
+                state = "unavailable"
+            elif worker:
                 state = worker.get("state", "busy")
             elif gpuId in cooling:
                 state = "cooling"

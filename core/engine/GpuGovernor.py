@@ -7,7 +7,8 @@ side:
   so a freshly-exited worker doesn't immediately re-host another.
 - :meth:`refreshCoolingGpus` polls ``QueryGpus()`` (NVML) and returns GPUs
   to ``freeGpus`` once they drop back to the baseline memory and stop
-  hosting external compute PIDs.
+  hosting external compute PIDs. A GPU that does not release in time is
+  quarantined in ``unavailableGpus`` so the rest of the pool can continue.
 - :meth:`validateFreeGpus` quarantines any pool GPU that has external
   contention right now (someone else is using it).
 - :meth:`refreshGpuSnapshot` updates the dashboard telemetry for the TUI.
@@ -189,19 +190,21 @@ class GpuGovernor:
                 f"{self.engine.gpuReleaseMemoryTolerance} bytes, stable window="
                 f"{self.engine.gpuReleaseStableSeconds}s)"
             )
-            if self.ctx.fatalError:
-                self.ctx.fatalError = f"{self.ctx.fatalError}; additionally: {releaseError}"
-            else:
-                self.ctx.fatalStatus = "resource_release_failed"
-                self.ctx.fatalError = releaseError
+            cooling["error"] = releaseError
+            self.ctx.unavailableGpus[gpuId] = dict(cooling)
             self.engine.reporter.recordEvent({
                 "type": "gpu_release_failed",
                 "time": time.time(),
                 "worker_id": cooling["worker_id"],
                 "method": cooling["method"],
                 "gpu_id": gpuId,
+                "unavailable": True,
                 "error": releaseError,
             })
+            # Do not return a failed GPU to the pool. Remove it from the
+            # cooling set as well, otherwise terminal cleanup would wait on
+            # it forever. Other GPUs continue cooling independently.
+            self.ctx.coolingGpus.pop(gpuId, None)
 
         for gpuId in released:
             self.ctx.coolingGpus.pop(gpuId, None)

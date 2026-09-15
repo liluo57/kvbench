@@ -170,6 +170,7 @@ class RunContext:
     gpuSnapshot: List[Any]
     freeGpus: List[int]
     coolingGpus: Dict[int, Dict[str, Any]]
+    unavailableGpus: Dict[int, Dict[str, Any]]
     gpuBaseline: Dict[int, int]
     gpuBaselinePids: Dict[int, Set[int]]
     lastGpuReleasePoll: float
@@ -239,6 +240,7 @@ def BuildRunContext(
         gpuSnapshot=list(gpuSnapshot),
         freeGpus=list(gpuPool),
         coolingGpus={},
+        unavailableGpus={},
         gpuBaseline={gpu.id: gpu.memoryUsed for gpu in gpuSnapshot},
         gpuBaselinePids={gpu.id: set(gpu.computePids) for gpu in gpuSnapshot},
         lastGpuReleasePoll=0.0,
