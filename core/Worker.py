@@ -34,6 +34,7 @@ def EvaluatePair(
     methodWeights: Dict[str, List[float]] = {
         name: [] for name in method.method_metrics
     }
+    sampleResults: List[Dict[str, Any]] = []
     nCases = 0
     # AgentBenchFlow cases are independent external rollouts.  Keep them
     # one-at-a-time so a Method.Run failure can be attributed to exactly one
@@ -49,6 +50,7 @@ def EvaluatePair(
                 task, method, metrics, batch, taskScores, methodScores,
                 methodWeights, externalRunCallback=externalRunCallback,
                 recordAllSamples=recordAllSamples,
+                sampleResults=sampleResults,
             )
             batch = []
     if batch:
@@ -56,6 +58,7 @@ def EvaluatePair(
             task, method, metrics, batch, taskScores, methodScores, methodWeights,
             externalRunCallback=externalRunCallback,
             recordAllSamples=recordAllSamples,
+            sampleResults=sampleResults,
         )
 
     report: Dict[str, Any] = {
@@ -84,6 +87,8 @@ def EvaluatePair(
                 ) / sum(weights)
                 stats[f"{name}_weight_total"] = sum(weights)
             report["method_metrics"][name] = stats
+    if getattr(method, "_supportsCaseResultHooks", False):
+        report["sample_results"] = sampleResults
     return report
 
 
@@ -97,6 +102,7 @@ def _ProcessCaseBatch(
     methodWeights: Dict[str, List[float]],
     externalRunCallback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
     recordAllSamples: bool = False,
+    sampleResults: Optional[List[Dict[str, Any]]] = None,
 ) -> int:
     """Process a batch, isolating failures for tasks that opt in.
 
@@ -122,6 +128,7 @@ def _ProcessCaseBatch(
                 partialRunResults.append if recordAllSamples else None
             ),
             runResultsCommitted=runResultsCommitted,
+            sampleResults=sampleResults,
         )
     except BaseException as exc:
         if not getattr(task, "continueOnCaseFailure", False) or len(batch) != 1:
@@ -171,6 +178,7 @@ def _ProcessBatch(
     recordAllSamples: bool = False,
     runResultCallback: Optional[Callable[[Result], None]] = None,
     runResultsCommitted: Optional[List[bool]] = None,
+    sampleResults: Optional[List[Dict[str, Any]]] = None,
 ) -> int:
     workflows = [case.workflow for case in batch]
     finalResults: Dict[int, Result] = {}
@@ -327,9 +335,32 @@ def _ProcessBatch(
             getattr(case.workflow, "final_result", None)
             or finalResults[case.workflow.case_id]
         )
-        scores = NormalizeScores(task.Evaluate(result, case.metadata))
+        evaluator = getattr(method, "EvaluateCase", None)
+        if getattr(method, "_supportsCaseResultHooks", False) and callable(evaluator):
+            scores = NormalizeScores(evaluator(task, result, case.metadata))
+        else:
+            scores = NormalizeScores(task.Evaluate(result, case.metadata))
         for name, value in scores.items():
             taskScores.setdefault(name, []).append(float(value))
+        sampleRecorder = getattr(method, "SampleResult", None)
+        if (
+            sampleResults is not None
+            and getattr(method, "_supportsCaseResultHooks", False)
+            and callable(sampleRecorder)
+        ):
+            sampleResults.append(sampleRecorder(case, result, scores))
+
+    release = getattr(method, "ReleaseRolloutResults", None)
+    if getattr(method, "_supportsCaseResultHooks", False) and callable(release):
+        seenResults = set()
+        for result in [
+            *finalResults.values(),
+            *(result for caseResults in runResults for result in caseResults),
+        ]:
+            if id(result) in seenResults:
+                continue
+            seenResults.add(id(result))
+            release(result)
     method.Reset()
     return len(batch)
 

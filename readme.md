@@ -67,6 +67,30 @@ KVBench abstracts the **evaluation workflow**:
 The framework only defines how experiments are executed.
 The method implementation remains fully customizable.
 
+## Repeated rollout evaluation
+
+`RolloutMethod` decorates an existing Method and repeats each `Run` action
+within its original Case. It returns one aggregate Result per input, so a task
+with 64 Cases and 10 rollouts still reports 64 Cases:
+
+```python
+from methods import FullPrefillTransformer, RolloutMethod
+
+method = RolloutMethod(
+    base_method=FullPrefillTransformer(gpuNums=1),
+    num_rollouts=10,
+    keep_individual_results=True,
+)
+```
+
+Numeric Result fields use population variance (`ddof=0`). The existing task
+scorer is applied to each raw rollout and its scalar task metrics are averaged
+once per original sample. Rollout-aware runs add one record per Case under
+`sample_results` in the pair report, with `sample_id`, `rollout_mean`,
+`rollout_variance`, `rollout_std`, and a nested `rollout` summary. Set
+`keep_individual_results=False` to omit nested raw rollout Results while
+retaining the aggregate statistics.
+
 ---
 
 # Testing

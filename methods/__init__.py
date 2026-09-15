@@ -30,6 +30,7 @@ from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
 from .DependencyAnalysis import DependencyAnalysisMethod, DependencyAnalysisTransformer
+from .Rollout import RolloutMethod
 __all__ = [
     "CacheblendLmcache",
     "CacheblendRepo",
@@ -40,4 +41,5 @@ __all__ = [
     "NaiveTransformer",
     "DependencyAnalysisMethod",
     "DependencyAnalysisTransformer",
+    "RolloutMethod",
 ]
