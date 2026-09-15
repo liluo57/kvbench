@@ -129,6 +129,7 @@ def _new_engine(tmp_path, **overrides):
         "GpuReleaseMemoryToleranceMiB": 256,
         "PairRetries": 1,
         "Tui": False,
+        "TuiWaitForQuit": True,
         "Verbose": False,
     }
     keyNames = {
@@ -144,6 +145,7 @@ def _new_engine(tmp_path, **overrides):
         "pairRetries": "PairRetries",
         "recordAllSamples": "RecordAllSamples",
         "tui": "Tui",
+        "tuiWaitForQuit": "TuiWaitForQuit",
         "verbose": "Verbose",
     }
     unknown = set(overrides) - set(keyNames)
@@ -176,6 +178,7 @@ def test_engine_reads_all_runtime_settings_from_config(tmp_path):
         gpuReleaseMemoryToleranceMiB=17,
         pairRetries=2,
         tui=True,
+        tuiWaitForQuit=False,
         verbose=True,
     )
 
@@ -190,6 +193,7 @@ def test_engine_reads_all_runtime_settings_from_config(tmp_path):
     assert engine.pairRetries == 2
     assert not engine.recordAllSamples
     assert engine.tuiEnabled
+    assert not engine.tuiWaitForQuit
     assert engine.verbose
 
 

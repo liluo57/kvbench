@@ -45,9 +45,10 @@ class BenchmarkTui:
     touch this file.
     """
 
-    def __init__(self, enabled: bool = True):
+    def __init__(self, enabled: bool = True, waitForQuit: bool = True):
         self.console = Console()
         self.enabled = bool(enabled and self.console.is_terminal)
+        self.waitForQuit = bool(waitForQuit)
         self.view = DashboardView()
         self.cancelRequested = False
         self.quitRequested = False
@@ -95,13 +96,13 @@ class BenchmarkTui:
         self._inputEnabled = False
 
     def FinishAndWait(self) -> None:
-        """Keep the final dashboard available until the user presses ``q``."""
+        """Render the final dashboard and optionally wait for ``q``."""
         if not self.enabled or not self._inputEnabled:
             return
         self.finished = True
         if self._live is not None:
             self._live.update(self.view.Render(finished=True), refresh=True)
-        if not self.quitRequested:
+        if self.waitForQuit and not self.quitRequested:
             self._quit.wait()
 
     def Update(self, snapshot: Dict[str, Any]) -> None:

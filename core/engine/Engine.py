@@ -68,6 +68,7 @@ class Engine:
         outputRoot = engineConfig.get("OutputRoot", "outputs")
         recordAllSamples = bool(engineConfig.get("RecordAllSamples", False))
         tui = bool(engineConfig.get("Tui", True))
+        tuiWaitForQuit = bool(engineConfig.get("TuiWaitForQuit", True))
         verbose = bool(engineConfig.get("Verbose", True))
 
         if batchSize < 1:
@@ -97,6 +98,7 @@ class Engine:
         self.outputRoot = Path(outputRoot)
         self.recordAllSamples = recordAllSamples
         self.tuiEnabled = tui
+        self.tuiWaitForQuit = tuiWaitForQuit
         self.verbose = verbose
         # All Evaluate-time state is declared here as None so static analysis
         # can see the full attribute surface of an Engine instance. They are
@@ -138,7 +140,10 @@ class Engine:
         )
         ctx.eventQueue = ctx.mpContext.Queue()
         ctx.eventsFile = ctx.eventsPath.open("a", encoding="utf-8", buffering=1)
-        self._tui = BenchmarkTui(enabled=self.tuiEnabled)
+        self._tui = BenchmarkTui(
+            enabled=self.tuiEnabled,
+            waitForQuit=self.tuiWaitForQuit,
+        )
         self.reporter = Reporter(ctx, self)
         self.gpuGovernor = GpuGovernor(ctx, self)
         self.scheduler = Scheduler(ctx, self.reporter, self)

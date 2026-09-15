@@ -49,3 +49,13 @@ def test_interactive_final_dashboard_waits_for_q():
     waiter.join(timeout=0.2)
     assert not waiter.is_alive()
     assert not tui.cancelRequested
+
+
+def test_interactive_final_dashboard_can_exit_without_q():
+    tui = BenchmarkTui(enabled=False, waitForQuit=False)
+    tui.enabled = True
+    tui._inputEnabled = True
+
+    tui.FinishAndWait()
+
+    assert tui.finished
