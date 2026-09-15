@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 import importlib
+import math
 import os
 import time
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
@@ -35,7 +36,30 @@ _MetricNames = (
     "missing_attention_skip_k",
     "value_weighted_dependency_skip_k",
     "kv_deviation",
+    "cci",
 )
+
+_CCI_EPS = 1e-12
+
+
+def _StableSigmoid(value: float) -> float:
+    """Evaluate sigmoid without overflowing for a large positive/negative ratio."""
+    if value >= 0.0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exponent = math.exp(value)
+    return exponent / (1.0 + exponent)
+
+
+def _UnavailableCciValues() -> Dict[str, Any]:
+    """Return the CCI metadata shape for samples without a valid CCI."""
+    return {
+        "cci": None,
+        "cci_mean": None,
+        "cci_max": None,
+        "cci_raw_ratio_weighted": None,
+        "cci_chunks": [],
+        "cci_b_near_zero_chunks": [],
+    }
 
 
 @dataclass(frozen=True)
@@ -117,7 +141,12 @@ def _AlignTokenPairs(
 class _DependencyStats:
     """Streaming layer/head/token aggregation for one sample."""
 
-    def __init__(self, tokenInfo: Mapping[int, Tuple[int, int]], skipK: int):
+    def __init__(
+        self,
+        tokenInfo: Mapping[int, Tuple[int, int]],
+        skipK: int,
+        cciChunks: Optional[Sequence[Tuple[int, Sequence[int]]]] = None,
+    ):
         # tokenInfo[full_token_index] = (document_start, document_local_index)
         self.tokenInfo = dict(tokenInfo)
         self.skipK = skipK
@@ -125,6 +154,35 @@ class _DependencyStats:
         self.queryPositions: List[int] = []
         self.docStarts: List[int] = []
         self.skipRows: List[bool] = []
+        self.queryChunkIndices: List[Optional[int]] = []
+
+        # CCI only needs token positions for reusable chunks.  Keeping these
+        # small position lists lets Record() compute inter/intra mass from the
+        # same row-batched alpha tensor without retaining attention matrices.
+        self.cciChunkOrder: List[int] = []
+        self.cciChunkPositions: Dict[int, Tuple[int, ...]] = {}
+        self.cciChunkByToken: Dict[int, int] = {}
+        if cciChunks is not None:
+            for chunkIndex, positions in cciChunks:
+                normalized = tuple(int(position) for position in positions)
+                self.cciChunkOrder.append(int(chunkIndex))
+                self.cciChunkPositions[int(chunkIndex)] = normalized
+                for position in normalized:
+                    self.cciChunkByToken[position] = int(chunkIndex)
+        self.cciPriorChunks: Dict[int, Tuple[int, ...]] = {
+            chunkIndex: tuple(
+                priorIndex
+                for priorIndex in self.cciChunkOrder[:offset]
+                if self.cciChunkPositions.get(priorIndex)
+            )
+            for offset, chunkIndex in enumerate(self.cciChunkOrder)
+        }
+
+        # Keyed by the attention module identity, which is stable across the
+        # chunked prefill calls and unambiguously identifies a transformer
+        # layer.  Each value is a layer-local cumulative inter/intra mass.
+        self.cciInterSums: Dict[int, Dict[int, Dict[int, float]]] = {}
+        self.cciIntraSums: Dict[int, Dict[int, float]] = {}
 
         self.missingAttentionSum = 0.0
         self.valueDependencySum = 0.0
@@ -138,6 +196,7 @@ class _DependencyStats:
         self.queryPositions = []
         self.docStarts = []
         self.skipRows = []
+        self.queryChunkIndices = []
 
         for position in sorted(self.tokenInfo):
             if queryStart <= position < queryStart + queryLength:
@@ -146,6 +205,9 @@ class _DependencyStats:
                 self.queryPositions.append(position)
                 self.docStarts.append(docStart)
                 self.skipRows.append(localIndex >= self.skipK)
+                self.queryChunkIndices.append(
+                    self.cciChunkByToken.get(position)
+                )
 
     def Record(
         self,
@@ -182,6 +244,9 @@ class _DependencyStats:
             positions = self.queryPositions[offset: offset + rowBatchSize]
             docStarts = self.docStarts[offset: offset + rowBatchSize]
             skipRows = self.skipRows[offset: offset + rowBatchSize]
+            chunkIndices = self.queryChunkIndices[
+                offset: offset + rowBatchSize
+            ]
 
             rowTensor = torch.tensor(rows, device=query.device, dtype=torch.long)
             queryRows = queryFull.index_select(2, rowTensor)
@@ -237,13 +302,188 @@ class _DependencyStats:
                 )
                 self.skipHeadCount += int(skipMask.sum().item()) * heads
 
-    def Values(self) -> Dict[str, Optional[float]]:
+            self._RecordCci(
+                torch,
+                alpha,
+                keyPositions,
+                positions,
+                chunkIndices,
+                id(module),
+            )
+
+    def _RecordCci(
+        self,
+        torch,
+        alpha,
+        keyPositions,
+        queryPositions: Sequence[int],
+        queryChunkIndices: Sequence[Optional[int]],
+        layerKey: int,
+    ) -> None:
+        """Accumulate CCI inter/intra mass for one layer and row batch."""
+        if not self.cciChunkOrder:
+            return
+
+        layerInter = self.cciInterSums.setdefault(layerKey, {})
+        layerIntra = self.cciIntraSums.setdefault(layerKey, {})
+        heads = int(alpha.shape[1])
+
+        for chunkIndex in self.cciChunkOrder:
+            rowMaskValues = [
+                queryChunkIndex == chunkIndex
+                for queryChunkIndex in queryChunkIndices
+            ]
+            if not any(rowMaskValues):
+                continue
+
+            rowMask = torch.tensor(
+                rowMaskValues,
+                device=alpha.device,
+                dtype=torch.bool,
+            )
+            chunkAlpha = alpha[:, :, rowMask, :]
+
+            # Cache-Craft's inter mass is split by preceding reusable chunk;
+            # normalization by |Ci|*|Cj| is applied in CciValues().
+            interByChunk = layerInter.setdefault(chunkIndex, {})
+            for priorIndex in self.cciPriorChunks.get(chunkIndex, ()):
+                priorPositions = self.cciChunkPositions[priorIndex]
+                priorTensor = torch.tensor(
+                    priorPositions,
+                    device=keyPositions.device,
+                    dtype=torch.long,
+                )
+                keyMask = (
+                    keyPositions.unsqueeze(0) == priorTensor.unsqueeze(1)
+                ).any(dim=0)
+                interByChunk[priorIndex] = interByChunk.get(
+                    priorIndex,
+                    0.0,
+                ) + float(
+                    chunkAlpha[..., keyMask].sum().item()
+                ) / heads
+
+            # Intra(Ci) is strict causal self-attention.  In particular, the
+            # current token's self key is excluded even though alpha includes
+            # it under the normal causal mask.
+            currentPositions = self.cciChunkPositions[chunkIndex]
+            currentTensor = torch.tensor(
+                currentPositions,
+                device=keyPositions.device,
+                dtype=torch.long,
+            )
+            currentQueryPositions = torch.tensor(
+                [
+                    queryPosition
+                    for queryPosition, queryChunkIndex in zip(
+                        queryPositions,
+                        queryChunkIndices,
+                    )
+                    if queryChunkIndex == chunkIndex
+                ],
+                device=keyPositions.device,
+                dtype=torch.long,
+            )
+            currentKeyMask = (
+                keyPositions.unsqueeze(0) == currentTensor.unsqueeze(1)
+            ).any(dim=0)
+            strictCausalMask = (
+                currentKeyMask.unsqueeze(0)
+                & (
+                    keyPositions.unsqueeze(0)
+                    < currentQueryPositions.unsqueeze(1)
+                )
+            )
+            layerIntra[chunkIndex] = layerIntra.get(
+                chunkIndex,
+                0.0,
+            ) + float(
+                (
+                    chunkAlpha
+                    * strictCausalMask.unsqueeze(0).unsqueeze(0)
+                ).sum().item()
+            ) / heads
+
+    def CciValues(self) -> Dict[str, Any]:
+        """Normalize layer-local CCI statistics and aggregate sample CCI."""
+        validChunks = [
+            chunkIndex
+            for chunkIndex in self.cciChunkOrder
+            if self.cciChunkPositions.get(chunkIndex)
+        ]
+        layerKeys = tuple(self.cciIntraSums)
+        if len(validChunks) < 2 or not layerKeys:
+            return _UnavailableCciValues()
+
+        chunkValues: List[Dict[str, Any]] = []
+        for currentOffset in range(1, len(validChunks)):
+            currentIndex = validChunks[currentOffset]
+            currentLength = len(self.cciChunkPositions[currentIndex])
+            priorIndices = validChunks[:currentOffset]
+
+            aByLayer: List[float] = []
+            bByLayer: List[float] = []
+            for layerKey in layerKeys:
+                layerInter = self.cciInterSums.get(layerKey, {})
+                interForCurrent = layerInter.get(currentIndex, {})
+                aLayer = sum(
+                    interForCurrent.get(priorIndex, 0.0)
+                    / (currentLength * len(self.cciChunkPositions[priorIndex]))
+                    for priorIndex in priorIndices
+                )
+                bLayer = self.cciIntraSums.get(layerKey, {}).get(
+                    currentIndex,
+                    0.0,
+                ) / (currentLength * currentLength)
+                aByLayer.append(aLayer)
+                bByLayer.append(bLayer)
+
+            aBar = sum(aByLayer) / len(aByLayer)
+            bBar = sum(bByLayer) / len(bByLayer)
+            ratio = aBar / max(bBar, _CCI_EPS)
+            chunkValues.append({
+                "chunk_index": currentIndex,
+                "token_count": currentLength,
+                "a_bar": aBar,
+                "b_bar": bBar,
+                "raw_ratio": ratio,
+                "cci": _StableSigmoid(ratio),
+                "b_near_zero": bBar <= _CCI_EPS,
+            })
+
+        if not chunkValues:
+            return _UnavailableCciValues()
+
+        totalTokens = sum(item["token_count"] for item in chunkValues)
+        weightedCci = sum(
+            item["token_count"] * item["cci"]
+            for item in chunkValues
+        ) / totalTokens
+        return {
+            "cci": weightedCci,
+            "cci_mean": sum(item["cci"] for item in chunkValues)
+            / len(chunkValues),
+            "cci_max": max(item["cci"] for item in chunkValues),
+            "cci_raw_ratio_weighted": sum(
+                item["token_count"] * item["raw_ratio"]
+                for item in chunkValues
+            ) / totalTokens,
+            "cci_chunks": chunkValues,
+            "cci_b_near_zero_chunks": [
+                item["chunk_index"]
+                for item in chunkValues
+                if item["b_near_zero"]
+            ],
+        }
+
+    def Values(self) -> Dict[str, Any]:
         if self.headCount == 0:
             return {
                 "missing_attention": None,
                 "value_weighted_dependency": None,
                 "missing_attention_skip_k": None,
                 "value_weighted_dependency_skip_k": None,
+                **self.CciValues(),
             }
 
         return {
@@ -259,6 +499,7 @@ class _DependencyStats:
                 if self.skipHeadCount
                 else None
             ),
+            **self.CciValues(),
         }
 
 
@@ -450,6 +691,7 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
                 "missing_attention_skip_k": None,
                 "value_weighted_dependency_skip_k": None,
                 "kv_deviation": None,
+                **_UnavailableCciValues(),
             }
 
         # Generation returns a full-prompt KV cache.  Compute the cache metric
@@ -462,7 +704,14 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
         )
         fullCacheHolder[0] = None
 
-        stats = _DependencyStats(tokenInfo, self.skipK)
+        cciChunks = [
+            (
+                chunkIndex,
+                tuple(fullIndex for fullIndex, _ in occurrence.tokenPairs),
+            )
+            for chunkIndex, occurrence in enumerate(occurrences, start=1)
+        ]
+        stats = _DependencyStats(tokenInfo, self.skipK, cciChunks)
         self._CaptureFullAttention(ids, tokenInfo, stats)
         values = stats.Values()
         values["kv_deviation"] = kvDeviation

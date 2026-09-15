@@ -21,7 +21,7 @@
 DatasetPath: /data/lyh/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /data1/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B #mistralai/Mistral-7B-Instruct-v0.2
+ModelPath: /data1/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-4b #mistralai/Mistral-7B-Instruct-v0.2
 
 # Shared context-window limit used by every model backend.
 MaxModelLen: 32768
