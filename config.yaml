@@ -21,7 +21,7 @@
 DatasetPath: /data/lyh/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /data1/lyh/.cache/modelscope/hub/models/Qwen/Qwen3-8B #mistralai/Mistral-7B-Instruct-v0.2
+ModelPath: /data1/lyh/.cache/modelscope/hub/models/mistralai/Mistral-7B-Instruct-v0.2 #mistralai/Mistral-7B-Instruct-v0.2
 
 # Shared context-window limit used by every model backend.
 MaxModelLen: 32768
@@ -31,7 +31,7 @@ MaxModelLen: 32768
 #   default  - use the model's generation_config.json (or config.json)
 #   override - use the sampling values listed below
 ModelConfig:
-  mode: greedy #default
+  mode: default
   temperature: 1.0
   top_p: 0.95
   top_k: 20

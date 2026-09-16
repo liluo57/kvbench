@@ -110,7 +110,11 @@ def Main() -> None:
         RolloutMethod(
             FullPrefillVllm(gpuMemoryUtilization=0.85),
             num_rollouts=10,
-            keep_individual_results=True
+            # Per-rollout performance and task-metric samples stay in the
+            # report. The generated text and Result.metadata are optional and
+            # are omitted to keep the report reasonably sized.
+            keep_individual_results=False,
+            keep_optional_metadata=False,
         )
     ]
 

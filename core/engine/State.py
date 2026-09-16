@@ -107,11 +107,28 @@ def MeanValue(stats: Dict[str, Any]) -> Any:
 
 
 def CoreReport(run: Dict[str, Any]) -> Dict[str, Any]:
-    """Project a per-pair run dict down to its per-task / system / method means."""
+    """Project a run to compact means plus available dispersion statistics.
+
+    The original short key (for example ``accuracy``) remains the mean for
+    compatibility. Explicit suffixed keys are added when the source report
+    contains them, so rollout reports expose ``accuracy_mean``,
+    ``accuracy_variance`` and ``accuracy_std`` without requiring consumers to
+    understand the nested report shape.
+    """
     core: Dict[str, Any] = {"method": run["method"], "task": run["task"]}
     for group in ("task_metrics", "system_metrics", "method_metrics"):
         for name, stats in run.get(group, {}).items():
             core[name] = MeanValue(stats)
+            if not isinstance(stats, dict):
+                continue
+            for suffix in ("mean", "variance", "std"):
+                sourceKey = (
+                    suffix
+                    if suffix in stats
+                    else f"{name}_{suffix}"
+                )
+                if sourceKey in stats:
+                    core[f"{name}_{suffix}"] = stats[sourceKey]
     return core
 
 

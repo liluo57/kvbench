@@ -61,20 +61,34 @@ def NormalizeScores(scores: Any) -> Dict[str, float]:
 
 
 def AggregateScores(
-    perCase: Dict[str, List[float]], *, includeSamples: bool = False
+    perCase: Dict[str, List[float]],
+    *,
+    includeSamples: bool = False,
+    includeStatistics: bool = False,
 ) -> Dict[str, Any]:
-    """Roll per-case score lists into ``{name: {"mean": ...}}`` per name.
+    """Roll per-case score lists into one stats dict per metric.
 
     An empty list for a name yields ``{"mean": None}`` so the field is still
     present in the report — callers can distinguish "no data" from "missing
     metric" without a key check. With ``includeSamples``, each score's input-
-    order values are also returned under ``"samples"``.
+    order values are also returned under ``"samples"``. ``includeStatistics``
+    adds population variance and standard deviation. It is opt-in so the
+    historical report shape for non-rollout Methods remains unchanged.
     """
     result: Dict[str, Any] = {}
     for name, values in perCase.items():
         stats: Dict[str, Any] = {
             "mean": (sum(values) / len(values)) if values else None
         }
+        if includeStatistics:
+            if values:
+                mean = stats["mean"]
+                variance = sum((value - mean) ** 2 for value in values) / len(values)
+                stats["variance"] = variance
+                stats["std"] = variance ** 0.5
+            else:
+                stats["variance"] = None
+                stats["std"] = None
         if includeSamples:
             stats["samples"] = list(values)
         result[name] = stats

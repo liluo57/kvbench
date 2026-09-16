@@ -7,6 +7,7 @@ from core.Method import Method
 from core.Result import Result
 from core.Task import Case, Task
 from core.Worker import EvaluatePair
+from core.engine.State import CoreReport
 from methods import RolloutMethod
 from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
@@ -47,6 +48,11 @@ class ScalarTask(Task):
 
     def Evaluate(self, result, metadata):
         return {"quality": float(result.output)}
+
+
+class TextAccuracyTask(ScalarTask):
+    def Evaluate(self, result, metadata):
+        return {"accuracy": float(result.output == "ok")}
 
 
 def test_rollout_uses_population_statistics_and_keeps_one_result_per_input():
@@ -122,6 +128,8 @@ def test_keep_individual_results_false_keeps_aggregate_and_serializes_without_ra
         batchSize=1,
     )
     assert report["task_metrics"]["quality"]["mean"] == pytest.approx(2.0)
+    assert report["task_metrics"]["quality"]["variance"] == pytest.approx(0.0)
+    assert report["task_metrics"]["quality"]["std"] == pytest.approx(0.0)
     assert "results" not in report["sample_results"][0]["rollout"]
     json.dumps(report)
 
@@ -154,3 +162,84 @@ def test_task_metrics_support_multiple_scalar_metrics():
     sample = report["sample_results"][0]
     assert sample["rollout_metrics"]["quality"]["variance"] == pytest.approx(2 / 3)
     assert sample["rollout_metrics"]["cost_proxy"]["mean"] == pytest.approx(4)
+
+
+def test_text_rollouts_put_primary_statistics_on_rollout_and_report():
+    report = EvaluatePair(
+        TextAccuracyTask(1),
+        RolloutMethod(
+            SequenceMethod([["ok"], ["bad"], ["ok"]]),
+            num_rollouts=3,
+            keep_individual_results=False,
+        ),
+        metrics=[],
+        batchSize=1,
+        recordAllSamples=True,
+    )
+
+    sample = report["sample_results"][0]
+    assert sample["rollout"]["mean"] == pytest.approx(2 / 3)
+    assert sample["rollout"]["variance"] == pytest.approx(2 / 9)
+    assert sample["rollout"]["std"] == pytest.approx(math.sqrt(2 / 9))
+    assert sample["rollout_metrics"]["accuracy"]["samples"] == [1.0, 0.0, 1.0]
+    assert report["task_metrics"]["accuracy"] == {
+        "mean": pytest.approx(2 / 3),
+        "variance": pytest.approx(0.0),
+        "std": pytest.approx(0.0),
+        "samples": [pytest.approx(2 / 3)],
+    }
+
+
+def test_optional_metadata_can_be_omitted_without_dropping_performance_metrics():
+    class MeasuredMethod(SequenceMethod):
+        def Run(self, data, retainOutput=None, maxNewTokens=None):
+            results = super().Run(data, retainOutput, maxNewTokens)
+            for result in results:
+                result.performance.update(
+                    {"ttft": 0.1, "num_output_tokens": 2, "total_time": 0.2}
+                )
+                result.metadata.update(
+                    {"backend": "vllm", "stop_reason": "stop", "n_input": 10}
+                )
+            return results
+
+    report = EvaluatePair(
+        TextAccuracyTask(1),
+        RolloutMethod(
+            MeasuredMethod([["ok"], ["bad"]]),
+            num_rollouts=2,
+            keep_individual_results=True,
+            keep_optional_metadata=False,
+        ),
+        metrics=[],
+        batchSize=1,
+        recordAllSamples=True,
+    )
+
+    rollout = report["sample_results"][0]["rollout"]
+    assert rollout["metrics"]["performance"]["ttft"]["samples"] == [0.1, 0.1]
+    assert rollout["metrics"]["throughput"]["samples"] == [10.0, 10.0]
+    assert "metadata" not in rollout["metrics"]
+    assert rollout["results"][0]["performance"]["ttft"] == 0.1
+    assert rollout["results"][0]["metadata"] == {}
+
+
+def test_core_report_keeps_mean_alias_and_adds_rollout_statistics():
+    core = CoreReport(
+        {
+            "method": "rollout",
+            "task": "text",
+            "task_metrics": {
+                "accuracy": {
+                    "mean": 0.75,
+                    "variance": 0.0625,
+                    "std": 0.25,
+                }
+            },
+        }
+    )
+
+    assert core["accuracy"] == pytest.approx(0.75)
+    assert core["accuracy_mean"] == pytest.approx(0.75)
+    assert core["accuracy_variance"] == pytest.approx(0.0625)
+    assert core["accuracy_std"] == pytest.approx(0.25)

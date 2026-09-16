@@ -48,7 +48,9 @@ def _Stats(values: Sequence[Any]) -> Optional[Dict[str, float]]:
 
 def _AggregateMapping(
     values: Sequence[Mapping[str, Any]],
-) -> tuple[Dict[str, Any], Dict[str, Dict[str, float]]]:
+    *,
+    includeSamples: bool = False,
+) -> tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
     """Aggregate only scalar mapping fields; retain metadata otherwise.
 
     Numeric fields are averaged independently. Nested structures and
@@ -68,7 +70,7 @@ def _AggregateMapping(
                 keys.append(key)
 
     aggregate: Dict[str, Any] = {}
-    metrics: Dict[str, Dict[str, float]] = {}
+    metrics: Dict[str, Dict[str, Any]] = {}
     for key in keys:
         present = [value[key] for value in values if key in value]
         if len(present) != len(values):
@@ -80,7 +82,12 @@ def _AggregateMapping(
         stats = _Stats(present)
         if stats is not None:
             aggregate[key] = stats["mean"]
-            metrics[str(key)] = stats
+            metricStats: Dict[str, Any] = dict(stats)
+            if includeSamples:
+                # Keep the original per-rollout metric values even when the
+                # much larger raw Result objects are omitted from the report.
+                metricStats["samples"] = list(present)
+            metrics[str(key)] = metricStats
         else:
             aggregate[key] = present[0]
     return aggregate, metrics
@@ -125,6 +132,7 @@ class RolloutMethod(Method):
     # The Worker only activates the three generic Case-result hooks for an
     # explicit opt-in. Ordinary Methods retain the historical report shape.
     _supportsCaseResultHooks = True
+    _includeTaskMetricStatistics = True
     _rolloutMetadataKey = "rollout"
 
     def __init__(
@@ -133,6 +141,7 @@ class RolloutMethod(Method):
         num_rollouts: int = 10,
         keep_individual_results: bool = True,
         *,
+        keep_optional_metadata: bool = True,
         tag: Optional[str] = None,
     ):
         if not isinstance(base_method, Method):
@@ -143,6 +152,8 @@ class RolloutMethod(Method):
             raise ValueError("num_rollouts must be at least 1")
         if not isinstance(keep_individual_results, bool):
             raise TypeError("keep_individual_results must be a bool")
+        if not isinstance(keep_optional_metadata, bool):
+            raise TypeError("keep_optional_metadata must be a bool")
 
         # Match the wrapped lifecycle contract. In particular, stateful
         # methods that require one Case per batch must keep that restriction.
@@ -155,6 +166,7 @@ class RolloutMethod(Method):
         self.base_method = base_method
         self.num_rollouts = num_rollouts
         self.keep_individual_results = keep_individual_results
+        self.keep_optional_metadata = keep_optional_metadata
         self.method_metrics = tuple(base_method.method_metrics)
         self._pendingRolloutResults: Dict[int, List[Result]] = {}
 
@@ -258,22 +270,66 @@ class RolloutMethod(Method):
                     names.append(name)
 
         aggregate: Dict[str, float] = {}
-        rolloutStats: Dict[str, Dict[str, float]] = {}
+        rolloutStats: Dict[str, Dict[str, Any]] = {}
         for name in names:
             values = [scores[name] for scores in perRollout if name in scores]
             if len(values) != len(perRollout):
                 # A missing metric is not silently treated as zero.
                 continue
-            stats = _Stats([float(value) for value in values])
+            stats = _Stats(values)
             if stats is None:
                 continue
             aggregate[name] = stats["mean"]
-            rolloutStats[name] = stats
+            metricStats: Dict[str, Any] = dict(stats)
+            # Task scores are metrics, not metadata. Keep every raw score so
+            # callers can recompute distributions without retaining Results.
+            metricStats["samples"] = list(values)
+            rolloutStats[name] = metricStats
 
         rollout = result.metadata.get(self._rolloutMetadataKey)
         if isinstance(rollout, Mapping):
             rollout["task_metrics"] = rolloutStats
+            self._SetPrimaryTaskStats(result, rolloutStats)
         return aggregate
+
+    @staticmethod
+    def _SetPrimaryTaskStats(
+        result: Result, taskMetrics: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Expose a stable primary task metric on the legacy rollout aliases.
+
+        ``rollout.mean`` predates task-aware scoring and originally referred to
+        numeric ``Result.output``. Language-generation outputs are strings, so
+        that value was ``null`` even though accuracy had already been scored.
+        Prefer accuracy-like names, then use the first returned task metric.
+        Per-metric values remain authoritative under ``task_metrics``.
+        """
+        if not taskMetrics:
+            return
+        name = next(
+            (
+                candidate
+                for candidate in ("accuracy", "acc", "score", "reward")
+                if candidate in taskMetrics
+            ),
+            next(iter(taskMetrics)),
+        )
+        stats = taskMetrics[name]
+        if not isinstance(stats, Mapping):
+            return
+        rollout = result.metadata.get(RolloutMethod._rolloutMetadataKey)
+        if not isinstance(rollout, Mapping):
+            return
+        rollout["primary_metric"] = name
+        for key in ("mean", "variance", "std"):
+            rollout[key] = stats.get(key)
+        result.metadata.update(
+            {
+                "rollout_mean": stats.get("mean"),
+                "rollout_variance": stats.get("variance"),
+                "rollout_std": stats.get("std"),
+            }
+        )
 
     def SampleResult(
         self,
@@ -292,18 +348,24 @@ class RolloutMethod(Method):
         rollout = result.metadata.get(self._rolloutMetadataKey)
         if isinstance(rollout, Mapping):
             taskMetrics = rollout.get("task_metrics", {})
-            record["rollout"] = _SerializeValue(rollout)
-            record["rollout_metrics"] = _SerializeValue(taskMetrics)
+            record["rollout"] = _SerializeValue(
+                rollout,
+                keepOptionalMetadata=self.keep_optional_metadata,
+            )
+            record["rollout_metrics"] = _SerializeValue(
+                taskMetrics,
+                keepOptionalMetadata=self.keep_optional_metadata,
+            )
             if isinstance(taskMetrics, Mapping) and taskMetrics:
-                first = next(iter(taskMetrics.values()))
-                if isinstance(first, Mapping):
-                    record.update(
-                        {
-                            "rollout_mean": first.get("mean"),
-                            "rollout_variance": first.get("variance"),
-                            "rollout_std": first.get("std"),
-                        }
-                    )
+                # These aliases intentionally mirror the primary metric chosen
+                # by _SetPrimaryTaskStats (accuracy/acc/score/reward first).
+                record.update(
+                    {
+                        "rollout_mean": rollout.get("mean"),
+                        "rollout_variance": rollout.get("variance"),
+                        "rollout_std": rollout.get("std"),
+                    }
+                )
         return record
 
     def _AggregateSample(
@@ -317,10 +379,10 @@ class RolloutMethod(Method):
         output = outputStats["mean"] if outputStats is not None else outputs[0]
 
         performance, performanceMetrics = _AggregateMapping(
-            [result.performance for result in individual]
+            [result.performance for result in individual], includeSamples=True
         )
         metadata, metadataMetrics = _AggregateMapping(
-            [result.metadata for result in individual]
+            [result.metadata for result in individual], includeSamples=True
         )
 
         # Numeric output is the most natural scalar quality signal for direct
@@ -332,17 +394,43 @@ class RolloutMethod(Method):
                 result.metadata.get("quality") for result in individual
             ]
             primaryStats = _Stats(qualityValues)
+        primaryMetric = None
+        if outputStats is not None:
+            primaryMetric = "output"
+        elif primaryStats is not None:
+            primaryMetric = "quality"
+
+        metricSummaries: Dict[str, Any] = {
+            # Result.performance is the mandatory raw metric namespace.
+            "performance": performanceMetrics,
+        }
+        if self.keep_optional_metadata:
+            metricSummaries["metadata"] = metadataMetrics
+
+        throughputValues = []
+        for raw in individual:
+            tokens = raw.performance.get("num_output_tokens")
+            total = raw.performance.get(TotalTimeKey)
+            if _IsScalar(tokens) and _IsScalar(total) and float(total) > 0:
+                throughputValues.append(float(tokens) / float(total))
+        throughputStats = _Stats(throughputValues)
+        if throughputStats is not None:
+            throughputMetricStats: Dict[str, Any] = dict(throughputStats)
+            throughputMetricStats["samples"] = list(throughputValues)
+            # Throughput is derived from mandatory performance fields, so it
+            # remains available even when all metadata is disabled.
+            metricSummaries["throughput"] = throughputMetricStats
+
+        if outputStats is not None:
+            metricSummaries["output"] = dict(outputStats)
 
         rollout: Dict[str, Any] = {
             "num_rollouts": len(individual),
+            "primary_metric": primaryMetric,
             "mean": primaryStats["mean"] if primaryStats else None,
             "variance": primaryStats["variance"] if primaryStats else None,
             "std": primaryStats["std"] if primaryStats else None,
-            "metrics": {
-                "output": outputStats,
-                "performance": performanceMetrics,
-                "metadata": metadataMetrics,
-            },
+            "metrics": metricSummaries,
             # These are batch-level timings: one Method.Run on a batch can
             # serve multiple original samples. Per-sample performance remains
             # in Result.performance and its rollout metric summaries.
@@ -377,18 +465,54 @@ class RolloutMethod(Method):
         )
 
 
-def _SerializeValue(value: Any) -> Any:
-    """Serialize nested rollout Results without changing core Result."""
+def _SerializeValue(
+    value: Any,
+    *,
+    keepOptionalMetadata: bool = True,
+) -> Any:
+    """Serialize nested rollout Results without changing core Result.
+
+    Performance is always retained. When optional metadata is disabled, raw
+    Result metadata is omitted entirely. Metrics have their own stable
+    locations: performance metrics stay under ``rollout.metrics.performance``
+    and task metrics stay under ``rollout.task_metrics``. This prevents a
+    metadata field from accidentally becoming part of the metric contract
+    while still retaining all metric samples.
+    """
     if isinstance(value, Result):
+        rawMetadata = value.metadata
+        if not keepOptionalMetadata:
+            rawMetadata = {}
         return {
-            "output": _SerializeValue(value.output),
-            "performance": _SerializeValue(value.performance),
-            "metadata": _SerializeValue(value.metadata),
+            "output": _SerializeValue(
+                value.output,
+                keepOptionalMetadata=keepOptionalMetadata,
+            ),
+            "performance": _SerializeValue(
+                value.performance,
+                keepOptionalMetadata=keepOptionalMetadata,
+            ),
+            "metadata": _SerializeValue(
+                rawMetadata,
+                keepOptionalMetadata=keepOptionalMetadata,
+            ),
         }
     if isinstance(value, Mapping):
-        return {str(key): _SerializeValue(item) for key, item in value.items()}
+        return {
+            str(key): _SerializeValue(
+                item,
+                keepOptionalMetadata=keepOptionalMetadata,
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
-        return [_SerializeValue(item) for item in value]
+        return [
+            _SerializeValue(
+                item,
+                keepOptionalMetadata=keepOptionalMetadata,
+            )
+            for item in value
+        ]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)

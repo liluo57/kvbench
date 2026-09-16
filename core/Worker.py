@@ -66,7 +66,9 @@ def EvaluatePair(
         "task": task.Label,
         "cases": nCases,
         "task_metrics": AggregateScores(
-            taskScores, includeSamples=recordAllSamples
+            taskScores,
+            includeSamples=recordAllSamples,
+            includeStatistics=getattr(method, "_includeTaskMetricStatistics", False),
         ),
         "system_metrics": {
             metric.name: _MetricSummary(metric, recordAllSamples)

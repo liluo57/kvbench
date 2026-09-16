@@ -79,17 +79,26 @@ from methods import FullPrefillTransformer, RolloutMethod
 method = RolloutMethod(
     base_method=FullPrefillTransformer(gpuNums=1),
     num_rollouts=10,
-    keep_individual_results=True,
+    keep_individual_results=False,
+    keep_optional_metadata=False,
 )
 ```
 
 Numeric Result fields use population variance (`ddof=0`). The existing task
-scorer is applied to each raw rollout and its scalar task metrics are averaged
-once per original sample. Rollout-aware runs add one record per Case under
+scorer is applied to each raw rollout and its scalar task metrics are retained
+with `mean`, `variance`, `std`, and raw `samples`, then averaged once per
+original sample. Rollout-aware runs add one record per Case under
 `sample_results` in the pair report, with `sample_id`, `rollout_mean`,
-`rollout_variance`, `rollout_std`, and a nested `rollout` summary. Set
-`keep_individual_results=False` to omit nested raw rollout Results while
-retaining the aggregate statistics.
+`rollout_variance`, `rollout_std`, and a nested `rollout` summary. The
+report-level task metrics also expose `mean`, `variance`, and `std`; the compact
+`core.json` adds suffixed keys such as `accuracy_mean` and `accuracy_std`.
+
+Performance metrics are always retained. Set `keep_individual_results=False`
+to omit generated text and nested raw Results while retaining per-rollout
+performance metric samples and task-metric samples. All raw `Result.metadata`
+is optional; set `keep_optional_metadata=True` when diagnostic metadata such as
+vLLM stop reasons is needed in nested raw Results. The default entry point
+disables both optional payloads.
 
 ---
 
