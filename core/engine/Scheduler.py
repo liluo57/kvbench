@@ -89,6 +89,7 @@ class Scheduler:
                 childConnection,
                 self.ctx.eventQueue,
                 instanceLog,
+                self.engine.recordAllSamples,
             ),
         )
         process.start()
@@ -527,6 +528,35 @@ class Scheduler:
             if methodIndex is None:
                 break
             self.spawnWorker(methodIndex)
+
+    def markUnschedulable(self, ctx: "RunContext") -> None:
+        """Fail pending pairs that can no longer fit in the surviving pool.
+
+        A GPU release failure removes capacity permanently. Once workers and
+        cooling GPUs are accounted for, a method requiring more GPUs than
+        remain can never be scheduled and must not leave the main loop
+        spinning on an impossible queue.
+        """
+        availableGpuIds = set(ctx.freeGpus) | set(ctx.coolingGpus)
+        for worker in ctx.workers.values():
+            availableGpuIds.update(worker.gpuIds)
+        availableCount = len(availableGpuIds)
+        for methodIndex, method in enumerate(ctx.methods):
+            if method.gpuNums <= availableCount:
+                continue
+            pending = ctx.pending[methodIndex]
+            while pending:
+                taskIndex = pending.popleft()
+                self.reporter.pairFailure(
+                    methodIndex,
+                    taskIndex,
+                    error=(
+                        f"requires {method.gpuNums} GPU(s), but only "
+                        f"{availableCount} remain available after GPU "
+                        f"release failures: {sorted(availableGpuIds)}"
+                    ),
+                    kind="unschedulable",
+                )
 
     def finalizeTerminal(self, ctx: "RunContext") -> bool:
         """Stop the remaining idle workers when every (method, task) pair is

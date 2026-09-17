@@ -169,6 +169,72 @@ def PassageChunks(context: str, *, prefix: str = "") -> List[str]:
     return parts
 
 
+def ParagraphChunks(
+    context: str, nChunks: int, *, prefix: str = ""
+) -> List[str]:
+    """Split text into at most ``nChunks`` naturally bounded chunks.
+
+    Blank-line-separated paragraphs are preferred.  Some LongBench snapshots
+    (notably GovReport) flatten the source document into one line, so sentence
+    boundaries are used as a fallback for those records.  Chunk boundaries are
+    selected near equal character positions, and ``"".join(result)`` always
+    reproduces ``prefix + context`` exactly.
+    """
+    if not isinstance(nChunks, int) or isinstance(nChunks, bool) or nChunks < 1:
+        raise ValueError("nChunks must be a positive integer")
+
+    context = str(context)
+    if not context:
+        return []
+    if nChunks == 1:
+        return [prefix + context]
+
+    # A paragraph boundary starts at the blank-line separator. The separator
+    # stays with the following chunk, so the preceding chunk ends at the end
+    # of a paragraph while the source text remains byte-for-byte unchanged.
+    paragraphStarts = [0]
+    for match in re.finditer(r"(?:\r?\n[ \t]*){2,}", context):
+        if match.start() > 0 and match.end() < len(context):
+            paragraphStarts.append(match.start())
+
+    if len(paragraphStarts) >= nChunks:
+        boundaries = paragraphStarts
+    else:
+        # GovReport's checked-in LongBench snapshot has no paragraph markers.
+        # Prefer a sentence boundary to cutting through a sentence or word.
+        boundaries = [0]
+        for match in re.finditer(
+            r"[.!?](?:[\"')\]]+)?(?=\s+[A-Z])", context
+        ):
+            end = match.end()
+            if end < len(context):
+                boundaries.append(end)
+
+        # Very short/synthetic text may not contain recognisable sentences;
+        # return its only natural unit rather than introducing a hard cut.
+        if len(boundaries) < 2:
+            return [prefix + context]
+
+    # ``boundaries`` contains the start of each natural unit. Select cuts close
+    # to equal character positions while leaving enough units for both sides.
+    cuts = boundaries[1:]
+    nParts = min(nChunks, len(boundaries))
+    selected: List[int] = []
+    firstAvailable = 0
+    for partIndex in range(1, nParts):
+        lastAvailable = len(cuts) - (nParts - partIndex)
+        target = len(context) * partIndex / nParts
+        available = cuts[firstAvailable : lastAvailable + 1]
+        cut = min(available, key=lambda position: abs(position - target))
+        selected.append(cut)
+        firstAvailable = cuts.index(cut, firstAvailable) + 1
+
+    starts = [0, *selected, len(context)]
+    parts = [context[starts[i] : starts[i + 1]] for i in range(len(starts) - 1)]
+    parts[0] = prefix + parts[0]
+    return parts
+
+
 # ---------------------------------------------------------------------------
 # Knowledge-base base task
 # ---------------------------------------------------------------------------
@@ -191,8 +257,9 @@ class KBBase(Task):
         startIdx: int = 0,
         dataDir: Optional[str] = None,
         tag: Optional[str] = None,
+        maxNewTokens: int = 64,
     ):
-        super().__init__(tag=tag)
+        super().__init__(tag=tag, maxNewTokens=maxNewTokens)
         self.dataset = dataset or self.defaultDataset
         self.maxSamples = maxSamples
         self.startIdx = startIdx
@@ -227,6 +294,15 @@ class KBBase(Task):
         return samples
 
     # ---------------------------------------------------------------- cases
+    def _ShouldSkipPrompt(self, fullPrompt: str, modelPath: str) -> bool:
+        """Return whether a rendered prompt should be excluded.
+
+        Most tasks have no prompt-length restriction.  Long-context tasks can
+        override this hook after the model-specific chat template has been
+        applied, which keeps the filter aligned with what the backend sees.
+        """
+        return False
+
     def Cases(self) -> Iterator[Case]:
         from helpers.backends.ModelAdapter import render_user_prompt
         modelPath = ModelPath()
@@ -239,6 +315,8 @@ class KBBase(Task):
                 "".join(chunks) + suffix,
                 modelPath=modelPath, thinking=False,
             )
+            if self._ShouldSkipPrompt(fullPrompt, modelPath):
+                continue
             metadata = {
                 "case_id": i,
                 "question": s.get("question", s.get("input")),

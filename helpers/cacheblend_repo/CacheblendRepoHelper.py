@@ -93,6 +93,62 @@ def _repair_plan(segments: list, prefix_len: int, ratio: float) -> dict:
     }
 
 
+def _indexed_causal_mask(cfm: dict, native_mask):
+    """Build the causal bias used when the check query rows are sparse.
+
+    xFormers' CUTLASS kernel requires the stride of the query-row dimension
+    to be aligned to 8.  Keep the padded key dimension in the actual 5-D
+    tensor before slicing it; slicing a 2-D tensor and then ``view``-ing it
+    allows PyTorch to collapse a one-row dimension and loses that alignment.
+    """
+    import torch
+
+    indices = cfm.get("imp_indices")
+    key_len = int(cfm.get("org_seq_len") or 0)
+    if indices is None or key_len <= 0:
+        return native_mask()
+
+    rows = indices.to(device=indices.device, dtype=torch.int64)
+    padded_key_len = (key_len + 7) // 8 * 8
+    keys = torch.arange(
+        padded_key_len, device=rows.device, dtype=torch.int64
+    )
+    allowed = keys.unsqueeze(0) <= rows.unsqueeze(1)
+    dtype = cfm.get("kv_cache_dtype") or torch.float32
+    neg_inf = torch.finfo(dtype).min
+    bias = torch.where(
+        allowed,
+        torch.zeros((), device=rows.device, dtype=dtype),
+        torch.full((), neg_inf, device=rows.device, dtype=dtype),
+    )
+
+    if rows.numel() == 1:
+        # Keep the padded key axis in the 5-D layout while slicing it. In
+        # particular, this preserves stride(-2) == padded_key_len when rows
+        # has length one (the recompratio=0 path selects only the native
+        # suffix). The multi-row path below intentionally remains identical
+        # to the previous implementation.
+        bias = bias.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        bias = bias[..., :key_len]
+        return bias.expand(
+            1,
+            cfm["_num_kv_heads"],
+            cfm["_num_queries_per_kv"],
+            rows.numel(),
+            key_len,
+        )
+
+    # Preserve the existing construction for all multi-token check passes.
+    bias = bias[:, :key_len]
+    return bias.view(1, 1, 1, rows.numel(), key_len).expand(
+        1,
+        cfm["_num_kv_heads"],
+        cfm["_num_queries_per_kv"],
+        rows.numel(),
+        key_len,
+    )
+
+
 class CacheBlendWorker:
     def __init__(self, args):
         # Heavy deps load only inside this subprocess (see module docstring).
@@ -136,6 +192,7 @@ class CacheBlendWorker:
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_model_len=args.max_model_len,
             max_num_seqs=args.max_num_seqs,
+            enforce_eager=args.enforce_eager,
             **({"tokenizer_mode": "slow"} if self._isQwen3 else {}),
         )
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -278,13 +335,19 @@ class CacheBlendWorker:
             runner.max_context_len_to_capture = 0
         return (runner, old)
 
-    def _generateWithRetention(self, fullIds, retain_output=False):
+    def _generateWithRetention(
+        self, fullIds, retain_output=False, max_new_tokens=None
+    ):
         if not retain_output:
-            return self._Generate(fullIds)
+            return self._Generate(fullIds, max_new_tokens=max_new_tokens)
         self._beginRetainOutput()
         state = self._setRetainEager(True)
         try:
-            return self._Generate(fullIds, retain_output=True)
+            return self._Generate(
+                fullIds,
+                retain_output=True,
+                max_new_tokens=max_new_tokens,
+            )
         finally:
             self._retainCollector = None
             if state is not None and state[1] is not None:
@@ -349,10 +412,29 @@ class CacheBlendWorker:
                 key_len,
             )
 
+        def zero_ratio_indexed_causal_mask():
+            """Use the aligned single-row mask for the zero-ratio case."""
+            import torch
+
+            indices = cfm.get("imp_indices")
+            key_len = int(cfm.get("org_seq_len") or 0)
+            if indices is None or key_len <= 0:
+                return native_mask()
+            rows = indices.to(device=indices.device, dtype=torch.int64)
+            if rows.numel() != 1:
+                # Preserve the original construction for zero-ratio requests
+                # that also have forced fresh positions.
+                return indexed_causal_mask()
+            return _indexed_causal_mask(cfm, native_mask)
+
         # The backend resolves this symbol at call time. Returning a Tensor is
         # intentional: xFormers kernels accept tensor biases, while an ad-hoc
         # AttentionBias subclass would be rejected during operator dispatch.
-        backend.LowerTriangularFromBottomRightMask = indexed_causal_mask
+        backend.LowerTriangularFromBottomRightMask = (
+            zero_ratio_indexed_causal_mask
+            if float(self.args.recomp_ratio) == 0.0
+            else indexed_causal_mask
+        )
 
     def _registerOutOfTreeModel(self, model: str) -> None:
         """Register the model's architecture if the fork does not know it.
@@ -498,20 +580,32 @@ class CacheBlendWorker:
         }
 
     # ---------------------------------------------------------------- fuse
-    def _Generate(self, fullIds: list, retain_output=False):
+    def _Generate(
+        self,
+        fullIds: list,
+        retain_output=False,
+        max_new_tokens=None,
+    ):
         """Decode ``fullIds``, returning the standard result dict."""
+        maxNewTokens = (
+            self.args.max_new_tokens
+            if max_new_tokens is None
+            else int(max_new_tokens)
+        )
+        if maxNewTokens < 1:
+            raise ValueError("max_new_tokens must be at least 1")
         t0 = time.perf_counter()
         out = self.llm.generate(
             prompt_token_ids=[fullIds],
             sampling_params=self._SamplingParams(
-                self.args.max_new_tokens + (1 if retain_output else 0)
+                maxNewTokens + (1 if retain_output else 0)
             ),
         )
         r = out[0]
         ttft = r.metrics.first_token_time - r.metrics.first_scheduled_time
         resp = r.outputs[0]
         token_ids = list(resp.token_ids)
-        visible_ids = token_ids[:self.args.max_new_tokens]
+        visible_ids = token_ids[:maxNewTokens]
         retained = self._endRetainOutput() if retain_output else None
         retained_tokens = 0
         if retain_output and retained is not None:
@@ -620,7 +714,12 @@ class CacheBlendWorker:
             "requested": maximum,
         }
 
-    def Fuse(self, parts: list, retain_output: bool = False):
+    def Fuse(
+        self,
+        parts: list,
+        retain_output: bool = False,
+        max_new_tokens=None,
+    ):
         """Fuse cached and fresh spans appearing anywhere in one prompt.
 
         ``parts`` has the form::
@@ -714,7 +813,11 @@ class CacheBlendWorker:
         self.cfm["recomp_ratio"] = effectiveRatio
         try:
             generationStart = time.perf_counter()
-            resp = self._generateWithRetention(fullIds, retain_output=retain_output)
+            resp = self._generateWithRetention(
+                fullIds,
+                retain_output=retain_output,
+                max_new_tokens=max_new_tokens,
+            )
         finally:
             self.cfm["recomp_ratio"] = oldRatio
 
@@ -741,7 +844,13 @@ class CacheBlendWorker:
             )
         return resp
 
-    def FuseSuffix(self, chunks: list, suffix: str, retain_output: bool = False):
+    def FuseSuffix(
+        self,
+        chunks: list,
+        suffix: str,
+        retain_output: bool = False,
+        max_new_tokens=None,
+    ):
         """Legacy contiguous-prefix + fresh-suffix fuse path."""
         requestStart = time.perf_counter()
         if not chunks:
@@ -795,7 +904,11 @@ class CacheBlendWorker:
         self.engine.model.old_kvs = oldKvs
 
         generationStart = time.perf_counter()
-        resp = self._generateWithRetention(fullIds, retain_output=retain_output)
+        resp = self._generateWithRetention(
+            fullIds,
+            retain_output=retain_output,
+            max_new_tokens=max_new_tokens,
+        )
         setupTime = generationStart - requestStart
         resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
         resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
@@ -803,7 +916,7 @@ class CacheBlendWorker:
         resp["reuse_ratio"] = self._reuseRatio(len(fullIds), reusedTokens)
         return resp
 
-    def Full(self, text: str, retain_output: bool = False):
+    def Full(self, text: str, retain_output: bool = False, max_new_tokens=None):
         """Generate the whole prompt from scratch (no reuse of cached KVs)."""
         requestStart = time.perf_counter()
         ids = self.tokenizer.encode(text, add_special_tokens=False)
@@ -813,7 +926,11 @@ class CacheBlendWorker:
         self.cfm["check"] = False
         self.engine.model.old_kvs = [[None, None]] * len(self.layers)
         generationStart = time.perf_counter()
-        resp = self._generateWithRetention(ids, retain_output=retain_output)
+        resp = self._generateWithRetention(
+            ids,
+            retain_output=retain_output,
+            max_new_tokens=max_new_tokens,
+        )
         setupTime = generationStart - requestStart
         resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
         resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
@@ -842,17 +959,30 @@ class CacheBlendWorker:
                     _stdout(self.Reserve(req.get("parts_batch", [])))
                 elif op == "fuse":
                     if "parts" in req:
-                        _stdout(self.Fuse(req["parts"], bool(req.get("retain_output", False))))
+                        _stdout(
+                            self.Fuse(
+                                req["parts"],
+                                bool(req.get("retain_output", False)),
+                                req.get("max_new_tokens"),
+                            )
+                        )
                     else:
                         _stdout(
                             self.FuseSuffix(
                                 req["chunks"],
                                 req.get("suffix", ""),
                                 bool(req.get("retain_output", False)),
+                                req.get("max_new_tokens"),
                             )
                         )
                 elif op == "full":
-                    _stdout(self.Full(req["text"], bool(req.get("retain_output", False))))
+                    _stdout(
+                        self.Full(
+                            req["text"],
+                            bool(req.get("retain_output", False)),
+                            req.get("max_new_tokens"),
+                        )
+                    )
                 elif op == "reset":
                     _stdout(self.Reset())
                 elif op == "close":
@@ -875,10 +1005,15 @@ def Main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--max_new_tokens", type=int, default=64)
     ap.add_argument("--max_model_len", type=int, default=32768)
-    ap.add_argument("--gpu_memory_utilization", type=float, default=0.7)
+    ap.add_argument("--gpu_memory_utilization", type=float, default=0.8)
     ap.add_argument("--recomp_ratio", type=float, default=0.15)
     ap.add_argument("--sampling_config", default="{}")
     ap.add_argument("--max_num_seqs", type=int, default=64)
+    ap.add_argument(
+        "--enforce_eager",
+        action="store_true",
+        help="disable CUDA-graph decode (diagnostic; CacheBlend normally needs graphs)",
+    )
     ap.add_argument("--max_collect_tokens", type=int, default=3500,
                     help="token budget per batched collect generate")
     args = ap.parse_args()

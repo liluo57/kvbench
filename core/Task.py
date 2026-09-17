@@ -53,14 +53,29 @@ class Task(ABC):
     #: a knob's value: ``name="niah"`` + ``tag="shuffle"`` renders as
     #: ``niah(shuffle)``. Set via the constructor's ``tag`` argument.
     tag: Optional[str] = None
+    #: Default generation budget for this task family. Subclasses override it
+    #: when their benchmark needs longer answers.
+    defaultMaxNewTokens: int = 64
 
-    def __init__(self, *, tag: Optional[str] = None):
+    def __init__(
+        self,
+        *,
+        tag: Optional[str] = None,
+        maxNewTokens: Optional[int] = None,
+    ):
         """Create a lightweight task configuration.
 
         Subclasses must chain through ``super().__init__()`` (passing
         ``tag``) so :attr:`tag` is set uniformly on every subclass.
         """
         self.tag = tag
+        if maxNewTokens is None:
+            maxNewTokens = self.defaultMaxNewTokens
+        if isinstance(maxNewTokens, bool) or not isinstance(maxNewTokens, int):
+            raise TypeError("maxNewTokens must be an integer")
+        if maxNewTokens < 1:
+            raise ValueError("maxNewTokens must be at least 1")
+        self.maxNewTokens = maxNewTokens
 
     @property
     def Label(self) -> str:

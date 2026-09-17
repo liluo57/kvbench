@@ -599,60 +599,90 @@ def LoadedImageReferences(output: str) -> list[str]:
     return references
 
 
+def DockerHubMirrorReference(image: str) -> str | None:
+    """Return a Docker Hub proxy reference for an unqualified image name."""
+
+    components = image.split("/", 1)
+    firstComponent = components[0]
+    # Qualified registries contain a dot, a port, or the conventional local
+    # hostname. Leave those references untouched; only Docker Hub names are
+    # safe to retry through dockerproxy.net.
+    if (
+        len(components) > 1
+        and (
+            "." in firstComponent
+            or ":" in firstComponent
+            or firstComponent == "localhost"
+        )
+    ):
+        return None
+    return f"dockerproxy.net/{image}"
+
+
 def PullBaseImage(image: str, crane: Path, proxy: str) -> bool:
-    print(f"[base] pulling {image}")
     toolDirectory = ToolDirectory()
     toolDirectory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporaryFile = tempfile.NamedTemporaryFile(
-        prefix="base-",
-        suffix=".tar",
-        dir=toolDirectory,
-        delete=False,
-    )
-    tarPath = Path(temporaryFile.name)
-    temporaryFile.close()
-    # crane creates the destination itself; leave only a unique path, not an
-    # empty pre-existing file that an implementation might refuse to replace.
-    tarPath.unlink(missing_ok=True)
     environment = ProxyEnvironment(proxy)
-    try:
-        pull = RunCommand(
-            [str(crane), "pull", image, str(tarPath)],
-            env=environment,
-            captureOutput=True,
+    references = [image]
+    mirrorReference = DockerHubMirrorReference(image)
+    if mirrorReference is not None:
+        references.append(mirrorReference)
+
+    for referenceIndex, reference in enumerate(references):
+        if referenceIndex:
+            print(f"[base] retrying {image} through {reference}")
+        else:
+            print(f"[base] pulling {image}")
+        temporaryFile = tempfile.NamedTemporaryFile(
+            prefix="base-",
+            suffix=".tar",
+            dir=toolDirectory,
+            delete=False,
         )
-        if pull.returncode != 0:
-            PrintError(
-                f"crane pull failed for {image}: "
-                f"{(pull.stderr or pull.stdout).strip()}"
+        tarPath = Path(temporaryFile.name)
+        temporaryFile.close()
+        # crane creates the destination itself; leave only a unique path, not
+        # an empty pre-existing file that an implementation might refuse to
+        # replace.
+        tarPath.unlink(missing_ok=True)
+        try:
+            pull = RunCommand(
+                [str(crane), "pull", reference, str(tarPath)],
+                env=environment,
+                captureOutput=True,
             )
-            return False
-        loaded = RunCommand(
-            ["docker", "load", "--input", str(tarPath)],
-            captureOutput=True,
-        )
-        loadOutput = f"{loaded.stdout}\n{loaded.stderr}"
-        if loaded.returncode != 0:
-            PrintError(f"docker load failed for {image}: {loadOutput.strip()}")
-            return False
-        if not DockerImageExists(image):
-            for loadedReference in LoadedImageReferences(loadOutput):
-                tagged = RunCommand(
-                    ["docker", "tag", loadedReference, image],
-                    captureOutput=True,
+            if pull.returncode != 0:
+                PrintError(
+                    f"crane pull failed for {reference}: "
+                    f"{(pull.stderr or pull.stdout).strip()}"
                 )
-                if tagged.returncode == 0 and DockerImageExists(image):
-                    break
-        if not DockerImageExists(image):
+                continue
+            loaded = RunCommand(
+                ["docker", "load", "--input", str(tarPath)],
+                captureOutput=True,
+            )
+            loadOutput = f"{loaded.stdout}\n{loaded.stderr}"
+            if loaded.returncode != 0:
+                PrintError(f"docker load failed for {reference}: {loadOutput.strip()}")
+                continue
+            if not DockerImageExists(image):
+                for loadedReference in LoadedImageReferences(loadOutput):
+                    tagged = RunCommand(
+                        ["docker", "tag", loadedReference, image],
+                        captureOutput=True,
+                    )
+                    if tagged.returncode == 0 and DockerImageExists(image):
+                        break
+            if DockerImageExists(image):
+                print(f"[base] {image} OK")
+                return True
             PrintError(
-                f"docker load completed for {image}, but the original image "
+                f"docker load completed for {reference}, but the original image "
                 "reference was not available locally"
             )
-            return False
-        print(f"[base] {image} OK")
-        return True
-    finally:
-        tarPath.unlink(missing_ok=True)
+        finally:
+            tarPath.unlink(missing_ok=True)
+    return False
 
 
 def PullMissingBaseImages(
@@ -859,12 +889,17 @@ GITHUB_PROXY_HOST = "gh-proxy.com"
 # ``https://<host>/https://github.com/...`` URL shape as the primary, so a
 # mirror-prefix swap is the only change needed.
 GITHUB_PROXY_FALLBACK = "gh-proxy.org"
-# Coursier reads ``COURSIER_MIRRORS`` to redirect Maven Central / GitHub
-# Maven artifacts the JVM resolves at run time (Scala compiler fetch,
-# self-update, etc.). Without this, coursier's ``./cs setup`` self-update
-# hits ``github.com`` directly through the host's proxy and dies on the
-# upstream S3 redirect's TLS handshake.
-COURSIER_MIRROR_URL = f"https://{GITHUB_PROXY_HOST}/https://github.com/coursier/maven"
+# Coursier reads ``COURSIER_MIRRORS`` as a path to a mirror-properties file;
+# it is not a URL-valued environment variable. Keep the upstream and mirror
+# endpoints separate so WrapCoursierRun can generate the file in the RUN
+# layer and remove it when that layer finishes.
+COURSIER_MIRROR_SOURCE = "https://repo1.maven.org/maven2"
+COURSIER_MIRROR_URL = "https://maven.aliyun.com/repository/public"
+COURSIER_MIRROR_PROPERTIES = "/tmp/.kvbench-coursier-mirrors.properties"
+# ``cs setup`` is intentionally replaced with an explicit sbt installation.
+# The setup command self-updates the coursier launcher and is unreliable in
+# the build network; the verifier still needs the sbt launcher afterwards.
+SBT_VERSION = "1.10.7"
 # npmmirror.com serves the official npm registry as a read-through mirror,
 # plus binaries/ (node, etc.). Used for both ``npm install`` and node tarballs.
 NPM_MIRROR_REGISTRY = "https://registry.npmmirror.com"
@@ -941,10 +976,18 @@ def WrapAptInstallRun(body: str) -> str:
         # ``apt-get update &&`` so we rely on indexes baked into the base
         # image, but those indexes are against archive.ubuntu.com /
         # deb.debian.org and cannot satisfy an install against the mirror.
-        # The semicolon (not ``&&``) keeps :func:`RemoveAptUpdateCommands`
-        # from stripping this update.
+        # The semicolon (not ``&&``) between the update and install keeps
+        # the install going even if a single apt repo is missing (e.g.
+        # Debian ``trixie-security`` on tuna returns 404 because tuna does
+        # not mirror that suite; apt-get update then exits 100, but the
+        # ``main`` / ``updates`` indexes have already been refreshed, which
+        # is enough for ``apt-get install`` to resolve the requested
+        # packages).  We then chain install -> restoreList with ``&&`` so a
+        # failed ``apt-get install`` propagates to the RUN's exit code;
+        # otherwise ``restoreList`` succeeds and Docker commits a layer
+        # missing the intended packages (e.g. wget / pip / git).
         f"apt-get update; "
-        f"{prefix}{aptPortion}; "
+        f"{prefix}{aptPortion} && "
         f"{restoreList}"
     )
 
@@ -1011,9 +1054,13 @@ def WrapDnfInstallRun(body: str) -> str:
         f"{rewriteRepos}; "
         # dnf/microdnf cache metadata under ``/var/cache/dnf``; force a refresh
         # against the mirror repos we just wrote so the install can resolve
-        # package names that the original repo files never indexed.
+        # package names that the original repo files never indexed. The
+        # trailing ``|| true`` survives a partial cache rebuild on minimal
+        # base images; we then ``&&``-chain the install so a failure
+        # propagates to the RUN's exit code and Docker does NOT commit a
+        # layer where dnf failed to install the requested packages.
         f"dnf -y makecache --disablerepo='*' --enablerepo='*' 2>/dev/null || true; "
-        f"{prefix}{rpmPortion}; "
+        f"{prefix}{rpmPortion} && "
         f"{restoreRepos}"
     )
 
@@ -1023,16 +1070,40 @@ def WrapPipInstallRun(body: str) -> str:
 
     ``--index-url`` is per-invocation and does not touch pip's user/global
     config files, so the final image's ``~/.pip/pip.conf`` etc. stay clean.
+
+    Also rewrites pip's ``git+https://github.com/...`` URLs through the
+    gh-proxy.com front-end: pip delegates to ``git clone`` for VCS
+    installs, so we need a ``git config --global url.<...>.insteadOf`` to
+    redirect those clones. Doing this at the start of the RUN keeps the
+    final image's ``~/.gitconfig`` empty (the ``GIT_CONFIG_GLOBAL`` env
+    var points at ``/tmp/.kvbench-gitconfig`` which is removed in the
+    final cleanup; ``git config --global`` would otherwise write to
+    ``~/.gitconfig`` which is part of the image).
     """
 
     if not re.search(r"(?i)\bpip3?\s+install\b", body):
         return body
+    if "github.com" in body:
+        # pip delegates VCS installs to ``git clone``; rewrite github.com
+        # URLs through the gh-proxy.com front-end via an insteadOf config.
+        # ``GIT_CONFIG_GLOBAL`` only affects reads (git config --global
+        # writes to ~/.gitconfig regardless), so we write the config
+        # file directly and point the env var at it. The file lives in
+        # /tmp and is removed by Docker's layer eviction, so the final
+        # image does not carry the redirect.
+        body = (
+            "printf '[url \"https://" + GITHUB_PROXY_HOST + "/https://github.com/\"]\\n"
+            "	insteadOf = https://github.com/\\n' "
+            "> /tmp/.kvbench-gitconfig && "
+            "export GIT_CONFIG_GLOBAL=/tmp/.kvbench-gitconfig; "
+            + body
+        )
     rewritten = re.sub(
         r"(?i)(\bpip3?\s+install\b)",
         rf"\1 --index-url {PIP_MIRROR_URL}",
         body,
     )
-    return f"{PROXY_UNSET_SHELL}; {rewritten}"
+    return _WithProxyUnset(rewritten)
 
 
 # Mirror rewrite tables used by :func:`WrapCurlWgetRun`. Order matters: the
@@ -1126,10 +1197,16 @@ def WrapGitCloneRun(body: str) -> str:
     url.<...>.insteadOf`` because the config would persist for any later
     git invocation in the same RUN. The mirror only proxies github.com; git
     clones against any other host are left untouched.
+
+    The URL may follow ``git clone`` directly OR come after any number of
+    short/long flags (e.g. ``git clone --depth 1 --branch v1.2.0 URL``); the
+    pattern below uses a non-greedy match through the flags before the URL
+    so we still anchor at ``https?://``. We capture the URL into a group so
+    ``replace`` can rewrite it.
     """
 
     def replace(match: re.Match[str]) -> str:
-        verb = match.group(1)
+        head = match.group(1)
         url = match.group(2)
         if url.startswith("https://github.com/") or url.startswith(
             "http://github.com/"
@@ -1137,15 +1214,101 @@ def WrapGitCloneRun(body: str) -> str:
             url = f"https://{GITHUB_PROXY_HOST}/https://github.com/" + url.split(
                 "github.com/", 1
             )[1]
-        return f"{verb} {url}"
+        return f"{head} {url}"
 
     if not re.search(r"(?i)\bgit\s+clone\b", body):
         return body
     rewritten = re.sub(
-        r"(?i)(git\s+clone)\s+(https?://[^\s'\"\\$|&;]+)",
+        r"(?i)(git\s+clone(?:\s+--?[A-Za-z][\w-]*(?:[ =][^\s'\"\\$|&;]+)?)*?)\s+(https?://[^\s'\"\\$|&;]+)",
         replace,
         body,
     )
+    return _WithProxyUnset(rewritten)
+
+
+def _WithShellExports(body: str, assignments: Mapping[str, str]) -> str:
+    """Export variables for the whole shell fragment, including its prefix.
+
+    A leading ``NAME=value command`` only scopes the assignment to that one
+    command. Several wrappers can already have inserted ``unset ...;`` at the
+    beginning of a RUN body, so use real shell exports when a setting must
+    reach a later command in the same RUN.
+    """
+
+    exports = " ".join(
+        f"export {name}={shlex.quote(value)};"
+        for name, value in assignments.items()
+    )
+    return f"{exports} {body}" if exports else body
+
+
+def WrapUvInstallRun(body: str) -> str:
+    """Install uv from a GitHub release archive instead of astral.sh.
+
+    The official installer downloads a second archive from GitHub. That
+    redirect is the flaky part of the AgentOps image build, while the release
+    archive itself is reachable through the configured GitHub mirrors.
+    """
+
+    match = re.search(
+        r"https?://astral\.sh/uv/([^/\s'\"]+)/install\.sh",
+        body,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return body
+    version = match.group(1)
+    primaryUrl = (
+        f"https://{GITHUB_PROXY_HOST}/https://github.com/astral-sh/uv/"
+        f"releases/download/{version}/${{uv_asset}}.tar.gz"
+    )
+    fallbackUrl = (
+        f"https://{GITHUB_PROXY_FALLBACK}/https://github.com/astral-sh/uv/"
+        f"releases/download/{version}/${{uv_asset}}.tar.gz"
+    )
+    replacement = (
+        "uv_arch=; "
+        'case "$(uname -m)" in '
+        "x86_64|amd64) uv_arch=x86_64 ;; "
+        "aarch64|arm64) uv_arch=aarch64 ;; "
+        "*) echo 'unsupported uv architecture' >&2; exit 1 ;; "
+        "esac; "
+        'uv_asset="uv-${uv_arch}-unknown-linux-gnu"; '
+        "curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused "
+        f'--max-time 1800 "{primaryUrl}" -o /tmp/.kvbench-uv.tar.gz '
+        "|| curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused "
+        f'--max-time 1800 "{fallbackUrl}" -o /tmp/.kvbench-uv.tar.gz; '
+        "rm -rf /tmp/.kvbench-uv; mkdir -p /tmp/.kvbench-uv; "
+        "tar -xzf /tmp/.kvbench-uv.tar.gz -C /tmp/.kvbench-uv; "
+        "install -m 0755 /tmp/.kvbench-uv/${uv_asset}/uv /usr/local/bin/uv; "
+        "install -m 0755 /tmp/.kvbench-uv/${uv_asset}/uvx /usr/local/bin/uvx; "
+        "mkdir -p /root/.local/bin; "
+        "printf 'export PATH=\"$HOME/.local/bin:$PATH\"\\n' "
+        "> /root/.local/bin/env; "
+        "install -m 0755 /tmp/.kvbench-uv/${uv_asset}/uv /root/.local/bin/uv; "
+        "install -m 0755 /tmp/.kvbench-uv/${uv_asset}/uvx /root/.local/bin/uvx; "
+        "rm -rf /tmp/.kvbench-uv /tmp/.kvbench-uv.tar.gz"
+    )
+    # Replace the complete curl | sh leg and retain any following command
+    # chain from the task Dockerfile (the original install commands, when
+    # present, are included in the match below and therefore not duplicated).
+    pattern = re.compile(
+        r"curl\s+"
+        r"(?:--?[A-Za-z][\w-]*(?:[ =][^\s|]+)?\s+)*"
+        r"https?://astral\.sh/uv/[^/\s'\"]+/install\.sh\s*"
+        r"\|\s*(?:sh|bash)\b"
+        r"(?:\s*&&\s*install\s+-m\s+0755\s+/root/\.local/bin/uv\s+"
+        r"/usr/local/bin/uv\s*"
+        r"&&\s*install\s+-m\s+0755\s+/root/\.local/bin/uvx\s+"
+        r"/usr/local/bin/uvx\s*)?",
+        re.IGNORECASE,
+    )
+    # Use a callable replacement: the shell fragment contains the literal
+    # ``\n`` needed by printf, which ``re.sub`` would otherwise interpret as a
+    # real newline while processing a string replacement.
+    rewritten, count = pattern.subn(lambda _match: replacement, body, count=1)
+    if count == 0:
+        return body
     return _WithProxyUnset(rewritten)
 
 
@@ -1237,14 +1400,14 @@ def WrapCoursierRun(body: str) -> str:
        ``github.com`` (not through the curl/wget rewrites), and the upstream
        redirect to ``release-assets.githubusercontent.com`` times out on TLS.
        M23's ``cs setup`` does NOT honor ``--no-self-update`` (the flag is
-       only available on ``cs launch`` / ``cs java``), so we drop the
-       ``cs setup`` segment entirely. The downstream ``cs install`` is
-       self-sufficient — it adds the artifacts to PATH via ``cs install``
-       itself, which is what the task actually needs.
+       only available on ``cs launch`` / ``cs java``), so replace it with an
+       explicit sbt install. The verifier needs the sbt launcher, so dropping
+       setup without a replacement leaves the image incomplete.
     2. ``./cs install <coord>`` resolves artifacts from Maven Central. With
        no mirror env set, that hits ``repo1.maven.org`` directly. Setting
-       ``COURSIER_MIRRORS`` to the GitHub-proxy-fronted coursier mirror
-       lets coursier fetch through the proxy instead of the upstream.
+       ``COURSIER_MIRRORS`` points to a generated mirror-properties file,
+       letting coursier fetch Maven artifacts from the mirror instead of the
+       upstream.
 
     Both fixes are no-ops when the body does not mention ``cs `` / ``coursier``
     so existing tasks are unaffected.
@@ -1253,19 +1416,23 @@ def WrapCoursierRun(body: str) -> str:
     if not re.search(r"(?i)\b(?:cs|coursier)\s+(?:setup|launch|install)\b", body):
         return body
     rewritten = body
-    # Drop the ``cs setup --yes`` segment and the ``&&`` that precedes
-    # it, since M23 doesn't expose a flag to skip its self-update, but
-    # the downstream ``cs install`` is self-sufficient. We consume the
-    # preceding operator but leave the trailing ``&&`` so the chain
-    # stays intact (e.g. ``... && chmod cs && ./cs install scala``).
+    # Keep the command chain intact while avoiding setup's self-update. The
+    # replacement is intentionally explicit: python-scala-translation's
+    # verifier invokes ``sbt`` and ``cs setup`` is what used to install it.
     rewritten = re.sub(
-        r"\s*&&\s*\.?/?cs\s+setup\b[^\n&|;]*?(?=\s*&&|\s*\|\||\s*;|\s*\||$)",
-        "",
+        r"(?i)(\.?/?cs)\s+setup\b[^\n&|;]*",
+        rf"\1 install sbt:{SBT_VERSION}",
         rewritten,
         count=1,
     )
     if "COURSIER_MIRRORS" not in rewritten:
-        rewritten = f"COURSIER_MIRRORS={COURSIER_MIRROR_URL} {rewritten}"
+        mirrorSetup = (
+            f"printf 'central.from={COURSIER_MIRROR_SOURCE}\\n"
+            f"central.to={COURSIER_MIRROR_URL}\\n' "
+            f"> {COURSIER_MIRROR_PROPERTIES}; "
+            f"export COURSIER_MIRRORS={COURSIER_MIRROR_PROPERTIES}; "
+        )
+        rewritten = mirrorSetup + rewritten
     return rewritten
 
 
@@ -1274,19 +1441,108 @@ def WrapNpmInstallRun(body: str) -> str:
 
     ``--registry`` is per-invocation and does not write to ``~/.npmrc`` or
     the project config, so the final image's npm settings are pristine.
+
+    Also matches invocations through the npm CLI JS bootstrap
+    (``node /opt/nodeXX/lib/node_modules/npm/bin/npm-cli.js install ...``,
+    which is what ``/opt/nodeXX/bin/npm`` symlinks to). The naive
+    ``\bnpm install`` regex misses those because the npm command is
+    loaded via a relative ``node`` path. We match either form.
     """
 
-    if not re.search(r"(?i)\bnpm\s+(?:install|i|add|ci)\b", body):
+    if not re.search(
+        r"(?i)(?:\bnpm\b|(?:npm-cli\.js|npm\.cmd))\s+(?:install|i|add|ci)\b",
+        body,
+    ):
         return body
     if "--registry" in body or "registry=" in body:
         return body
     rewritten = re.sub(
-        r"(?i)(\bnpm\s+(?:install|i|add|ci))\b",
+        r"(?i)((?:\bnpm\b|npm-cli\.js|npm\.cmd)\s+(?:install|i|add|ci))\b",
         rf"\1 --registry={NPM_MIRROR_REGISTRY}",
         body,
         count=1,
     )
     return _WithProxyUnset(rewritten)
+
+
+def WrapPlaywrightInstallRun(body: str) -> str:
+    """Redirect ``playwright install`` browser downloads through npmmirror.
+
+    Playwright's browser binary download is ~150 MB and the upstream
+    CDN (``playwright.download.prss.microsoft.com``) is intermittently
+    unreachable from the build host (proxy SSL resets). npmmirror hosts
+    a read-through mirror of the Playwright binaries at
+    ``/mirrors/playwright``; setting ``PLAYWRIGHT_DOWNLOAD_HOST`` to its
+    root makes ``playwright install`` fetch from there instead.
+
+    PLAYWRIGHT_DOWNLOAD_HOST is a Playwright-respected env var read at
+    install time; it does not persist into the final image.
+    """
+
+    if not re.search(r"(?i)\bplaywright\s+install\b", body):
+        return body
+    # Playwright 1.49.1 asks for both Chromium and its optional headless-shell
+    # archive. npmmirror has the Chromium archive but returns 404 for that
+    # optional shell (the normal Chromium executable is all of these tasks'
+    # tests use). Keep the install strict when the actual browser is missing,
+    # but allow the known shell-only failure after verifying the browser was
+    # downloaded into the shared cache.
+    installCommand = re.compile(
+        r"((?:(?:python[0-9.]*\s+-m\s+|npx\s+)?playwright\s+install\b)[^;&|]*)",
+        re.IGNORECASE,
+    )
+    browserCheck = (
+        r"\1 || { "
+        r' browser="$(find "${PLAYWRIGHT_BROWSERS_PATH:-/root/.cache/ms-playwright}" '
+        r'-type f -path "*/chrome-linux/chrome" -perm /111 -print -quit 2>/dev/null)"; '
+        r' test -n "$browser"; '
+        r' browser_dir="$(dirname "$(dirname "$browser")")"; '
+        r' browser_version="${browser_dir##*-}"; '
+        r' shell_dir="$(dirname "$browser_dir")/chromium_headless_shell-${browser_version}/chrome-linux"; '
+        r' mkdir -p "$shell_dir"; '
+        r' ln -sf "$browser" "$shell_dir/headless_shell"; } '
+    )
+    body = installCommand.sub(browserCheck, body, count=1)
+    body = _WithShellExports(
+        _WithProxyUnset(body),
+        {"PLAYWRIGHT_DOWNLOAD_HOST": "https://npmmirror.com/mirrors/playwright"},
+    )
+    return body
+
+
+def WrapHuggingFaceRun(body: str) -> str:
+    """Make huggingface_hub + Kokoro-style downloads go through hf-mirror.
+
+    huggingface_hub honors ``HF_ENDPOINT`` for the model/repo REST API,
+    but Kokoro / `huggingface_hub.file_download` use the xet protocol
+    (``cas-bridge.xethub.hf.co``) for the actual blob bytes, which is
+    a separate CDN with its own TLS issues from this build host. Setting
+    ``HF_HUB_DISABLE_XET=1`` forces the regular HTTP path through
+    ``HF_ENDPOINT=hf-mirror.com``, sidestepping the flaky xet CDN.
+
+    We only trigger the wrap when the RUN body has a hint of HF model
+    download: explicit ``KPipeline``, ``huggingface_hub``,
+    ``transformers``, ``from_pretrained`` etc. The wrap is also a no-op
+    if ``HF_ENDPOINT`` is already set in the body (the upstream author
+    configured a different endpoint).
+    """
+
+    if "HF_ENDPOINT" in body:
+        return body
+    if not re.search(
+        r"(?i)(?:KPipeline|huggingface_hub|transformers|from_pretrained|"
+        r"snapshot_download|AutoModel|AutoTokenizer)",
+        body,
+    ):
+        return body
+    body = _WithShellExports(
+        _WithProxyUnset(body),
+        {
+            "HF_ENDPOINT": HF_MIRROR_ENDPOINT,
+            "HF_HUB_DISABLE_XET": "1",
+        },
+    )
+    return body
 
 
 def _WithProxyUnset(body: str) -> str:
@@ -1394,14 +1650,23 @@ def RewritePackageManagerRuns(text: str) -> str:
             newBody,
         ):
             newBody = WrapCurlWgetRun(newBody)
+        if re.search(r"(?i)https?://astral\.sh/uv/[^/\s'\"]+/install\.sh", newBody):
+            newBody = WrapUvInstallRun(newBody)
         if re.search(r"(?i)\bgit\s+clone\b", newBody):
             newBody = WrapGitCloneRun(newBody)
-        if re.search(r"(?i)\bnpm\s+(?:install|i|add|ci)\b", newBody):
+        if re.search(
+            r"(?i)(?:\bnpm\b|npm-cli\.js|npm\.cmd)\s+(?:install|i|add|ci)\b",
+            newBody,
+        ):
             newBody = WrapNpmInstallRun(newBody)
         if re.search(r"(?i)\b(?:cs|coursier)\s+(?:setup|launch|install)\b", newBody):
             newBody = WrapCoursierRun(newBody)
         if "deb.nodesource.com/setup_" in newBody:
             newBody = WrapNodeSourceSetupRun(newBody)
+        if re.search(r"(?i)\bplaywright\s+install\b", newBody):
+            newBody = WrapPlaywrightInstallRun(newBody)
+        if re.search(r"(?i)(?:from\s+\S+\s+import|KPipeline|huggingface_hub)", newBody) and "github.com" not in body:
+            newBody = WrapHuggingFaceRun(newBody)
         if newBody == body:
             rendered.append(logical + "\n")
             continue
@@ -1541,6 +1806,40 @@ def PrepareAptBaseImages(
     return prepared
 
 
+def VerifierNeedsUv(taskPath: Path) -> bool:
+    """Whether a task verifier invokes uv/uvx at runtime."""
+
+    verifier = taskPath / "verifier" / "test.sh"
+    try:
+        text = verifier.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    return re.search(r"(?m)^\s*uvx?\b", text) is not None
+
+
+def AppendVerifierUvInstall(taskPath: Path, dockerfileText: str, text: str) -> str:
+    """Bake uv into images whose verifier depends on it.
+
+    A verifier may install uv again at runtime, but that download is outside
+    the Dockerfile rewrite path and can fail independently. Do not duplicate
+    an image that already contains an explicit uv install; otherwise append
+    the same mirrored release installation used by AgentOps.
+    """
+
+    if not VerifierNeedsUv(taskPath):
+        return text
+    if re.search(r"(?i)(?:astral\.sh/uv|/usr/local/bin/uv|uvx)", dockerfileText):
+        return text
+    uvInstall = WrapUvInstallRun(
+        "set -eu; curl -LsSf https://astral.sh/uv/0.9.22/install.sh | sh"
+    )
+    return (
+        text.rstrip()
+        + "\n\n# Pre-install verifier tooling; runtime installers may be offline.\n"
+        + f"RUN {uvInstall}\n"
+    )
+
+
 def BuildTaskImage(
     taskPath: Path,
     proxy: str,
@@ -1567,16 +1866,12 @@ def BuildTaskImage(
     try:
         dockerfileText = dockerfile.read_text(encoding="utf-8")
         rewritten = dockerfileText
-        if useMirror:
-            # Mirror wrapping happens regardless of the apt-base optimization:
-            # some skills use apt without ``apt-get update`` (already satisfied
-            # by the base) but the actual install step still goes through the
-            # proxy and benefits from the rewrite.
-            rewritten = RewritePackageManagerRuns(rewritten)
-            # Redirect huggingface_hub to the Chinese mirror so build-time
-            # ``python3 -c "from <pkg> import <Model>; ..."`` model
-            # downloads survive the host's flaky SSL path to huggingface.co.
-            rewritten = InjectHuggingfaceEndpoint(rewritten)
+        # When the apt-base optimization applies, strip the user's original
+        # ``apt-get update &&`` from the *source* text first. The wrap added
+        # below relies on its own ``apt-get update &&`` to refresh against
+        # the mirror sources list it writes; if we strip after wrapping, we
+        # would also strip the wrap's update, leaving the install unable to
+        # resolve packages against the mirror.
         if DockerfileHasAptUpdate(dockerfile):
             canReuseAptBase = aptUpdateMode == "never"
             if (
@@ -1589,11 +1884,26 @@ def BuildTaskImage(
                     aptBaseImages or {}
                 )
             if canReuseAptBase:
-                rewritten = RemoveAptUpdateCommands(rewritten)
+                stripped = RemoveAptUpdateCommands(dockerfileText)
+                rewritten = stripped
                 if aptUpdateMode == "once":
                     rewritten = ReplaceDockerfileBaseImages(
                         rewritten, aptBaseImages or {}
                     )
+        if useMirror:
+            # Mirror wrapping happens regardless of the apt-base optimization:
+            # some skills use apt without ``apt-get update`` (already satisfied
+            # by the base) but the actual install step still goes through the
+            # proxy and benefits from the rewrite. Wrap AFTER the apt-base
+            # text rewriting above so the wrap's own ``apt-get update &&``
+            # is preserved (it is not subject to RemoveAptUpdateCommands
+            # because that already ran on dockerfileText).
+            rewritten = RewritePackageManagerRuns(rewritten)
+            # Redirect huggingface_hub to the Chinese mirror so build-time
+            # ``python3 -c "from <pkg> import <Model>; ..."`` model
+            # downloads survive the host's flaky SSL path to huggingface.co.
+            rewritten = InjectHuggingfaceEndpoint(rewritten)
+            rewritten = AppendVerifierUvInstall(taskPath, dockerfileText, rewritten)
         if rewritten != dockerfileText:
             toolDirectory = ToolDirectory()
             toolDirectory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1790,6 +2100,57 @@ def PatchTaskImage(taskPath: Path, image: str) -> None:
     print(f"[task] {taskPath.name} -> {image}")
 
 
+def PatchTaskCompose(taskPath: Path, composePath: Path) -> None:
+    """Make a task compose overlay compatible with BenchFlow's host network.
+
+    BenchFlow's Docker sandbox sets ``services.main.network_mode: host`` in
+    its base compose file. Docker Compose rejects a later task overlay that
+    also assigns a network to that same service. The visual-stability task
+    has a bundled API server, so the main container does not need its task
+    network; other services may continue using the task network.
+    """
+
+    document = ReadYaml(composePath)
+    if not isinstance(document, dict):
+        raise RuntimeError(f"task compose root must be a mapping: {composePath}")
+    services = document.get("services")
+    if not isinstance(services, dict) or not isinstance(services.get("main"), dict):
+        raise RuntimeError(f"task compose has no services.main: {composePath}")
+    main = services["main"]
+    if "networks" not in main:
+        return
+
+    # Keep the top-level network: optional sidecar services can still use it.
+    del main["networks"]
+    yaml = LoadYaml()
+    rendered = yaml.safe_dump(
+        document,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+    if not rendered.endswith("\n"):
+        rendered += "\n"
+    original = composePath.read_text(encoding="utf-8")
+    if rendered == original:
+        return
+    BackupOnce(composePath)
+    WriteTextAtomically(composePath, rendered)
+    print(f"[task-compose] patched {composePath}")
+
+
+def PatchTaskComposes(tasks: Iterable[Path]) -> list[str]:
+    failures: list[str] = []
+    for taskPath in tasks:
+        for composePath in ComposeFiles(taskPath / "environment"):
+            try:
+                PatchTaskCompose(taskPath, composePath)
+            except Exception as exc:  # noqa: BLE001 - report every task issue
+                PrintError(f"[task-compose] {taskPath.name} FAILED: {exc}")
+                failures.append(taskPath.name)
+    return failures
+
+
 def PatchSuccessfulTasks(successfulTasks: list[Path]) -> list[str]:
     failures: list[str] = []
     for taskPath in successfulTasks:
@@ -1894,9 +2255,14 @@ def RemoveBuiltTaskImages() -> bool:
 
 def RestoreTaskBackups(skillsbenchPath: Path) -> bool:
     success = True
-    backupPaths = sorted((skillsbenchPath / "tasks").rglob(f"task.md{BACKUP_SUFFIX}"))
+    restorableNames = {"task.md", "Dockerfile", *COMPOSE_FILE_NAMES}
+    backupPaths = sorted(
+        backupPath
+        for backupPath in (skillsbenchPath / "tasks").rglob(f"*{BACKUP_SUFFIX}")
+        if backupPath.name[: -len(BACKUP_SUFFIX)] in restorableNames
+    )
     for backupPath in backupPaths:
-        taskPath = backupPath.with_name("task.md")
+        taskPath = Path(str(backupPath)[: -len(BACKUP_SUFFIX)])
         try:
             os.replace(backupPath, taskPath)
             print(f"[clear] restored {taskPath}")
@@ -1904,7 +2270,7 @@ def RestoreTaskBackups(skillsbenchPath: Path) -> bool:
             PrintError(f"could not restore {taskPath}: {exc}")
             success = False
     if not backupPaths:
-        print("[clear] no task.md backups found")
+        print("[clear] no task source backups found")
     return success
 
 
@@ -1959,6 +2325,7 @@ def Initialize(
     rebuild: bool = False,
     logDirectory: Path | None = None,
     useMirror: bool = False,
+    taskNames: list[str] | None = None,
 ) -> int:
     if not shutil.which("docker"):
         raise FileNotFoundError("docker is not on PATH")
@@ -1973,9 +2340,19 @@ def Initialize(
             f"{(dockerInfo.stderr or dockerInfo.stdout).strip()}"
         )
 
-    tasks = DiscoverTasks(skillsbenchPath)
-    if not tasks:
+    discoveredTasks = DiscoverTasks(skillsbenchPath)
+    if not discoveredTasks:
         raise RuntimeError(f"no SkillsBench tasks found under {skillsbenchPath / 'tasks'}")
+    if taskNames:
+        tasksByName = {taskPath.name: taskPath for taskPath in discoveredTasks}
+        unknownTasks = sorted(set(taskNames) - tasksByName.keys())
+        if unknownTasks:
+            raise ValueError(
+                "unknown SkillsBench task(s): " + ", ".join(unknownTasks)
+            )
+        tasks = [tasksByName[name] for name in dict.fromkeys(taskNames)]
+    else:
+        tasks = discoveredTasks
     tasksToBuild = [
         taskPath
         for taskPath in tasks
@@ -2036,6 +2413,8 @@ def Initialize(
     )
     taskPatchFailures = PatchSuccessfulTasks(successfulTasks)
     failedTasks.extend(taskPatchFailures)
+    taskComposePatchFailures = PatchTaskComposes(tasks)
+    failedTasks.extend(taskComposePatchFailures)
 
     composeFailure = False
     try:
@@ -2063,6 +2442,8 @@ def Initialize(
         print("Failed tasks:")
         for taskName in sorted(set(failedTasks)):
             print(f"  {taskName}")
+    if taskComposePatchFailures:
+        print("Task compose files: FAILED")
     if composeFailure:
         print("BenchFlow compose: FAILED")
 
@@ -2143,16 +2524,34 @@ def BuildArgumentParser() -> argparse.ArgumentParser:
         "--use-mirror",
         dest="use_mirror",
         action="store_true",
+        default=True,
         help=(
             "rewrite apt/dnf/pip install commands in temporary Dockerfiles "
             "to use TUNA mirrors; original sources.list, yum.repos.d, and "
             "pip config are restored before each RUN ends so the final "
-            "image is byte-identical to one built with the upstream archives"
+            "image is byte-identical to one built with the upstream archives. "
+            "On by default; use --no-mirror to disable."
         ),
+    )
+    parser.add_argument(
+        "--no-mirror",
+        dest="use_mirror",
+        action="store_false",
+        help="disable TUNA mirror rewrites (use the upstream archives)",
     )
     parser.add_argument(
         "--log-dir",
         help="directory for complete failed docker build logs (default: temporary directory)",
+    )
+    parser.add_argument(
+        "--task",
+        dest="task_names",
+        action="append",
+        metavar="TASK",
+        help=(
+            "prepare only this task; repeat --task for multiple tasks "
+            "(default: all tasks)"
+        ),
     )
     return parser
 
@@ -2183,6 +2582,7 @@ def Main(argv: list[str] | None = None) -> int:
             rebuild=args.rebuild,
             logDirectory=logDirectory,
             useMirror=args.use_mirror,
+            taskNames=args.task_names,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         PrintError(str(exc))

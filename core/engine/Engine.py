@@ -66,7 +66,9 @@ class Engine:
         )
         pairRetries = int(engineConfig.get("PairRetries", 1))
         outputRoot = engineConfig.get("OutputRoot", "outputs")
+        recordAllSamples = bool(engineConfig.get("RecordAllSamples", False))
         tui = bool(engineConfig.get("Tui", True))
+        tuiWaitForQuit = bool(engineConfig.get("TuiWaitForQuit", True))
         verbose = bool(engineConfig.get("Verbose", True))
 
         if batchSize < 1:
@@ -94,7 +96,9 @@ class Engine:
         self.gpuReleaseMemoryTolerance = int(gpuReleaseMemoryToleranceMiB) * 1024 * 1024
         self.pairRetries = int(pairRetries)
         self.outputRoot = Path(outputRoot)
+        self.recordAllSamples = recordAllSamples
         self.tuiEnabled = tui
+        self.tuiWaitForQuit = tuiWaitForQuit
         self.verbose = verbose
         # All Evaluate-time state is declared here as None so static analysis
         # can see the full attribute surface of an Engine instance. They are
@@ -136,7 +140,10 @@ class Engine:
         )
         ctx.eventQueue = ctx.mpContext.Queue()
         ctx.eventsFile = ctx.eventsPath.open("a", encoding="utf-8", buffering=1)
-        self._tui = BenchmarkTui(enabled=self.tuiEnabled)
+        self._tui = BenchmarkTui(
+            enabled=self.tuiEnabled,
+            waitForQuit=self.tuiWaitForQuit,
+        )
         self.reporter = Reporter(ctx, self)
         self.gpuGovernor = GpuGovernor(ctx, self)
         self.scheduler = Scheduler(ctx, self.reporter, self)
@@ -146,6 +153,7 @@ class Engine:
             "started_at": datetime.fromtimestamp(ctx.startedWall).astimezone().isoformat(),
             "output_dir": str(self.outputDir.resolve()),
             "batch_size": self.batchSize,
+            "record_all_samples": self.recordAllSamples,
             "effective_batch_sizes": [
                 {
                     "method_index": index,
@@ -182,6 +190,7 @@ class Engine:
                     "index": index,
                     "class": f"{type(task).__module__}.{type(task).__qualname__}",
                     "name": task.Label,
+                    "max_new_tokens": getattr(task, "maxNewTokens", 64),
                 }
                 for index, task in enumerate(tasks)
             ],
@@ -213,6 +222,7 @@ class Engine:
                 self.scheduler.reapDeadWorkers(ctx, now)
                 if self.scheduler.checkShutdown(ctx):
                     break
+                self.scheduler.markUnschedulable(ctx)
                 self.scheduler.dispatchPending(ctx, now)
                 if self.scheduler.finalizeTerminal(ctx):
                     break
@@ -283,7 +293,14 @@ class Engine:
                 "fatal_error": ctx.fatalError,
                 "unreleased_gpus": {
                     str(gpuId): details
-                    for gpuId, details in ctx.coolingGpus.items()
+                    for gpuId, details in {
+                        **ctx.coolingGpus,
+                        **ctx.unavailableGpus,
+                    }.items()
+                },
+                "unavailable_gpus": {
+                    str(gpuId): details
+                    for gpuId, details in ctx.unavailableGpus.items()
                 },
                 "worker_history": ctx.workerHistory,
             })

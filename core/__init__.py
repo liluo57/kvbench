@@ -9,7 +9,8 @@ Public surface (what tasks / methods / workflows may import):
   data currency shared across the framework.
 - :class:`Workflow`, :class:`Action`, :class:`ActionKind`,
   :class:`ActionResult` (:mod:`core.Workflow`) — the workflow contract.
-- :func:`LoadConfig`, :func:`Get`, :func:`ModelPath`, :func:`DatasetDir`
+- :func:`LoadConfig`, :func:`Get`, :func:`ModelPath`, :func:`MaxModelLen`,
+  :func:`DatasetDir`
   (:mod:`core.Config`) — config helpers.
 - :func:`ResolveSamplingConfig` (:mod:`core.Sampling`) — shared model
   sampling policy resolution.
@@ -23,7 +24,7 @@ Deliberately **not** re-exported from this barrel:
   circular shape and made future engine sub-splits harder to land.
 """
 
-from .Config import DatasetDir, Get, LoadConfig, ModelPath
+from .Config import DatasetDir, Get, LoadConfig, MaxModelLen, ModelPath
 from .Metrics import Metric
 from .Method import Method
 from .Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
@@ -39,6 +40,7 @@ __all__ = [
     "DatasetDir",
     "Get",
     "LoadConfig",
+    "MaxModelLen",
     "Metric",
     "Method",
     "ModelPath",

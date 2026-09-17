@@ -18,14 +18,13 @@
 #              (fields: ctxs[{title,text}], question, answers)
 #   samsum/    cacheblend's summarization dataset (samsum.json)
 #   wikimqa/   cacheblend's wiki multi-hop QA dataset (wikimqa_s.json)
-#   hotpotqa/  LongBench HotpotQA snapshot (hotpotqa.jsonl)
-#   triviaqa/  LongBench TriviaQA snapshot (triviaqa.jsonl)
-#   multinews/ LongBench MultiNews snapshot (multinews.jsonl)
-#   govreport/ LongBench GovReport snapshot (govreport.jsonl)
-DatasetPath: /root/kvbench/data
+DatasetPath: /data/lyh/kvbench/data
 
 # Default model used by the methods when none is passed explicitly.
-ModelPath: /root/autodl-tmp/models/Qwen3.5-35b
+ModelPath: /data1/lyh/.cache/modelscope/hub/models/mistralai/Mistral-7B-Instruct-v0.2 #mistralai/Mistral-7B-Instruct-v0.2
+
+# Shared context-window limit used by every model backend.
+MaxModelLen: 32768
 
 # Shared model sampling policy.
 #   greedy   - deterministic argmax decoding
@@ -36,6 +35,11 @@ ModelConfig:
   temperature: 1.0
   top_p: 0.95
   top_k: 20
+
+# System-vLLM options for the FullPrefillVllm baseline.
+FullPrefillVllm:
+  # Maximum number of sequences vLLM allocates decode/Mamba cache blocks for.
+  MaxNumSeqs: 32
 
 # HYPIC's SGLang fork used by methods/Hypic.py. The model itself still comes
 # from the global ModelPath above.
@@ -52,10 +56,13 @@ Hypic:
 # The benchmark entry point reads its shared runtime settings from this section.
 # Task selection and method parameters remain in Main.py.
 Engine:
-  AvailableGpuIds: auto
+  AvailableGpuIds: 'auto'
   BatchSize: 1
+  # Include raw per-sample values in each metric section of results/full.json.
+  # Samples are emitted in Task.Cases() order, including when Cases are batched.
+  RecordAllSamples: true
   OutputRoot: outputs
-  InitializeTimeoutSec: 600
+  InitializeTimeoutSec: 6000
   TaskTimeoutSec: 18000
   ShutdownGracePeriodSec: 30
   GpuReleaseTimeoutSec: 30
@@ -63,6 +70,8 @@ Engine:
   GpuReleaseMemoryToleranceMiB: 256
   PairRetries: 0
   Tui: true
+  # Keep the final TUI dashboard visible until q; set false to exit immediately.
+  TuiWaitForQuit: false
   Verbose: true
 
 # The CacheblendRepo method (methods/CacheblendRepo.py) runs the *original*
@@ -73,22 +82,27 @@ Engine:
 Cacheblend:
   Repo:
     # The original CacheBlend repo clone (holds vllm_blend + .venv).
-    RepoPath: /root/cache-blend/CacheBlend
+    RepoPath: /data/lyh/cache-blend/CacheBlend
+    # Fraction of each GPU reserved by the CacheBlend/vLLM worker. CacheBlend
+    # keeps additional chunk KV outside vLLM's own KV cache, so leave headroom.
+    GpuMemoryUtilization: 0.7
 
-# SkillsBench + mini-SWE integration for AgentBenchFlowTask.
 AgentBenchFlow:
   # Upload the selected task from this checkout to the remote Docker server.
   # This is the source mode used by the pre-refactor remote-docker runs and
   # avoids resolving the dataset through the remote GitHub registry.
   SourceMode: local
   Dataset: skillsbench@1.1
-  SkillsBenchRepo: /root/skillsbench
+  SkillsBenchRepo: /data/lyh/skillsbench
 
   # BenchFlow 0.7.5 currently provides pi-acp, opencode, and mimo, but not
   # qwen-code. pi-acp has the skill path needed for with-skill runs and uses
   # BenchFlow's normal ACP/provider routing.
   Agent: pi-acp
   Sandbox: remote-docker
+  # BenchFlow modes: with-skill (normal) or no-skill.  WithoutSkill,
+  # without-skill, and without_skill are accepted aliases for no-skill; in
+  # that mode BenchFlow removes task-bundled skills from the agent sandbox.
   SkillMode: with-skill
 
   # To move BenchFlow + Docker to another runtime host, change Sandbox above
@@ -101,6 +115,10 @@ AgentBenchFlow:
     # KVBenchAdvertiseHost: 10.0.0.21
     AuthTokenEnv: KVBENCH_REMOTE_TOKEN
     ConnectTimeoutSec: 10
+    # Source upload includes remote-side archive extraction before the HTTP
+    # response is returned. Keep this separate from control-plane timeouts;
+    # radar-vital-signs contains ~14 MiB of binary recordings.
+    UploadTimeoutSec: 300
     PollIntervalSec: 1
     ArtifactDownloadRetries: 3
 

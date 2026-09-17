@@ -6,6 +6,23 @@ from typing import List, Optional, Sequence
 from .Result import Result
 
 
+DefaultMaxNewTokens = 64
+
+
+def ResolveMaxNewTokens(maxNewTokens: Optional[int]) -> int:
+    """Validate a task-provided generation budget.
+
+    ``None`` keeps direct Method calls backwards-compatible; Engine calls this
+    with the owning Task's explicit value for every RUN step.
+    """
+    value = DefaultMaxNewTokens if maxNewTokens is None else maxNewTokens
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("maxNewTokens must be an integer")
+    if value < 1:
+        raise ValueError("maxNewTokens must be at least 1")
+    return value
+
+
 class Method(ABC):
     """A KV cache optimization method, treated as a black box.
 
@@ -119,13 +136,21 @@ class Method(ABC):
         """
 
     @abstractmethod
-    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
+    def Run(
+        self,
+        data: List[str],
+        retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
+    ) -> List[Result]:
         """Run inference on a batch of complete prompts.
 
         ``data[i]`` is the complete prompt for RUN action ``i``.
         ``retainOutput[i]`` is a future-reuse/lifetime hint for that generated
         output; methods may preserve backend-specific reusable state or ignore
         it. Returns a list of :class:`Result` objects in input order.
+
+        ``maxNewTokens`` is supplied by the owning Task. It is optional only
+        for direct/backwards-compatible Method calls outside the Engine.
 
         The method is responsible for recording raw system timings into each
         ``Result.performance`` so system metrics can be computed, e.g.::

@@ -65,3 +65,12 @@ def ModelPath(config: Optional[Dict[str, Any]] = None) -> str:
     return str(Get("ModelPath", None, config=config) or "")
 
 
+def MaxModelLen(config: Optional[Dict[str, Any]] = None) -> int:
+    """Return the framework-wide model context limit from ``config.yaml``."""
+    value = Get("MaxModelLen", 40960, config=config)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("MaxModelLen must be an integer")
+    if value < 1:
+        raise ValueError("MaxModelLen must be at least 1")
+    return value
+

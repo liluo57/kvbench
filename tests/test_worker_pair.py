@@ -169,6 +169,27 @@ def test_evaluate_pair_batches_actions_and_aggregates_every_run():
     assert all(len(workflow.observed) == 3 for workflow in task.workflows)
 
 
+def test_evaluate_pair_records_samples_in_case_order_across_batched_runs():
+    report = EvaluatePair(
+        _BatchTask(count=2),
+        _RecordingMethod(),
+        [TTFTMetric(), ThroughputMetric()],
+        batchSize=2,
+        recordAllSamples=True,
+    )
+
+    assert report["task_metrics"]["accuracy"]["samples"] == [1.0, 1.0]
+    assert report["system_metrics"]["ttft"]["samples"] == [
+        1.0, 2.0, 1.0, 2.0
+    ]
+    assert report["system_metrics"]["throughput"]["samples"] == [
+        2.0, 3.0, 2.0, 3.0
+    ]
+    assert report["method_metrics"]["reuse_ratio"]["samples"] == [
+        0.25, 0.75, 0.25, 0.75
+    ]
+
+
 class _CaseFailureIsolatedTask(Task):
     name = "case-failure-isolated"
     continueOnCaseFailure = True

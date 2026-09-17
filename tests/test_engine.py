@@ -10,7 +10,6 @@ import pytest
 
 from core.engine import (
     BenchmarkInitializationError,
-    BenchmarkResourceReleaseError,
     Engine,
 )
 from core.engine.Gpu import GpuInfo
@@ -24,6 +23,7 @@ from methods import (
     FullPrefillVllm,
     NaiveTransformer,
 )
+from metrics import ThroughputMetric, TTFTMetric
 from workflow.RAGWorkflow import RAGInput, RAGWorkflow
 
 
@@ -129,6 +129,7 @@ def _new_engine(tmp_path, **overrides):
         "GpuReleaseMemoryToleranceMiB": 256,
         "PairRetries": 1,
         "Tui": False,
+        "TuiWaitForQuit": True,
         "Verbose": False,
     }
     keyNames = {
@@ -142,7 +143,9 @@ def _new_engine(tmp_path, **overrides):
         "gpuReleaseStableSeconds": "GpuReleaseStableSeconds",
         "gpuReleaseMemoryToleranceMiB": "GpuReleaseMemoryToleranceMiB",
         "pairRetries": "PairRetries",
+        "recordAllSamples": "RecordAllSamples",
         "tui": "Tui",
+        "tuiWaitForQuit": "TuiWaitForQuit",
         "verbose": "Verbose",
     }
     unknown = set(overrides) - set(keyNames)
@@ -152,14 +155,14 @@ def _new_engine(tmp_path, **overrides):
         return Engine()
 
 
-def _run(tmp_path, tasks, methods, gpu_count=2, **kwargs):
+def _run(tmp_path, tasks, methods, gpu_count=2, metrics=None, **kwargs):
     snapshot = [_gpu(index) for index in range(gpu_count)]
     with patch(
         "core.engine.Engine.ResolveGpuIds",
         return_value=(list(range(gpu_count)), snapshot),
     ), patch("core.engine.GpuGovernor.QueryGpus", return_value=snapshot):
         engine = _new_engine(tmp_path, **kwargs)
-        return engine, engine.Evaluate(tasks, methods, [])
+        return engine, engine.Evaluate(tasks, methods, metrics or [])
 
 
 def test_engine_reads_all_runtime_settings_from_config(tmp_path):
@@ -175,6 +178,7 @@ def test_engine_reads_all_runtime_settings_from_config(tmp_path):
         gpuReleaseMemoryToleranceMiB=17,
         pairRetries=2,
         tui=True,
+        tuiWaitForQuit=False,
         verbose=True,
     )
 
@@ -187,8 +191,37 @@ def test_engine_reads_all_runtime_settings_from_config(tmp_path):
     assert engine.gpuReleaseStableSeconds == 1.5
     assert engine.gpuReleaseMemoryTolerance == 17 * 1024 * 1024
     assert engine.pairRetries == 2
+    assert not engine.recordAllSamples
     assert engine.tuiEnabled
+    assert not engine.tuiWaitForQuit
     assert engine.verbose
+
+
+def test_engine_reads_raw_sample_reporting_setting(tmp_path):
+    engine = _new_engine(tmp_path, recordAllSamples=True)
+
+    assert engine.recordAllSamples is True
+
+
+def test_engine_passes_raw_sample_reporting_to_worker(tmp_path):
+    engine, report = _run(
+        tmp_path,
+        [FakeTask("raw-samples", "prompt")],
+        [FakeMethod()],
+        gpu_count=1,
+        metrics=[TTFTMetric(), ThroughputMetric()],
+        recordAllSamples=True,
+    )
+
+    assert report["runs"][0]["task_metrics"]["accuracy"]["samples"] == [1.0]
+    assert report["runs"][0]["system_metrics"]["ttft"]["samples"] == [0.1]
+    assert report["runs"][0]["system_metrics"]["throughput"]["samples"] == [10.0]
+    full = json.loads(
+        (engine.outputDir / "results" / "full.json").read_text()
+    )
+    assert full["runs"][0]["system_metrics"]["ttft"]["samples"] == [0.1]
+    manifest = json.loads((engine.outputDir / "manifest.json").read_text())
+    assert manifest["record_all_samples"] is True
 
 
 def test_method_case_batch_limit_is_applied_and_recorded(tmp_path):
@@ -474,7 +507,7 @@ def test_gpu_is_not_rescheduled_until_nvml_reports_release(tmp_path):
     assert released < secondSpawn
 
 
-def test_gpu_release_timeout_is_a_distinct_fatal_error(tmp_path):
+def test_gpu_release_timeout_quarantines_gpu_without_aborting(tmp_path):
     baseline = [_gpu(0)]
     busy = [GpuInfo(0, "fake", 100, 50, 0.5, 0)]
     with patch("core.engine.Engine.ResolveGpuIds", return_value=([0], baseline)), patch(
@@ -486,15 +519,16 @@ def test_gpu_release_timeout_is_a_distinct_fatal_error(tmp_path):
             gpuReleaseTimeout=0.3,
             gpuReleaseMemoryToleranceMiB=0,
         )
-        with pytest.raises(BenchmarkResourceReleaseError):
-            engine.Evaluate(
-                [FakeTask("task", "text")],
-                [FakeMethod()],
-                [],
-            )
+        report = engine.Evaluate(
+            [FakeTask("task", "text")],
+            [FakeMethod()],
+            [],
+        )
+    assert report["status"] == "completed"
     manifest = json.loads((engine.outputDir / "manifest.json").read_text())
-    assert manifest["status"] == "resource_release_failed"
+    assert manifest["status"] == "completed"
     assert manifest["unreleased_gpus"]
+    assert manifest["unavailable_gpus"]["0"]["error"]
 
 
 def test_new_compute_pid_blocks_gpu_release_even_at_baseline_memory(tmp_path):
@@ -514,12 +548,65 @@ def test_new_compute_pid_blocks_gpu_release_even_at_baseline_memory(tmp_path):
             gpuReleaseTimeout=0.3,
             gpuReleaseMemoryToleranceMiB=0,
         )
-        with pytest.raises(BenchmarkResourceReleaseError, match="98765"):
-            engine.Evaluate([FakeTask("task", "text")], [FakeMethod()], [])
+        report = engine.Evaluate([FakeTask("task", "text")], [FakeMethod()], [])
 
+    assert report["status"] == "completed"
     manifest = json.loads((engine.outputDir / "manifest.json").read_text())
     unreleased = manifest["unreleased_gpus"]["0"]
     assert unreleased["external_compute_pids"] == [98765]
+    assert manifest["unavailable_gpus"]["0"]["external_compute_pids"] == [98765]
+
+
+def test_gpu_release_failure_does_not_stop_other_gpu_workers(tmp_path):
+    baseline = [_gpu(0), _gpu(1)]
+    busy = [GpuInfo(0, "fake", 100, 50, 0.5, 0), _gpu(1)]
+    queryCount = 0
+
+    def query():
+        nonlocal queryCount
+        queryCount += 1
+        # Let both workers start on their own GPU. Once they are running,
+        # keep GPU 0 occupied so only its cooling release fails.
+        return baseline if queryCount <= 2 else busy
+
+    with patch(
+        "core.engine.Engine.ResolveGpuIds",
+        return_value=([0, 1], baseline),
+    ), patch("core.engine.GpuGovernor.QueryGpus", side_effect=query):
+        engine = _new_engine(
+            tmp_path,
+            pairRetries=0,
+            gpuReleaseTimeout=0.3,
+            gpuReleaseMemoryToleranceMiB=0,
+            initializeTimeout=20,
+            taskTimeout=10,
+        )
+        report = engine.Evaluate(
+            [FakeTask("task", "text")],
+            [FakeMethod(failMode="crash"), FakeMethod(failMode="sleep")],
+            [],
+        )
+
+    assert report["status"] == "completed"
+    assert len(report["runs"]) == 1
+    assert report["runs"][0]["method"] == "fake"
+    assert report["failures"][0]["method_index"] == 0
+    manifest = json.loads((engine.outputDir / "manifest.json").read_text())
+    assert set(manifest["unavailable_gpus"]) == {"0"}
+    events = [
+        json.loads(line)
+        for line in (engine.outputDir / "events.jsonl").read_text().splitlines()
+    ]
+    failedRelease = next(
+        event for event in events if event["type"] == "gpu_release_failed"
+    )
+    otherTaskDone = next(
+        event
+        for event in events
+        if event["type"] == "task_done" and event["method_index"] == 1
+    )
+    assert failedRelease["gpu_id"] == 0
+    assert failedRelease["time"] < otherTaskDone["time"]
 
 
 def test_gpu_must_remain_clean_for_stability_window(tmp_path):

@@ -148,6 +148,7 @@ class Reporter:
             "gpu_pool": self.ctx.gpuPool,
             "free_gpus": self.ctx.freeGpus,
             "cooling_gpus": sorted(self.ctx.coolingGpus),
+            "unavailable_gpus": sorted(self.ctx.unavailableGpus),
             "gpu_snapshot": [
                 gpu.AsDict() for gpu in self.ctx.gpuSnapshot
             ],

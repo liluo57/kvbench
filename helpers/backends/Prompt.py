@@ -396,3 +396,37 @@ def ComposeInterleavedReuse(
         append_fresh(run[position:])
 
     return result
+
+
+def ComposeInterleavedReuseSpans(
+    prepare: List[str],
+    run: str,
+) -> List[Tuple[Optional[int], str, int, int]]:
+    """Return :func:`ComposeInterleavedReuse` parts with run-text offsets.
+
+    The prepared segments remain the source of truth: this helper does not
+    infer document boundaries from delimiters or from the prompt text.  It
+    only annotates the exact composition selected by
+    :func:`ComposeInterleavedReuse` with ``[start, end)`` character offsets in
+    ``run``.  ``prepare_index`` is ``None`` for fresh text.
+    """
+    parts = ComposeInterleavedReuse(prepare, run)
+    spans: List[Tuple[Optional[int], str, int, int]] = []
+    cursor = 0
+
+    for prepareIndex, text in parts:
+        end = cursor + len(text)
+        if run[cursor:end] != text:
+            raise RuntimeError(
+                "ComposeInterleavedReuse returned text that does not form "
+                f"a contiguous run at offset {cursor}"
+            )
+        spans.append((prepareIndex, text, cursor, end))
+        cursor = end
+
+    if cursor != len(run):
+        raise RuntimeError(
+            "ComposeInterleavedReuse did not cover the complete run prompt"
+        )
+
+    return spans

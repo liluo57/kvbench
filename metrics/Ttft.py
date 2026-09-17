@@ -32,5 +32,8 @@ class TTFTMetric(Metric):
     def Summary(self) -> dict:
         return AggregateStats(self._samples, name=self.name)
 
+    def Samples(self) -> list[float]:
+        return list(self._samples)
+
     def Reset(self) -> None:
         self._samples = []

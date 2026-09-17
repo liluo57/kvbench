@@ -29,9 +29,10 @@ and the recomputation ratio ``recompRatio`` (0.15 default;
 >0 repairs cross-chunk attention in a chunk-isolated knowledge base), and
 ``fullPrefill`` — when True every query is a plain full prefill (no cache, no
 fusion), serving as the control group against the fused runs. The repo path
-comes **only** from ``config.yaml`` (``Cacheblend.Repo.RepoPath``); the model
-path comes from the framework-wide top-level ``ModelPath`` (same as every other
-method). The constructor raises if the repo path is missing.
+and worker memory setting come **only** from ``config.yaml``
+(``Cacheblend.Repo.RepoPath`` and ``Cacheblend.Repo.GpuMemoryUtilization``);
+the model path comes from the framework-wide top-level ``ModelPath`` (same as
+every other method). The constructor raises if the repo path is missing.
 """
 
 import json
@@ -45,8 +46,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from core.Config import Get, ModelPath as DefaultModelPath
-from core.Method import Method
+from core.Config import Get, MaxModelLen, ModelPath as DefaultModelPath
+from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig
 
@@ -75,9 +76,6 @@ class CacheblendRepo(Method):
         gpuNums: int = 1,
         perfWeight: float = 1.0,
         *,
-        maxNewTokens: int = 64,
-        maxModelLen: int = 32768,
-        gpuMemoryUtilization: float = 0.7,
         recompRatio: float = 0.15,
         fullPrefill: bool = False,
         startTimeout: float = 1800.0,
@@ -89,8 +87,21 @@ class CacheblendRepo(Method):
             maxGpuNums=1,
             tag=tag,
         )
-        self.maxNewTokens = maxNewTokens
-        self.maxModelLen = maxModelLen
+        self.maxModelLen = MaxModelLen()
+
+        cacheblend = Get("Cacheblend", {}) or {}
+        repo = cacheblend.get("Repo", {}) or {}
+        gpuMemoryUtilization = repo.get("GpuMemoryUtilization", 0.7)
+        try:
+            gpuMemoryUtilization = float(gpuMemoryUtilization)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Cacheblend.Repo.GpuMemoryUtilization must be a number in (0, 1]"
+            ) from exc
+        if not 0 < gpuMemoryUtilization <= 1:
+            raise ValueError(
+                "Cacheblend.Repo.GpuMemoryUtilization must be a number in (0, 1]"
+            )
         self.gpuMemoryUtilization = gpuMemoryUtilization
         self.recompRatio = recompRatio
         self.fullPrefill = fullPrefill
@@ -98,7 +109,6 @@ class CacheblendRepo(Method):
 
         # Repo path comes from config.yaml; model path from the framework-wide
         # ``ModelPath`` (the same source every other method uses).
-        repo = (Get("Cacheblend", {}) or {}).get("Repo", {}) or {}
         repoPath = repo.get("RepoPath")
         if not repoPath:
             raise RuntimeError(
@@ -143,8 +153,17 @@ class CacheblendRepo(Method):
         helperScript = Path(__file__).resolve().parent.parent / "helpers" / "cacheblend_repo" / "CacheblendRepoHelper.py"
         env = dict(os.environ)
         # Keep the subprocess clean: the repo's venv must resolve its own vllm,
-        # and a login shell's LD_PRELOAD / PYTHONPATH must not leak in.
+        # and a login shell's PYTHONPATH must not leak in.  The fork is built
+        # against CUDA 13 while torch ships CUDA 12.8; preload the real driver
+        # library so its unversioned Driver API symbols are globally visible.
         env.pop("LD_PRELOAD", None)
+        for driverCuda in (
+            "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+            "/usr/lib64/libcuda.so.1",
+        ):
+            if Path(driverCuda).exists():
+                env["LD_PRELOAD"] = driverCuda
+                break
         env.pop("PYTHONPATH", None)
         env["CUDA_VISIBLE_DEVICES"] = (
             str(self.gpuIds)
@@ -157,7 +176,6 @@ class CacheblendRepo(Method):
                 str(helperScript),
                 "--repo_root", str(self.repoRoot),
                 "--model", self.modelPath,
-                "--max_new_tokens", str(self.maxNewTokens),
                 "--max_model_len", str(self.maxModelLen),
                 "--gpu_memory_utilization", str(self.gpuMemoryUtilization),
                 "--recomp_ratio", str(self.recompRatio),
@@ -241,8 +259,14 @@ class CacheblendRepo(Method):
         if flat:
             self._Request({"op": "collect", "chunks": flat})
 
-    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
+    def Run(
+        self,
+        data: List[str],
+        retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
+    ) -> List[Result]:
         """Run a batch of prompts, fusing cached and fresh spans in prompt order."""
+        maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._chunks) != len(data):
             self._chunks = [[] for _ in data]
         results: List[Result] = []
@@ -272,7 +296,11 @@ class CacheblendRepo(Method):
         for i, (prompt, chunks) in enumerate(zip(data, self._chunks)):
             retain = bool(retainOutput[i]) if retainOutput is not None and i < len(retainOutput) else False
             if self.fullPrefill:
-                result = self._runFull(prompt, retain_output=retain)
+                result = self._runFull(
+                    prompt,
+                    retain_output=retain,
+                    maxNewTokens=maxNewTokens,
+                )
                 results.append(result)
                 if retain and result.output and result.output not in chunks:
                     chunks.append(result.output)
@@ -281,7 +309,11 @@ class CacheblendRepo(Method):
             wireParts, reordered = plans[i]
 
             if wireParts is None:
-                result = self._runFull(prompt, retain_output=retain)
+                result = self._runFull(
+                    prompt,
+                    retain_output=retain,
+                    maxNewTokens=maxNewTokens,
+                )
                 results.append(result)
                 if retain and result.output and result.output not in chunks:
                     chunks.append(result.output)
@@ -292,6 +324,7 @@ class CacheblendRepo(Method):
                     "op": "fuse",
                     "parts": wireParts,
                     "retain_output": retain,
+                    "max_new_tokens": maxNewTokens,
                 }
             )
 
@@ -325,8 +358,21 @@ class CacheblendRepo(Method):
 
         return parts, reuseOrder != chunks
 
-    def _runFull(self, prompt: str, *, retain_output: bool = False) -> Result:
-        resp = self._Request({"op": "full", "text": prompt, "retain_output": retain_output})
+    def _runFull(
+        self,
+        prompt: str,
+        *,
+        retain_output: bool = False,
+        maxNewTokens: Optional[int] = None,
+    ) -> Result:
+        resp = self._Request(
+            {
+                "op": "full",
+                "text": prompt,
+                "retain_output": retain_output,
+                "max_new_tokens": ResolveMaxNewTokens(maxNewTokens),
+            }
+        )
         return self._Result(resp, full=True)
 
     def _Result(self, resp: Dict[str, Any], *, full: bool, reordered: bool = False) -> Result:

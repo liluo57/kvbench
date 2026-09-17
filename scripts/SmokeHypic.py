@@ -26,7 +26,6 @@ from methods import HypicMethod  # noqa: E402
 def Main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--max-model-len", type=int, default=12000)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--mem-fraction-static", type=float, default=0.80)
     parser.add_argument("--lines-per-chunk", type=int, default=192)
@@ -53,8 +52,6 @@ def Main() -> None:
     args = parser.parse_args()
 
     method = HypicMethod(
-        maxNewTokens=args.max_new_tokens,
-        maxModelLen=args.max_model_len,
         memFractionStatic=args.mem_fraction_static,
         picMode=args.pic_mode,
         fullPrefill=args.full_prefill,
@@ -74,7 +71,11 @@ def Main() -> None:
             tui=False,
         ).Evaluate(
             tasks=[
-                FreshGapTask(nCases=1, linesPerChunk=args.lines_per_chunk)
+                FreshGapTask(
+                    nCases=1,
+                    linesPerChunk=args.lines_per_chunk,
+                    maxNewTokens=args.max_new_tokens,
+                )
             ],
             methods=[method],
             metrics=[TTFTMetric(), ThroughputMetric()],
@@ -103,14 +104,17 @@ def Main() -> None:
                 "samsum": SamsumTask,
                 "wikimqa": WikimQATask,
             }[args.task]
-            case = next(taskType(maxSamples=1).Cases())
+            task = taskType(maxSamples=1, maxNewTokens=args.max_new_tokens)
+            case = next(task.Cases())
             print(
                 f"[smoke] task={args.task} segments="
                 f"{len(case.input.prepare_input)} prepare",
                 flush=True,
             )
             method.Prepare([case.input.prepare_input])
-            result = method.Run([case.input.run_input])[0]
+            result = method.Run(
+                [case.input.run_input], maxNewTokens=task.maxNewTokens
+            )[0]
             print(
                 json.dumps(
                     {
@@ -129,13 +133,18 @@ def Main() -> None:
         if args.fresh_gap:
             from tasks.FreshGap import FreshGapTask
 
-            case = next(
-                FreshGapTask(nCases=1, linesPerChunk=args.lines_per_chunk).Cases()
+            task = FreshGapTask(
+                nCases=1,
+                linesPerChunk=args.lines_per_chunk,
+                maxNewTokens=args.max_new_tokens,
             )
+            case = next(task.Cases())
             print("[smoke] fresh-gap prepare", flush=True)
             method.Prepare([case.input.prepare_input])
             print("[smoke] fresh-gap run", flush=True)
-            result = method.Run([case.input.run_input])[0]
+            result = method.Run(
+                [case.input.run_input], maxNewTokens=task.maxNewTokens
+            )[0]
             print(
                 json.dumps(
                     {
@@ -157,7 +166,8 @@ def Main() -> None:
         method.Prepare([[first, second]])
         print("[smoke] reordered run", flush=True)
         result = method.Run(
-            [second + first + "\nWhat answer does document A give? Answer briefly."]
+            [second + first + "\nWhat answer does document A give? Answer briefly."],
+            maxNewTokens=args.max_new_tokens,
         )[0]
         print(
             json.dumps(

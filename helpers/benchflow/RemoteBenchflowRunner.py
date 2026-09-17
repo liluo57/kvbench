@@ -42,6 +42,7 @@ class RemoteBenchflowRunner(BenchflowRunner):
         remoteAuthToken: Optional[str] = None,
         remoteAuthTokenEnv: str = "KVBENCH_REMOTE_TOKEN",
         remoteConnectTimeout: float = 10.0,
+        remoteUploadTimeout: float = 300.0,
         remotePollInterval: float = 1.0,
         artifactDownloadRetries: int = 3,
         **kwargs: Any,
@@ -73,6 +74,9 @@ class RemoteBenchflowRunner(BenchflowRunner):
         self.remoteAuthToken = remoteAuthToken or os.environ.get(remoteAuthTokenEnv)
         self.remoteAuthTokenEnv = remoteAuthTokenEnv
         self.remoteConnectTimeout = float(remoteConnectTimeout)
+        self.remoteUploadTimeout = float(remoteUploadTimeout)
+        if self.remoteUploadTimeout <= 0:
+            raise ValueError("remoteUploadTimeout must be positive")
         self.remotePollInterval = max(0.05, float(remotePollInterval))
         self.artifactDownloadRetries = max(1, int(artifactDownloadRetries))
         self.remoteRunId: Optional[str] = None
@@ -156,6 +160,7 @@ class RemoteBenchflowRunner(BenchflowRunner):
                 "remote_runtime_endpoint": self.remoteEndpoint,
                 "remote_run_id": self.remoteRunId,
                 "remote_state": self.remoteState,
+                "remote_upload_timeout_sec": self.remoteUploadTimeout,
                 "remote_artifact_path": (
                     str(self.remoteArtifactPath) if self.remoteArtifactPath else None
                 ),
@@ -270,7 +275,11 @@ class RemoteBenchflowRunner(BenchflowRunner):
         connection = connectionClass(
             parsed.hostname,
             parsed.port,
-            timeout=self.remoteConnectTimeout,
+            # The server receives and extracts the complete archive before it
+            # sends the response.  This can be much longer than the control
+            # plane connect/health timeout for tasks containing recordings or
+            # other binary fixtures.
+            timeout=self.remoteUploadTimeout,
         )
         basePath = parsed.path.rstrip("/")
         path = f"{basePath}/v1/runs/{self.remoteRunId}/source"

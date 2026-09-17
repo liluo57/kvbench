@@ -8,6 +8,7 @@ from core.Workflow import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
 from tasks.bases.KBBase import (
     NormalizeAnswer,
+    ParagraphChunks,
     ParseGeneration,
     RougeL,
     TokenEm,
@@ -155,6 +156,79 @@ def test_flatten_answers_handles_scalars_nesting_and_empty_values():
         "0",
         "nested",
     ]
+
+
+def test_paragraph_chunks_preserve_text_and_prefer_paragraph_boundaries():
+    text = "Paragraph one.\n\nParagraph two.\n\nParagraph three.\n\nParagraph four."
+    chunks = ParagraphChunks(text, 2, prefix="Prefix: ")
+
+    assert len(chunks) == 2
+    assert "".join(chunks) == "Prefix: " + text
+    assert chunks[0].endswith("Paragraph two.")
+    assert chunks[1].lstrip().startswith("Paragraph three.")
+
+
+def test_paragraph_chunks_use_sentence_boundaries_for_flattened_text():
+    text = "First sentence. Second sentence! Third sentence? Fourth sentence."
+    chunks = ParagraphChunks(text, 3)
+
+    assert len(chunks) == 3
+    assert "".join(chunks) == text
+    assert all(not chunk or chunk[-1] in ".!?" for chunk in chunks[:-1])
+
+
+def test_govreport_default_and_requested_chunk_counts(tmp_path):
+    from tasks.GovReport import GovReportTask
+
+    context = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+    task = GovReportTask(dataDir=str(tmp_path), nChunks=1)
+    one, suffix = task._Build({"context": context})
+    assert one == [task.prefixPrompt + context]
+    assert suffix == task.suffixPrompt
+
+    splitTask = GovReportTask(dataDir=str(tmp_path), nChunks=3)
+    chunks, _ = splitTask._Build({"context": context})
+    assert len(chunks) == 3
+    assert "".join(chunks) == task.prefixPrompt + context
+
+
+def test_govreport_max_sample_length_filters_complete_prompts(tmp_path, monkeypatch):
+    from tasks.GovReport import GovReportTask
+
+    (tmp_path / "govreport.jsonl").write_text(
+        "\n".join(
+            json.dumps({"context": context, "answers": ["summary"]})
+            for context in ("short report.", "oversized report.")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        ModelAdapter,
+        "render_user_prompt",
+        lambda userContent, **kwargs: userContent,
+    )
+
+    class FakeTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return [0] * (2 if "short report" in text else 5)
+
+    monkeypatch.setattr(
+        ModelAdapter, "_tokenizer", lambda modelPath: FakeTokenizer()
+    )
+
+    for nChunks in (1, 4, 8, 16):
+        filtered = GovReportTask(
+            dataDir=str(tmp_path),
+            nChunks=nChunks,
+            maxSampleLength=4,
+        )
+        cases = list(filtered.Cases())
+        assert [case.metadata["case_id"] for case in cases] == [0]
+
+    unfiltered = GovReportTask(dataDir=str(tmp_path), maxSampleLength=0)
+    assert len(list(unfiltered.Cases())) == 2
 
 
 def test_ruler_metric_and_parsing_helpers(tmp_path):

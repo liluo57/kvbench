@@ -21,7 +21,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.Config import ModelPath as DefaultModelPath
-from core.Method import Method
+from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig
 
@@ -49,7 +49,6 @@ class NaiveTransformer(Method):
         gpuNums: int = 1,
         perfWeight: float = 1.0,
         *,
-        maxNewTokens: int = 64,
         dtype: str = "bfloat16",
         tag: Optional[str] = None,
     ):
@@ -62,7 +61,6 @@ class NaiveTransformer(Method):
         # Model path is config-only — switch models via config.yaml.
         self.modelPath = DefaultModelPath()
         self.samplingConfig = ResolveSamplingConfig(self.modelPath)
-        self.maxNewTokens = maxNewTokens
         self.dtype = dtype
         self._gen = None
 
@@ -76,7 +74,6 @@ class NaiveTransformer(Method):
         self._gen = TransformersGenerator(
             self.modelPath,
             self.gpuIds,
-            maxNewTokens=self.maxNewTokens,
             dtype=self.dtype,
             samplingConfig=self.samplingConfig,
         )
@@ -106,7 +103,13 @@ class NaiveTransformer(Method):
                 }
             )
 
-    def Run(self, data: List[str], retainOutput: Optional[List[bool]] = None) -> List[Result]:
+    def Run(
+        self,
+        data: List[str],
+        retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
+    ) -> List[Result]:
+        maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         # Naive processes the batch sequentially: every case builds a
         # differently-sized DynamicCache, so the past tensors cannot be packed
         # into one batched ``transformers`` call.
@@ -130,7 +133,9 @@ class NaiveTransformer(Method):
             ):
                 # Nothing reusable appears in this prompt.
                 ids = self._gen.Encode(runInput)
-                generated = self._gen.Generate(ids, returnCache=retain)
+                generated = self._gen.Generate(
+                    ids, maxNewTokens=maxNewTokens, returnCache=retain
+                )
                 if retain:
                     text, ttft, total, nTokens, fullCache, outputIds = generated
                     self._registerOutput(state, text, outputIds, fullCache)
@@ -194,7 +199,9 @@ class NaiveTransformer(Method):
 
                 if nInput == 0 or lastId is None:
                     ids = self._gen.Encode(runInput)
-                    generated = self._gen.Generate(ids, returnCache=retain)
+                    generated = self._gen.Generate(
+                        ids, maxNewTokens=maxNewTokens, returnCache=retain
+                    )
                     if retain:
                         text, ttft, total, nTokens, fullCache, outputIds = generated
                         self._registerOutput(state, text, outputIds, fullCache)
@@ -206,7 +213,11 @@ class NaiveTransformer(Method):
 
                 else:
                     decoded = self._decodeFromCache(
-                        past, lastId, runInput, retainOutput=retain
+                        past,
+                        lastId,
+                        runInput,
+                        retainOutput=retain,
+                        maxNewTokens=maxNewTokens,
                     )
                     if retain:
                         text, decodeTtft, decodeTotal, nTokens, fullCache, outputIds = decoded
@@ -264,6 +275,7 @@ class NaiveTransformer(Method):
         lastId: Optional[int],
         fallbackPrompt: str,
         retainOutput: bool = False,
+        maxNewTokens: Optional[int] = None,
     ):
         """Decode from a fully assembled prompt cache.
 
@@ -277,11 +289,16 @@ class NaiveTransformer(Method):
             return self._gen.Generate(
                 [lastId],
                 pastKeyValues=past,
+                maxNewTokens=ResolveMaxNewTokens(maxNewTokens),
                 returnCache=retainOutput,
             )
 
         ids = self._gen.Encode(fallbackPrompt)
-        return self._gen.Generate(ids, returnCache=retainOutput)
+        return self._gen.Generate(
+            ids,
+            maxNewTokens=ResolveMaxNewTokens(maxNewTokens),
+            returnCache=retainOutput,
+        )
 
     def _registerOutput(self, state: Dict[str, Any], text: str, outputIds: List[int], fullCache: Any) -> None:
         """Register generated tokens as a reusable segment when cache is available."""

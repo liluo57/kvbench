@@ -6,20 +6,26 @@ memory, ...) are owned by :class:`Metric` subclasses.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .Result import Result
 
 
-def AggregateStats(samples: List[float], *, name: str) -> Dict[str, Any]:
+def AggregateStats(
+    samples: List[float], *, name: str, includeSamples: bool = False
+) -> Dict[str, Any]:
     """Compute common summary statistics for numeric ``samples``.
 
     Returns a flat dict keyed as ``<name>_<stat>`` so metrics can be merged
-    into one report without key collisions. Returns ``{name: None}`` when
-    ``samples`` is empty.
+    into one report without key collisions. When ``includeSamples`` is true,
+    the input-order values are also returned under ``"samples"``. Returns
+    ``{name: None}`` when ``samples`` is empty.
     """
     if not samples:
-        return {name: None}
+        stats: Dict[str, Any] = {name: None}
+        if includeSamples:
+            stats["samples"] = []
+        return stats
 
     sortedSamples = sorted(samples)
     n = len(sortedSamples)
@@ -33,7 +39,7 @@ def AggregateStats(samples: List[float], *, name: str) -> Dict[str, Any]:
         frac = pos - lo
         return sortedSamples[lo] * (1.0 - frac) + sortedSamples[hi] * frac
 
-    return {
+    stats = {
         f"{name}_count": n,
         f"{name}_mean": mean,
         f"{name}_min": sortedSamples[0],
@@ -42,6 +48,11 @@ def AggregateStats(samples: List[float], *, name: str) -> Dict[str, Any]:
         f"{name}_p90": _Percentile(0.9),
         f"{name}_p99": _Percentile(0.99),
     }
+    if includeSamples:
+        # Keep the input order here. Percentiles use sortedSamples above, but
+        # callers may need to correlate each value with its benchmark Sample.
+        stats["samples"] = list(samples)
+    return stats
 
 
 class Metric(ABC):
@@ -63,6 +74,14 @@ class Metric(ABC):
     @abstractmethod
     def Summary(self) -> Dict[str, Any]:
         """Return aggregate statistics, e.g. from :func:`AggregateStats`."""
+
+    def Samples(self) -> Optional[List[Any]]:
+        """Return raw samples in update order when the metric exposes them.
+
+        Metrics that do not retain raw values can leave the default ``None``;
+        the report writer will then include only their summary statistics.
+        """
+        return None
 
     def Reset(self) -> None:
         """Clear accumulated state (default no-op)."""
