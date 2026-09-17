@@ -8,9 +8,9 @@ selected tokens, and generates from the repaired cache. The CPU selection and
 GPU primary-cache assembly overlap in the two futures submitted by ``Run``.
 
 CacheClip uses shared-prefix token mapping and density-based window grouping
-before sparse recomputation. Full-prompt generation is used only when there is
-no reusable match, the match is not contiguous, or the query is empty; it is
-not a substitute for the model-specific sparse recomputation adapter.
+before sparse recomputation. Both contiguous and interleaved cached documents
+are supported; full-prompt generation is used only when no reusable match can
+be formed or the prompt has no valid generation boundary.
 
 The method intentionally exposes only KVBench's unified ``Result.performance``
 fields: ``ttft``, ``num_output_tokens``, and ``total_time``. No auxiliary
@@ -37,6 +37,8 @@ from helpers.backends.TransformersHelper import TransformersGenerator
 
 from .CacheClipBackend import (
     AuxiliaryRuntime,
+    PrimaryAssembly,
+    append_cached_primary_segment,
     assemble_primary_cache,
     continuation_offsets_from_full_sequence,
     group_candidate_windows,
@@ -47,6 +49,19 @@ from .CacheClipBackend import (
     shared_prefix_token_length,
     tokenize_with_offsets,
 )
+
+
+def recompute_diagnostics(selected_indices: Sequence[int], context_tokens: int) -> dict[str, Any]:
+    """Return per-run selection counts without promoting them to metrics."""
+    selected_count = len(set(int(index) for index in selected_indices))
+    denominator = max(0, int(context_tokens))
+    return {
+        "n_recomputed_tokens": selected_count,
+        "n_reusable_context_tokens": denominator,
+        "actual_recompute_ratio": (
+            selected_count / denominator if denominator else 0.0
+        ),
+    }
 
 
 class CacheClip(Method):
@@ -61,6 +76,10 @@ class CacheClip(Method):
     name = "cacheclip"
     backend = "transformers"
     maxCaseBatchSize = 1
+    # Aggregate the realized post-grouping recomputation ratio so experiment
+    # runners can verify the configured target without exposing selector
+    # timing internals as public KVBench metrics.
+    method_metrics = ("actual_recompute_ratio",)
 
     def __init__(
         self,
@@ -74,6 +93,8 @@ class CacheClip(Method):
         densityThreshold: int = 5,
         auxiliaryModelPath: Optional[str] = None,
         auxiliaryThreads: int = 12,
+        requireReuse: bool = False,
+        sharedPrefixText: Optional[str] = None,
         tag: Optional[str] = None,
     ):
         super().__init__(gpuNums=gpuNums, perfWeight=perfWeight, maxGpuNums=1, tag=tag)
@@ -92,6 +113,11 @@ class CacheClip(Method):
             "KVBENCH_CACHECLIP_AUX_MODEL", "HuggingFaceTB/SmolLM2-135M-Instruct"
         )
         self.auxiliaryThreads = auxiliaryThreads
+        # Experiment runners can fail closed instead of silently turning a
+        # selective-reuse case into a full-prefill case.  The default keeps
+        # existing callers' behavior unchanged.
+        self.requireReuse = bool(requireReuse)
+        self.sharedPrefixText = sharedPrefixText
         self._gen: Optional[TransformersGenerator] = None
         self._auxiliary: Optional[AuxiliaryRuntime] = None
         self._states: list[dict[str, Any]] = []
@@ -125,14 +151,26 @@ class CacheClip(Method):
             if not documents:
                 self._states.append({"chunks": [], "primary": [], "auxiliary": [], "prefix_length": 0})
                 continue
-            prefix = self._common_prefix(documents)
+            shared_prefix_text = getattr(self, "sharedPrefixText", None)
+            if shared_prefix_text is not None:
+                prefix = str(shared_prefix_text)
+                if any(not chunk.startswith(prefix) for chunk in documents):
+                    raise ValueError(
+                        "configured CacheClip sharedPrefixText must prefix every document"
+                    )
+                if any(len(chunk) <= len(prefix) for chunk in documents):
+                    raise ValueError(
+                        "configured CacheClip sharedPrefixText must leave content in every document"
+                    )
+            else:
+                prefix = self._common_prefix(documents)
             primary_caches = []
             primary_ids = []
             primary_offsets = []
             full_ids = []
             full_offsets = []
             for chunk in documents:
-                ids, offsets = tokenize_with_offsets(self._gen.tokenizer, chunk, self._gen.model.device)
+                ids, offsets = tokenize_with_offsets(self._gen.tokenizer, chunk)
                 full_ids.append(ids[0].tolist())
                 full_offsets.append(offsets)
                 primary_ids.append(ids)
@@ -184,8 +222,20 @@ class CacheClip(Method):
         chunks = state.get("chunks", [])
         parts = ComposeInterleavedReuse(chunks, prompt)
         matched_positions = [position for position, (chunk_index, _) in enumerate(parts) if chunk_index is not None]
-        if not matched_positions or not self._is_contiguous_match(parts, matched_positions):
+        if not matched_positions:
             return self._full_fallback(prompt)
+        if not self._is_contiguous_match(parts, matched_positions):
+            return self._run_interleaved(state, prompt, parts, matched_positions)
+        return self._run_contiguous(state, prompt, parts, matched_positions)
+
+    def _run_contiguous(
+        self,
+        state: dict[str, Any],
+        prompt: str,
+        parts,
+        matched_positions: list[int],
+    ) -> Result:
+        """Run the original fast path when all cached parts are adjacent."""
         first_match, last_match = matched_positions[0], matched_positions[-1]
         prefix_text = "".join(text for chunk_index, text in parts[:first_match] if chunk_index is None)
         query_text = "".join(text for chunk_index, text in parts[last_match + 1:] if chunk_index is None)
@@ -212,7 +262,13 @@ class CacheClip(Method):
             shared_prefix_cache = select_cache_sequence(
                 primary_indices[0], 0, shared_prefix_length_value
             )
-            shared_prefix_ids = primary_ids[0][:, :shared_prefix_length_value]
+            # ``primary_ids`` are tokenization outputs kept on CPU during
+            # Prepare; assembly concatenates them with any online prefix ids
+            # on the model device.  Move the shared-prefix slice explicitly so
+            # multi-document tasks (e.g. MuSiQue) do not mix CPU/CUDA tensors.
+            shared_prefix_ids = primary_ids[0][:, :shared_prefix_length_value].to(
+                self._gen.model.device
+            )
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="cacheclip") as executor:
             selection_future = executor.submit(
                 self._select,
@@ -250,6 +306,131 @@ class CacheClip(Method):
             preparation_time + generation_total,
             token_count,
             len(assembly.context_ids) + len(query_ids),
+            recompute_diagnostics(selected_indices, assembly.context_ids.size(1)),
+        )
+
+    def _run_interleaved(
+        self,
+        state: dict[str, Any],
+        prompt: str,
+        parts,
+        matched_positions: list[int],
+    ) -> Result:
+        """Run a prompt containing cached documents separated by fresh spans.
+
+        Fresh spans before or between cached chunks are prefetched online with
+        the already assembled cache as ``past_key_values``.  Cached chunks are
+        appended after RoPE re-alignment.  The final fresh suffix remains the
+        generation query; when the prompt ends in a cached chunk, its last
+        token is replayed from a cache truncated by one token so generation
+        still has a correct next-token boundary.
+        """
+        last_match = matched_positions[-1]
+        query_text = "".join(
+            text for chunk_index, text in parts[last_match + 1:]
+            if chunk_index is None
+        )
+        # If the prompt ends in a cached part, use that part as the selector
+        # query.  It normally contains the question/assistant boundary (e.g.
+        # VT/CWE shuffle tasks), while the last-token replay below provides the
+        # generation boundary.
+        selection_text = "".join(
+            text for chunk_index, text in parts if chunk_index is None
+        ) or parts[last_match][1]
+        if not selection_text:
+            selection_text = prompt
+        device = self._gen.model.device
+        assembly: PrimaryAssembly | None = None
+        occurrences: list[dict[str, Any]] = []
+        online_start = perf_counter()
+
+        for part_index, (chunk_index, text) in enumerate(parts[: last_match + 1]):
+            if chunk_index is None:
+                ids = self._gen.Encode(text, addSpecialTokens=False)
+                if not ids:
+                    continue
+                ids_tensor = torch.tensor([ids], dtype=torch.long, device=device)
+                if assembly is None:
+                    output = self._gen.Prefill(ids)
+                    assembly = PrimaryAssembly(
+                        cache=output.past_key_values,
+                        context_ids=ids_tensor,
+                    )
+                else:
+                    output = self._gen.Prefill(ids, pastKeyValues=assembly.cache)
+                    assembly = PrimaryAssembly(
+                        cache=output.past_key_values,
+                        context_ids=torch.cat([assembly.context_ids, ids_tensor], dim=1),
+                    )
+                continue
+
+            ids = state["primary_ids"][chunk_index].to(device)
+            if ids.numel() == 0:
+                continue
+            cache = state["primary"][chunk_index]
+            global_start = assembly.context_ids.size(1) if assembly is not None else 0
+            if assembly is None:
+                empty = torch.empty((1, 0), dtype=torch.long, device=device)
+                assembly = assemble_primary_cache(
+                    self._gen.model,
+                    None,
+                    empty,
+                    None,
+                    empty,
+                    0,
+                    [cache],
+                    [ids],
+                )
+            else:
+                assembly = append_cached_primary_segment(
+                    self._gen.model,
+                    assembly,
+                    cache,
+                    ids,
+                )
+            occurrences.append({
+                "chunk_index": chunk_index,
+                "global_start": global_start,
+                "auxiliary": state["auxiliary"][chunk_index],
+                "primary_offsets": state["primary_offsets"][chunk_index],
+                "prefix_length": int(state.get("prefix_length", 0)),
+            })
+
+        if assembly is None or not occurrences:
+            return self._full_fallback(prompt)
+
+        selected_indices = self._select_occurrences(selection_text, occurrences)
+        recompute_selected_tokens(self._gen.model, assembly, selected_indices)
+
+        if query_text:
+            query_ids = self._gen.Encode(query_text, addSpecialTokens=False)
+            if not query_ids:
+                return self._full_fallback(prompt)
+            generation_cache = assembly.cache
+            input_count = assembly.context_ids.size(1) + len(query_ids)
+        else:
+            # All prompt text is already represented by the assembled cache.
+            # Replay the final token from a cache shortened by one position to
+            # obtain the next-token logits without duplicating that token.
+            if assembly.context_ids.size(1) == 0:
+                return self._full_fallback(prompt)
+            query_ids = [int(assembly.context_ids[0, -1].item())]
+            generation_cache = select_cache_sequence(assembly.cache, 0, -1)
+            input_count = assembly.context_ids.size(1)
+
+        generation_start = perf_counter()
+        text, generation_ttft, generation_total, token_count = self._gen.Generate(
+            query_ids,
+            pastKeyValues=generation_cache,
+        )
+        preparation_time = generation_start - online_start
+        return self._result(
+            text,
+            preparation_time + generation_ttft,
+            preparation_time + generation_total,
+            token_count,
+            input_count,
+            recompute_diagnostics(selected_indices, assembly.context_ids.size(1)),
         )
 
     def _select(self, query: str, auxiliary_caches, state, ordered_indices, prefix_text: str = "") -> list[int]:
@@ -276,6 +457,41 @@ class CacheClip(Method):
         prefix_offset = len(self._gen.Encode(prefix_text, addSpecialTokens=False)) if prefix_text else 0
         return sorted(set(prefix_offset + item for item in selected))
 
+    def _select_occurrences(
+        self,
+        query: str,
+        occurrences: list[dict[str, Any]],
+    ) -> list[int]:
+        """Select and map tokens for cached occurrences in an interleaved run."""
+        scores = self._auxiliary.score_documents(
+            query,
+            [item["auxiliary"] for item in occurrences],
+        )
+        candidates = select_top_k_candidates(scores, self.candidateRatio)
+        grouped = group_candidate_windows(
+            candidates,
+            [len(item["auxiliary"].continuation_offsets) for item in occurrences],
+            self.windowSize,
+            self.densityThreshold,
+        )
+        # ``primary_offsets`` and auxiliary continuation offsets omit the
+        # common prefix computed during Prepare, while the interleaved path
+        # assembles each cached chunk in full.  Restore that local offset when
+        # mapping selected continuation tokens to global positions.
+        prefix_length = int(occurrences[0].get("prefix_length", 0))
+        selected: list[int] = []
+        for occurrence, windows in zip(occurrences, grouped):
+            mapped = map_auxiliary_to_primary_indices(
+                occurrence["auxiliary"].continuation_offsets,
+                occurrence["primary_offsets"],
+                windows,
+            )
+            selected.extend(
+                occurrence["global_start"] + prefix_length + item
+                for item in mapped
+            )
+        return sorted(set(selected))
+
     @staticmethod
     def _common_prefix(chunks: list[str]) -> str:
         if len(chunks) < 2:
@@ -296,13 +512,28 @@ class CacheClip(Method):
 
     def _full_fallback(self, prompt: str) -> Result:
         """Generate the full prompt only when reuse cannot be formed."""
+        if self.requireReuse:
+            raise RuntimeError(
+                "CacheClip strict reuse is enabled, but this prompt could not "
+                "be served through cached selective recomputation"
+            )
         ids = self._gen.Encode(prompt)
         text, ttft, total, token_count = self._gen.Generate(ids)
         return self._result(text, ttft, total, token_count, len(ids))
 
     @staticmethod
-    def _result(text: str, ttft: float, total: float, token_count: int, input_count: int) -> Result:
+    def _result(
+        text: str,
+        ttft: float,
+        total: float,
+        token_count: int,
+        input_count: int,
+        diagnostics: Optional[dict[str, Any]] = None,
+    ) -> Result:
         """Build a Result without adding CacheClip-specific metrics."""
+        metadata = {"backend": "transformers", "n_input": input_count}
+        if diagnostics:
+            metadata.update(diagnostics)
         return Result(
             output=text,
             performance={
@@ -310,7 +541,7 @@ class CacheClip(Method):
                 NumOutputTokensKey: int(token_count),
                 TotalTimeKey: float(total),
             },
-            metadata={"backend": "transformers", "n_input": input_count},
+            metadata=metadata,
         )
 
     def Reset(self) -> None:

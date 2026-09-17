@@ -928,6 +928,7 @@ class _DenseProphetRuntime:
         """Reference full-prefill path used when reuse cannot be established."""
         if not ids:
             return "", 0.0, 0.0, 0
+        full_start = time.perf_counter()
         context_ids = list(ids)
         empty = []
         # Treat every input position as selected and use the same explicit
@@ -947,7 +948,16 @@ class _DenseProphetRuntime:
             context_ids,
             [],
         )
-        return self.decode_from_cache(cache, logits, list(context_ids))
+        prefill_ttft = time.perf_counter() - full_start
+        text, decode_ttft, decode_total, n_tokens = self.decode_from_cache(
+            cache, logits, list(context_ids)
+        )
+        return (
+            text,
+            prefill_ttft + decode_ttft,
+            decode_total,
+            n_tokens,
+        )
 
 
 class ProphetKV(Method):
@@ -955,7 +965,7 @@ class ProphetKV(Method):
 
     name = "prophetkv"
     maxCaseBatchSize = 1
-    method_metrics = ("reuse_ratio", "recompute_ratio", "stage1_score_time")
+    method_metrics = ("reuse_ratio", "recompute_ratio", "stage1_score_time", "fallback_rate")
 
     def __init__(
         self,
@@ -1027,6 +1037,10 @@ class ProphetKV(Method):
         if len(self._states) != len(data):
             self._states = [_CaseState([], []) for _ in data]
         results = []
+        # TTFT starts at the online Run boundary. Prepared document caches
+        # are already available, but matching, prompt reconstruction, scoring,
+        # stitching, and recomputation are query-time work.
+        request_start = time.perf_counter()
         for index, prompt in enumerate(data):
             state = self._states[index]
             t_match = time.perf_counter()
@@ -1043,9 +1057,10 @@ class ProphetKV(Method):
                 )
             if not reused_positions:
                 t0 = time.perf_counter()
-                text, ttft, total, n_tokens = self._runtime.full_generate(
-                    self._runtime.encode(prompt)
-                )
+                ids = self._runtime.encode(prompt)
+                generation_start = time.perf_counter()
+                text, backend_ttft, total, n_tokens = self._runtime.full_generate(ids)
+                ttft = generation_start - request_start + backend_ttft
                 results.append(
                     self._result(
                         text,
@@ -1125,7 +1140,9 @@ class ProphetKV(Method):
                 })
 
             if not query_ids:
-                results.append(self._fallback(prompt, "empty_query_span"))
+                results.append(
+                    self._fallback(prompt, "empty_query_span", request_start)
+                )
                 continue
 
             context_k_layers: List[Any] = []
@@ -1140,7 +1157,7 @@ class ProphetKV(Method):
                     flush=True,
                 )
             if not cached_ids or len(full_ids) > self.maxModelLen:
-                results.append(self._fallback(prompt, "length_limit"))
+                results.append(self._fallback(prompt, "length_limit", request_start))
                 continue
             for layer_index in range(len(self._runtime.layers)):
                 context_k_layers.append(
@@ -1212,7 +1229,7 @@ class ProphetKV(Method):
             results.append(
                 self._result(
                     text,
-                    score_time + select_time + recompute_time + decode_ttft,
+                    t_decode - request_start + decode_ttft,
                     score_time + select_time + recompute_time + total,
                     n_tokens,
                     {
@@ -1237,17 +1254,23 @@ class ProphetKV(Method):
                         "stage2_select_time": select_time,
                         "stage2_recompute_time": recompute_time,
                         "fallback_reason": None,
+                        "fallback_rate": 0.0,
                     },
                 )
             )
         return results
 
-    def _fallback(self, prompt: str, reason: str) -> Result:
+    def _fallback(
+        self, prompt: str, reason: str, request_start: Optional[float] = None
+    ) -> Result:
         if self._runtime is None:
             raise RuntimeError("ProphetKV.Initialize must run before fallback")
-        text, ttft, total, n_tokens = self._runtime.full_generate(
-            self._runtime.encode(prompt)
-        )
+        if request_start is None:
+            request_start = time.perf_counter()
+        ids = self._runtime.encode(prompt)
+        generation_start = time.perf_counter()
+        text, backend_ttft, total, n_tokens = self._runtime.full_generate(ids)
+        ttft = generation_start - request_start + backend_ttft
         return self._result(
             text,
             ttft,
@@ -1263,6 +1286,7 @@ class ProphetKV(Method):
                 "stage1_score_time": 0.0,
                 "stage2_select_time": 0.0,
                 "stage2_recompute_time": 0.0,
+                "fallback_rate": 1.0,
             },
         )
 
