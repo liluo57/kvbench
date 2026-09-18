@@ -265,6 +265,7 @@ class A3Worker:
 
         if not ids:
             raise ValueError("empty prompt")
+        decodeCallStart = time.perf_counter()
         args = self._sampling_args()
         input_state = {
             "input_ids": self.torch.tensor([ids], device="cuda", dtype=self.torch.long),
@@ -272,7 +273,10 @@ class A3Worker:
             "position_ids": self.torch.arange(len(ids), device="cuda").unsqueeze(0),
         }
         stop = [x for x in (self.tokenizer.eos_token_id, self.tokenizer.bos_token_id) if x is not None]
-        start = time.perf_counter()
+        # The parent adapter combines this backend boundary with its own
+        # Method.Run timestamp.  That includes IPC and all worker-side prompt,
+        # cache, and config preparation exactly once.
+        generationStart = time.perf_counter()
         # ragkv's decode() prints intermediate/generated text to stdout.
         # Keep that diagnostic stream away from KVBench's JSON-lines protocol;
         # otherwise a numeric-only answer (for example ``2009``) is parsed as
@@ -287,9 +291,15 @@ class A3Worker:
                 self.args.max_new_tokens,
                 config,
             )
-        total = time.perf_counter() - start
+        total = time.perf_counter() - decodeCallStart
         n_tokens = len(self.tokenizer.encode(text, add_special_tokens=False))
-        return text, float(ttft), float(total), int(n_tokens)
+        return (
+            text,
+            float(ttft),
+            float(total),
+            int(n_tokens),
+            generationStart,
+        )
 
     def _full_config(self):
         return {
@@ -309,7 +319,9 @@ class A3Worker:
         baseline process and calls ragkv's ``vanilla()`` entry point.
         """
         ids = self._encode(text)
-        output, ttft, total, n_tokens = self._decode(ids, self._full_config())
+        output, ttft, total, n_tokens, generationStart = self._decode(
+            ids, self._full_config()
+        )
         return {
             "ok": True,
             "text": output,
@@ -317,6 +329,7 @@ class A3Worker:
             "total_time": total,
             "num_tokens": n_tokens,
             "n_input": len(ids),
+            "generation_start": generationStart,
             "reuse_ratio": 0.0,
             "runtime_mode": "ragkv_official_patched",
             "algorithm": "full_recompute",
@@ -376,7 +389,9 @@ class A3Worker:
                 },
             },
         }
-        output, ttft, total, n_tokens = self._decode(full_ids, config)
+        output, ttft, total, n_tokens, generationStart = self._decode(
+            full_ids, config
+        )
         return {
             "ok": True,
             "text": output,
@@ -384,6 +399,7 @@ class A3Worker:
             "total_time": total,
             "num_tokens": n_tokens,
             "n_input": len(full_ids),
+            "generation_start": generationStart,
             "reuse_ratio": round(n_doc / len(full_ids), 6) if full_ids else 0.0,
             "runtime_mode": "ragkv_official_patched",
             "algorithm": "a3_reuse",

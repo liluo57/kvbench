@@ -1032,15 +1032,15 @@ class ProphetKV(Method):
         data: List[str],
         retainOutput: Optional[List[bool]] = None,
     ) -> List[Result]:
+        request_start = time.perf_counter()
         if self._runtime is None:
             raise RuntimeError("ProphetKV.Initialize must run before Run")
         if len(self._states) != len(data):
             self._states = [_CaseState([], []) for _ in data]
         results = []
-        # TTFT starts at the online Run boundary. Prepared document caches
-        # are already available, but matching, prompt reconstruction, scoring,
-        # stitching, and recomputation are query-time work.
-        request_start = time.perf_counter()
+        # Prepared document caches are already available, but matching, prompt
+        # reconstruction, scoring, stitching, and recomputation are query-time
+        # work and are all measured from the Run boundary above.
         for index, prompt in enumerate(data):
             state = self._states[index]
             t_match = time.perf_counter()

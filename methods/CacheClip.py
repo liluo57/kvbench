@@ -206,6 +206,7 @@ class CacheClip(Method):
         is intentionally ignored: this implementation cannot safely register
         generated output KV as another prepared segment yet.
         """
+        online_start = perf_counter()
         if self._gen is None or self._auxiliary is None:
             raise RuntimeError("CacheClip must be initialized before Run")
         _ = retainOutput
@@ -214,19 +215,38 @@ class CacheClip(Method):
         results = []
         for index, prompt in enumerate(data):
             state = self._states[index]
-            result = self._run_one(state, prompt)
+            result = self._run_one(state, prompt, online_start=online_start)
             results.append(result)
         return results
 
-    def _run_one(self, state: dict[str, Any], prompt: str) -> Result:
+    def _run_one(
+        self,
+        state: dict[str, Any],
+        prompt: str,
+        *,
+        online_start: Optional[float] = None,
+    ) -> Result:
+        explicit_online_start = online_start is not None
+        if online_start is None:
+            online_start = perf_counter()
         chunks = state.get("chunks", [])
         parts = ComposeInterleavedReuse(chunks, prompt)
         matched_positions = [position for position, (chunk_index, _) in enumerate(parts) if chunk_index is not None]
         if not matched_positions:
-            return self._full_fallback(prompt)
+            if not explicit_online_start:
+                return self._full_fallback(prompt)
+            return self._full_fallback(prompt, online_start=online_start)
         if not self._is_contiguous_match(parts, matched_positions):
-            return self._run_interleaved(state, prompt, parts, matched_positions)
-        return self._run_contiguous(state, prompt, parts, matched_positions)
+            if not explicit_online_start:
+                return self._run_interleaved(state, prompt, parts, matched_positions)
+            return self._run_interleaved(
+                state, prompt, parts, matched_positions, online_start=online_start
+            )
+        if not explicit_online_start:
+            return self._run_contiguous(state, prompt, parts, matched_positions)
+        return self._run_contiguous(
+            state, prompt, parts, matched_positions, online_start=online_start
+        )
 
     def _run_contiguous(
         self,
@@ -234,20 +254,23 @@ class CacheClip(Method):
         prompt: str,
         parts,
         matched_positions: list[int],
+        *,
+        online_start: Optional[float] = None,
     ) -> Result:
         """Run the original fast path when all cached parts are adjacent."""
+        if online_start is None:
+            online_start = perf_counter()
         first_match, last_match = matched_positions[0], matched_positions[-1]
         prefix_text = "".join(text for chunk_index, text in parts[:first_match] if chunk_index is None)
         query_text = "".join(text for chunk_index, text in parts[last_match + 1:] if chunk_index is None)
         if not query_text:
-            return self._full_fallback(prompt)
+            return self._full_fallback(prompt, online_start=online_start)
         ordered_indices = [parts[position][0] for position in matched_positions]
         primary_indices = [state["primary"][chunk_index] for chunk_index in ordered_indices]
         primary_ids = [state["primary_ids"][chunk_index] for chunk_index in ordered_indices]
         auxiliary_caches = [state["auxiliary"][chunk_index] for chunk_index in ordered_indices]
         prefix_cache = None
         prefix_ids = torch.empty((1, 0), dtype=torch.long, device=self._gen.model.device)
-        online_start = perf_counter()
         if prefix_text:
             prefix_ids = torch.tensor(
                 [self._gen.Encode(prefix_text, addSpecialTokens=False)],
@@ -294,7 +317,7 @@ class CacheClip(Method):
         recompute_selected_tokens(self._gen.model, assembly, selected_indices)
         query_ids = self._gen.Encode(query_text, addSpecialTokens=False)
         if not query_ids:
-            return self._full_fallback(prompt)
+            return self._full_fallback(prompt, online_start=online_start)
         generation_start = perf_counter()
         text, generation_ttft, generation_total, token_count = self._gen.Generate(
             query_ids, pastKeyValues=assembly.cache
@@ -315,6 +338,8 @@ class CacheClip(Method):
         prompt: str,
         parts,
         matched_positions: list[int],
+        *,
+        online_start: Optional[float] = None,
     ) -> Result:
         """Run a prompt containing cached documents separated by fresh spans.
 
@@ -325,6 +350,8 @@ class CacheClip(Method):
         token is replayed from a cache truncated by one token so generation
         still has a correct next-token boundary.
         """
+        if online_start is None:
+            online_start = perf_counter()
         last_match = matched_positions[-1]
         query_text = "".join(
             text for chunk_index, text in parts[last_match + 1:]
@@ -342,8 +369,6 @@ class CacheClip(Method):
         device = self._gen.model.device
         assembly: PrimaryAssembly | None = None
         occurrences: list[dict[str, Any]] = []
-        online_start = perf_counter()
-
         for part_index, (chunk_index, text) in enumerate(parts[: last_match + 1]):
             if chunk_index is None:
                 ids = self._gen.Encode(text, addSpecialTokens=False)
@@ -397,7 +422,7 @@ class CacheClip(Method):
             })
 
         if assembly is None or not occurrences:
-            return self._full_fallback(prompt)
+            return self._full_fallback(prompt, online_start=online_start)
 
         selected_indices = self._select_occurrences(selection_text, occurrences)
         recompute_selected_tokens(self._gen.model, assembly, selected_indices)
@@ -405,7 +430,7 @@ class CacheClip(Method):
         if query_text:
             query_ids = self._gen.Encode(query_text, addSpecialTokens=False)
             if not query_ids:
-                return self._full_fallback(prompt)
+                return self._full_fallback(prompt, online_start=online_start)
             generation_cache = assembly.cache
             input_count = assembly.context_ids.size(1) + len(query_ids)
         else:
@@ -413,7 +438,7 @@ class CacheClip(Method):
             # Replay the final token from a cache shortened by one position to
             # obtain the next-token logits without duplicating that token.
             if assembly.context_ids.size(1) == 0:
-                return self._full_fallback(prompt)
+                return self._full_fallback(prompt, online_start=online_start)
             query_ids = [int(assembly.context_ids[0, -1].item())]
             generation_cache = select_cache_sequence(assembly.cache, 0, -1)
             input_count = assembly.context_ids.size(1)
@@ -510,16 +535,27 @@ class CacheClip(Method):
         first, last = matched_positions[0], matched_positions[-1]
         return all(parts[position][0] is not None for position in range(first, last + 1))
 
-    def _full_fallback(self, prompt: str) -> Result:
+    def _full_fallback(
+        self, prompt: str, *, online_start: Optional[float] = None
+    ) -> Result:
         """Generate the full prompt only when reuse cannot be formed."""
+        if online_start is None:
+            online_start = perf_counter()
         if self.requireReuse:
             raise RuntimeError(
                 "CacheClip strict reuse is enabled, but this prompt could not "
                 "be served through cached selective recomputation"
             )
         ids = self._gen.Encode(prompt)
+        generation_start = perf_counter()
         text, ttft, total, token_count = self._gen.Generate(ids)
-        return self._result(text, ttft, total, token_count, len(ids))
+        return self._result(
+            text,
+            generation_start - online_start + ttft,
+            generation_start - online_start + total,
+            token_count,
+            len(ids),
+        )
 
     @staticmethod
     def _result(

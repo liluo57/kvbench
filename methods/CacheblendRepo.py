@@ -266,14 +266,16 @@ class CacheblendRepo(Method):
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
         """Run a batch of prompts, fusing cached and fresh spans in prompt order."""
+        runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._chunks) != len(data):
             self._chunks = [[] for _ in data]
         results: List[Result] = []
 
         # Resolve every prompt before serving the batch. The helper uses these
-        # plans to allocate one right-sized GPU assembly buffer up front, so a
-        # later longer request never grows the buffer inside its measured TTFT.
+        # query-dependent plans to allocate one right-sized GPU assembly buffer
+        # up front. This reserve is online work and remains inside each result's
+        # Run-to-first-token interval through the returned generation boundary.
         plans = []
         reserveParts = []
         if not self.fullPrefill:
@@ -300,6 +302,7 @@ class CacheblendRepo(Method):
                     prompt,
                     retain_output=retain,
                     maxNewTokens=maxNewTokens,
+                    onlineStart=runStart,
                 )
                 results.append(result)
                 if retain and result.output and result.output not in chunks:
@@ -313,6 +316,7 @@ class CacheblendRepo(Method):
                     prompt,
                     retain_output=retain,
                     maxNewTokens=maxNewTokens,
+                    onlineStart=runStart,
                 )
                 results.append(result)
                 if retain and result.output and result.output not in chunks:
@@ -328,7 +332,12 @@ class CacheblendRepo(Method):
                 }
             )
 
-            result = self._Result(resp, full=False, reordered=reordered)
+            result = self._Result(
+                resp,
+                full=False,
+                reordered=reordered,
+                onlineStart=runStart,
+            )
             results.append(result)
             if retain and result.output and result.output not in chunks:
                 chunks.append(result.output)
@@ -364,6 +373,7 @@ class CacheblendRepo(Method):
         *,
         retain_output: bool = False,
         maxNewTokens: Optional[int] = None,
+        onlineStart: Optional[float] = None,
     ) -> Result:
         resp = self._Request(
             {
@@ -373,9 +383,16 @@ class CacheblendRepo(Method):
                 "max_new_tokens": ResolveMaxNewTokens(maxNewTokens),
             }
         )
-        return self._Result(resp, full=True)
+        return self._Result(resp, full=True, onlineStart=onlineStart)
 
-    def _Result(self, resp: Dict[str, Any], *, full: bool, reordered: bool = False) -> Result:
+    def _Result(
+        self,
+        resp: Dict[str, Any],
+        *,
+        full: bool,
+        reordered: bool = False,
+        onlineStart: Optional[float] = None,
+    ) -> Result:
         metadata: Dict[str, Any] = {
             "reuse_ratio": resp.get("reuse_ratio", 0.0),
             "recomp_ratio": self.recompRatio,
@@ -389,12 +406,19 @@ class CacheblendRepo(Method):
             metadata["full_prefill"] = True
         if reordered:
             metadata["reordered"] = True
+        ttft = float(resp["ttft"])
+        total = resp.get("total_time", resp["ttft"])
+        generationStart = resp.get("generation_start")
+        if onlineStart is not None and generationStart is not None:
+            onlineOffset = float(generationStart) - onlineStart
+            ttft += onlineOffset
+            total = float(total) + onlineOffset
         return Result(
             output=resp["text"],
             performance={
-                TtftKey: resp["ttft"],
+                TtftKey: ttft,
                 NumOutputTokensKey: resp["num_tokens"],
-                TotalTimeKey: resp.get("total_time", resp["ttft"]),
+                TotalTimeKey: total,
             },
             metadata=metadata,
         )

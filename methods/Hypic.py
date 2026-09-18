@@ -354,6 +354,7 @@ class HypicMethod(Method):
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
+        runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._states) != len(data):
             self._states = [{"prepare": []} for _ in data]
@@ -373,7 +374,9 @@ class HypicMethod(Method):
                     else runInput
                 )
                 output, ttft, total, nTokens, meta = self._Generate(
-                    fullPrompt, maxNewTokens=maxNewTokens
+                    fullPrompt,
+                    maxNewTokens=maxNewTokens,
+                    onlineStart=runStart,
                 )
                 results.append(
                     self._Result(
@@ -420,7 +423,9 @@ class HypicMethod(Method):
                     else runInput
                 )
             output, ttft, total, nTokens, meta = self._Generate(
-                prompt, maxNewTokens=maxNewTokens
+                prompt,
+                maxNewTokens=maxNewTokens,
+                onlineStart=runStart,
             )
 
             if retain:
@@ -507,13 +512,23 @@ class HypicMethod(Method):
         )
 
     def _Generate(
-        self, prompt: str, *, maxNewTokens: int
+        self,
+        prompt: str,
+        *,
+        maxNewTokens: int,
+        onlineStart: Optional[float] = None,
     ) -> Tuple[str, float, float, int, Dict[str, Any]]:
-        """Generate one request and measure TTFT at the first streamed token."""
+        """Generate one request and measure TTFT at the first streamed token.
+
+        ``onlineStart`` is the enclosing Method.Run boundary.  Prepare and
+        output-retention warmups leave it unset, so they remain outside online
+        TTFT.
+        """
         if self.engine is None:
             raise RuntimeError("HypicMethod is not initialized")
 
         started = time.perf_counter()
+        onlineOffset = 0.0 if onlineStart is None else started - onlineStart
         ttft: Optional[float] = None
         final: Optional[Dict[str, Any]] = None
         maxCached = 0
@@ -547,8 +562,8 @@ class HypicMethod(Method):
         )
         return (
             final.get("text") or "",
-            float(ttft if ttft is not None else total),
-            total,
+            float(ttft if ttft is not None else total) + onlineOffset,
+            total + onlineOffset,
             nTokens,
             meta,
         )

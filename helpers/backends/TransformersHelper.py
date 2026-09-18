@@ -293,7 +293,9 @@ class TransformersGenerator:
     ) -> Tuple[Any, ...]:
         """Decode ``inputIds`` according to the resolved ModelConfig.
 
-        Returns ``(text, ttft, totalTime, numOutputTokens)``.
+        Returns ``(text, ttft, totalTime, numOutputTokens)``.  The returned
+        ``ttft`` starts at entry to this backend helper; Method adapters add
+        any request-dependent online work that precedes this call.
         When ``pastKeyValues`` is given (naive reuse), only the suffix is
         fed to the model — the cached context KV is never recomputed.
         """
@@ -335,56 +337,16 @@ class TransformersGenerator:
         *,
         maxNewTokens: Optional[int] = None,
     ) -> List[Tuple[str, float, float, int]]:
-        """Greedy-decode a batch of prompts in one ``model.generate`` call.
+        """Generate prompts while preserving a real per-request TTFT.
 
-        Inputs are left-padded to a common length so the single GPU call sees a
-        real batch (better utilization than N sequential calls). Returns one
-        ``(text, ttft, totalTime, numOutputTokens)`` per prompt, in input order.
-
-        ``model.generate`` does not expose per-token timings, so ``ttft`` is
-        approximated as ``totalTime / batchSize``. ``totalTime`` is the batch's
-        shared wall-clock *amortized* over the batch
-        (``wallClock / batchSize``), so summing per-sample times equals the
-        actual run wall-clock — what :class:`~metrics.Throughput.ThroughputMetric`
-        expects.
+        HuggingFace ``model.generate`` does not expose the first-token
+        boundary for each member of a batch. Returning total batch time (or
+        an amortized fraction of it) as TTFT would violate the KVBench timing
+        contract, so this helper uses the token-by-token path for each request.
+        The concrete KVBench methods currently use :meth:`Generate` directly;
+        this method remains correct for callers that need a list-shaped API.
         """
-        maxNew = self.maxNewTokens if maxNewTokens is None else maxNewTokens
-        padId = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-
-        maxLen = max(len(ids) for ids in inputIdsList)
-        batch = self._torch.full(
-            (len(inputIdsList), maxLen), padId, dtype=self._torch.long, device=self.device
-        )
-        mask = self._torch.zeros(
-            (len(inputIdsList), maxLen), dtype=self._torch.long, device=self.device
-        )
-        for i, ids in enumerate(inputIdsList):
-            batch[i, -len(ids):] = self._torch.tensor(
-                ids, dtype=self._torch.long, device=self.device
-            )
-            mask[i, -len(ids):] = 1
-
-        t0 = time.perf_counter()
-        with self._torch.no_grad():
-            generationKwargs = TransformersGenerationKwargs(
-                self.samplingConfig, maxNew
-            )
-            generator = self._Generator()
-            if generator is not None:
-                generationKwargs["generator"] = generator
-            out = self.model.generate(
-                batch,
-                attention_mask=mask,
-                pad_token_id=padId,
-                **generationKwargs,
-            )
-        total = time.perf_counter() - t0
-        amortized = total / len(inputIdsList) if inputIdsList else 0.0
-
-        results: List[Tuple[str, float, float, int]] = []
-        for i, seq in enumerate(out):
-            gen = seq[mask[i].sum():]  # strip the left-padded input
-            nTokens = int(gen.numel())
-            text = self.tokenizer.decode(gen, skip_special_tokens=True)
-            results.append((text, amortized, amortized, nTokens))
-        return results
+        return [
+            self.Generate(ids, maxNewTokens=maxNewTokens)
+            for ids in inputIdsList
+        ]

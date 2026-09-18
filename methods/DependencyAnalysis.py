@@ -609,6 +609,7 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
+        run_start = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._chunks) != len(data):
             self._chunks = [[] for _ in data]
@@ -617,17 +618,19 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
         for index, prompt in enumerate(data):
             ids = self._gen.Encode(prompt)
             chunks = self._chunks[index]
-            start = time.perf_counter()
+            start = run_start
 
             # Do not keep the returned tuple alive: it also owns a reference
             # to the full input KV cache.  The cache is needed for
             # ``kv_deviation`` but must not overlap with the second, full
             # prefill used for attention dependency measurements.
-            text, ttft, _, nTokens, fullCache, _ = self._gen.Generate(
+            generation_start = time.perf_counter()
+            text, backend_ttft, _, nTokens, fullCache, _ = self._gen.Generate(
                 ids,
                 maxNewTokens=maxNewTokens,
                 returnCache=True,
             )
+            ttft = generation_start - run_start + backend_ttft
             # Pass ownership through a mutable holder so _Analyze can clear
             # the only caller-side reference before the attention prefill.
             fullCacheHolder = [fullCache]

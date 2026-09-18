@@ -144,6 +144,12 @@ class Method(ABC):
     ) -> List[Result]:
         """Run inference on a batch of complete prompts.
 
+        TTFT is end-to-end online latency from entry into this ``Run`` path to
+        the first generated token.  All work that depends on the current
+        request—lookup, composition, cache transformation/assembly, selection,
+        repair, and fresh prefill—is included.  Initialization and reusable
+        state construction in ``Prepare`` are excluded.
+
         ``data[i]`` is the complete prompt for RUN action ``i``.
         ``retainOutput[i]`` is a future-reuse/lifetime hint for that generated
         output; methods may preserve backend-specific reusable state or ignore

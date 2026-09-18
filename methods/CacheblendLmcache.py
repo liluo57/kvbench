@@ -249,6 +249,7 @@ class CacheblendLmcache(Method):
         then submitted to :meth:`_GenerateBatch` in one call so the V1 engine
         generates them concurrently.
         """
+        runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         # LMCache owns prefix-cache lifetime; generated-output retention is not
         # currently exposed by the in-process connector.
@@ -286,7 +287,9 @@ class CacheblendLmcache(Method):
             nInput = len(ids)
             metas.append({"n_input": nInput})
 
-        batchOut = self._GenerateBatch(tokenStreams, maxNewTokens)
+        batchOut = self._GenerateBatch(
+            tokenStreams, maxNewTokens, onlineStart=runStart
+        )
         results = []
         for (text, ttft, nTokens, totalTime, numCached), meta in zip(
             batchOut, metas
@@ -346,7 +349,13 @@ class CacheblendLmcache(Method):
             pass
 
     # --------------------------------------------------------------- generate
-    def _GenerateBatch(self, tokenIdsList: List[List[int]], maxTokens: int):
+    def _GenerateBatch(
+        self,
+        tokenIdsList: List[List[int]],
+        maxTokens: int,
+        *,
+        onlineStart: Optional[float] = None,
+    ):
         """Drive the V1 engine over many concurrent requests.
 
         Every token stream is submitted up front (``add_request``) and all are
@@ -363,6 +372,7 @@ class CacheblendLmcache(Method):
         engine = self.llm.llm_engine
         requestIds: List[str] = []
         t0 = time.perf_counter()
+        onlineOffset = 0.0 if onlineStart is None else t0 - onlineStart
         for i, tokenIds in enumerate(tokenIdsList):
             requestId = f"kvbench-{time.time_ns()}-{i}"
             engine.add_request(
@@ -398,7 +408,7 @@ class CacheblendLmcache(Method):
         return [
             (
                 texts.get(rid, ""),
-                float(ttfts.get(rid, 0.0)),
+                float(ttfts.get(rid, 0.0) + onlineOffset),
                 tokenLens.get(rid, 0),
                 amortized,
                 numCached.get(rid, 0),
