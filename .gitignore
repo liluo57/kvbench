@@ -10,3 +10,5 @@ outputs/
 .claude
 .pytest_cache/
 
+# Benchmark data is reproducibly prepared from config.yaml.
+data/

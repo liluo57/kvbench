@@ -35,10 +35,20 @@ pip install -r requirement.txt
 > 2. Setup that repo according to their instructions.
 > 3. Write the repo path in `config.yaml`.
 
+4. Prepare datasets
+```bash
+python scripts/PrepareDataset.py
+```
 
-3. Edit config.yaml and Main.py
+The benchmark data is intentionally not stored in git.  The command reads all
+dataset sources, splits, revisions, and RULER generation parameters from
+`config.yaml`, prepares complete declared splits, and installs them under
+`DatasetPath`.
 
-4. Just do it!
+
+5. Edit config.yaml and Main.py
+
+6. Just do it!
 ```bash
 python Main.py
 ```
