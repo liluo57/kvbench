@@ -33,6 +33,8 @@ from .A3Repo import A3Repo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
+from .ProphetKV import ProphetKV
+from .CacheClip import CacheClip
 from .DependencyAnalysis import DependencyAnalysisMethod, DependencyAnalysisTransformer
 from .Rollout import RolloutMethod
 __all__ = [
@@ -44,6 +46,8 @@ __all__ = [
     "FullPrefillVllm",
     "HypicMethod",
     "NaiveTransformer",
+    "ProphetKV",
+    "CacheClip",
     "DependencyAnalysisMethod",
     "DependencyAnalysisTransformer",
     "RolloutMethod",
