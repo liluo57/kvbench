@@ -72,6 +72,7 @@ _AGENT_ENV_RESERVED_KEYS = frozenset(
         "BENCHFLOW_PROVIDER_API_KEY",
     }
 )
+_PREBUILT_IMAGE_PREFIX = "kvbench-skillsbench/"
 
 
 def NormalizeSkillMode(value: str) -> str:
@@ -274,8 +275,10 @@ class RemoteRunManager:
                 raise ApiError(429, "remote runtime has reached its concurrency limit")
 
             self._CheckProvider(record)
-            if record.spec["source_mode"] == "local" and self.validateDockerImages:
-                self._CheckLocalDockerImage(record)
+            if record.spec["source_mode"] == "local":
+                if self.validateDockerImages:
+                    self._UsePrebuiltTaskImage(record)
+                    self._CheckLocalDockerImage(record)
             command = self._BuildCommand(record)
             logPath = record.jobsDir / "benchflow.log"
             log = logPath.open("ab")
@@ -556,6 +559,73 @@ class RemoteRunManager:
                 f"Docker image {image!r} is missing on the remote runtime host; "
                 "prepare the SkillsBench images on that host first",
             )
+
+    @staticmethod
+    def _PrebuiltTaskImage(taskId: str) -> str:
+        safeName = re.sub(r"[^a-z0-9_.-]+", "-", taskId.lower()).strip(".-")
+        return f"{_PREBUILT_IMAGE_PREFIX}{safeName or 'task'}:latest"
+
+    def _UsePrebuiltTaskImage(self, record: RunRecord) -> None:
+        """Use a prepared task image when uploaded source lacks ``image``.
+
+        PrepareSkillsbench normally adds the image to task.md. A remote run
+        can still receive an unmodified checkout, though; without this small
+        fallback BenchFlow selects its build compose file and rebuilds a large
+        image even when the remote host already has the prepared tag.
+        Explicit task images always win, and a missing conventional image
+        leaves BenchFlow's normal build behavior unchanged.
+        """
+
+        taskFile = (
+            record.runDir / "source" / "tasks" / record.spec["task_id"] / "task.md"
+        )
+        try:
+            from benchflow.task.document import TaskDocument
+
+            configured = TaskDocument.from_path(taskFile).config.sandbox.docker_image
+        except Exception as exc:
+            raise ApiError(
+                400, f"could not read remote task configuration: {exc}"
+            ) from exc
+        if configured:
+            return
+
+        image = self._PrebuiltTaskImage(record.spec["task_id"])
+        if not shutil.which("docker"):
+            return
+        try:
+            inspected = subprocess.run(
+                ["docker", "image", "inspect", image],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ApiError(
+                504, "timed out while checking the remote Docker image"
+            ) from exc
+        if inspected.returncode != 0:
+            return
+
+        text = taskFile.read_text(encoding="utf-8")
+        normalized = text.replace("\r\n", "\n")
+        lines = normalized.splitlines(keepends=True)
+        if not lines or lines[0].strip() != "---":
+            raise ApiError(400, f"{taskFile} does not start with YAML frontmatter")
+        closingIndex = next(
+            (
+                index
+                for index, line in enumerate(lines[1:], start=1)
+                if line.strip() == "---"
+            ),
+            None,
+        )
+        if closingIndex is None:
+            raise ApiError(400, f"{taskFile} has no closing YAML frontmatter delimiter")
+        lines.insert(closingIndex, f"image: {image}\n")
+        taskFile.write_text("".join(lines), encoding="utf-8")
 
     def _BuildCommand(self, record: RunRecord) -> list[str]:
         command = (

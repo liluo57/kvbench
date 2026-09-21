@@ -24,6 +24,9 @@ from scripts.RemoteDockerRuntimeServer import (
 remoteBenchflowModule = importlib.import_module(
     "helpers.benchflow.RemoteBenchflowRunner"
 )
+remoteDockerModule = importlib.import_module(
+    "scripts.RemoteDockerRuntimeServer"
+)
 
 
 def _spec(**overrides):
@@ -185,6 +188,59 @@ def test_remote_server_skips_docker_check_when_image_unpinned(tmp_path):
     parsedImage = TaskDocument.from_path(taskDir / "task.md").config.sandbox.docker_image
     assert not parsedImage
     # Should NOT raise: empty docker_image means skip the check.
+    manager._CheckLocalDockerImage(record)
+
+
+def test_remote_server_uses_existing_conventional_prebuilt_image(
+    monkeypatch, tmp_path
+):
+    """An unmodified local task should still reuse a prepared image."""
+
+    skillsbench = tmp_path / "skillsbench"
+    taskDir = skillsbench / "tasks" / "exoplanet-detection-period"
+    _MakeLocalSource(
+        taskDir,
+        "---\n"
+        "sandbox:\n"
+        "  cpus: 1\n"
+        "  memory_mb: 1024\n"
+        "---\n"
+        "# demo\n",
+    )
+    manager = RemoteRunManager(
+        workRoot=tmp_path / "runtime",
+        benchCommand="bench",
+        validateDockerImages=True,
+    )
+    record = manager.CreateRun(
+        _spec(task_id="exoplanet-detection-period", source_mode="local")
+    )
+    archiveBuffer = io.BytesIO()
+    with tarfile.open(fileobj=archiveBuffer, mode="w:gz") as archive:
+        archive.add(taskDir, arcname="tasks/exoplanet-detection-period", recursive=True)
+    archiveBuffer.seek(0)
+    manager.UploadSource(
+        record.runId,
+        archiveBuffer,
+        len(archiveBuffer.getvalue()),
+    )
+
+    monkeypatch.setattr(remoteDockerModule.shutil, "which", lambda _: "/usr/bin/docker")
+
+    class InspectResult:
+        returncode = 0
+
+    monkeypatch.setattr(
+        remoteDockerModule.subprocess,
+        "run",
+        lambda *args, **kwargs: InspectResult(),
+    )
+    manager._UsePrebuiltTaskImage(record)
+
+    taskFile = record.runDir / "source" / "tasks" / "exoplanet-detection-period" / "task.md"
+    assert "image: kvbench-skillsbench/exoplanet-detection-period:latest" in (
+        taskFile.read_text(encoding="utf-8")
+    )
     manager._CheckLocalDockerImage(record)
 
 

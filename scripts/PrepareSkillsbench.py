@@ -1126,14 +1126,13 @@ def RewriteCurlUrls(body: str) -> str:
 
     Leaves every other URL (including http:// variants of the same hosts)
     untouched, so private mirrors and authenticated hosts keep working.
-    Skips URLs that contain shell variable references (``${VAR}`` / ``$VAR``)
-    because we cannot safely splice the mirror prefix into them.
+    Shell variables in the path are preserved; only the fixed host prefix is
+    replaced, so URLs such as ``https://github.com/erlang/otp/...${VERSION}``
+    can use the same mirror path.
     """
 
     def replace(match: re.Match[str]) -> str:
         url = match.group(0)
-        if "$" in url:
-            return url
         for pattern, replacement in _CURL_URL_REWRITES:
             if pattern.match(url):
                 return pattern.sub(replacement, url, count=1)
@@ -1175,6 +1174,72 @@ def WrapCurlWgetRun(body: str) -> str:
     ):
         return body
     rewritten = RewriteCurlUrls(body)
+    # wget's default retry behavior restarts this 322 MB archive after a
+    # broken connection. curl has reliable range support on the Apache host,
+    # so keep the original output filename but make the download resumable.
+    apacheDruid = re.compile(
+        r"(?i)\bwget\s+(https://archive\.apache\.org/dist/druid/0\.20\.0/"
+        r"apache-druid-0\.20\.0-bin\.tar\.gz)"
+    )
+
+    def parallelApacheDownload(match: re.Match[str]) -> str:
+        url = match.group(1)
+        output = Path(urlsplit(url).path).name
+        # archive.apache.org is very slow per connection but supports byte
+        # ranges. Fetch 4 MiB pieces concurrently, validate the final byte
+        # count, and leave the same basename that wget would have produced.
+        return (
+            f"archive_url={shlex.quote(url)}; "
+            f"archive_output={shlex.quote(output)}; "
+            "archive_tmp=\"${archive_output}.parts\"; "
+            "rm -rf \"$archive_tmp\" && mkdir -p \"$archive_tmp\" && "
+            "archive_size=$(curl -fsSL --retry 5 --retry-delay 3 "
+            "--retry-connrefused --max-time 1800 -I \"$archive_url\" "
+            "| awk 'tolower($1) == \"content-length:\" {print $2}' "
+            "| tail -1) && test \"$archive_size\" -gt 0 && "
+            "archive_chunk=4194304 && "
+            "export archive_url archive_tmp archive_size archive_chunk && "
+            "archive_parts=$(((archive_size + archive_chunk - 1) / archive_chunk)) && "
+            "seq 0 $((archive_parts - 1)) | "
+            "xargs -P 8 -I{} sh -c '"
+            "part=\"$1\"; start=$((part * archive_chunk)); "
+            "end=$((start + archive_chunk - 1)); "
+            "if [ \"$end\" -ge \"$((archive_size - 1))\" ]; then "
+            "end=$((archive_size - 1)); fi; "
+            "part_file=$(printf '%s/part-%08d' \"$archive_tmp\" \"$part\"); "
+            "curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused "
+            "--max-time 1800 -r \"$start-$end\" \"$archive_url\" "
+            "-o \"$part_file\"' sh {} && "
+            "cat \"$archive_tmp\"/part-* > \"$archive_output\" && "
+            "test \"$(wc -c < \"$archive_output\")\" -eq \"$archive_size\" && "
+            "rm -rf \"$archive_tmp\""
+        )
+
+    rewritten = apacheDruid.sub(parallelApacheDownload, rewritten, count=1)
+    # Large release archives are much more likely to be interrupted than a
+    # normal metadata request. Without a range request every retry starts at
+    # byte zero and turns a transient reset into a many-minute timeout.
+    # Restrict this to file downloads from hosts already covered by our
+    # mirror/proxy rewrites.
+    curlCommand = re.search(r"(?i)\bcurl\b[^;&|]*", rewritten)
+    if (
+        curlCommand is not None
+        and re.search(r"(?i)\s(?:-o|--output)(?:[ =]|\s)", curlCommand.group(0))
+        and re.search(
+            r"(?i)(?:github\.com|gh-proxy\.com|archive\.apache\.org)",
+            rewritten,
+        )
+        and not re.search(
+            r"(?i)(?:-C\s*-|--continue-at(?:[ =]|\s))",
+            curlCommand.group(0),
+        )
+    ):
+        rewritten = re.sub(
+            r"(?i)(\bcurl\b)",
+            r"\1 --continue-at -",
+            rewritten,
+            count=1,
+        )
     if re.search(rf"(?i){command_pos}curl\b", rewritten) and "--retry" not in rewritten:
         rewritten = re.sub(
             rf"(?i)({command_pos}curl\b)((?:\s+--?[A-Za-z][\w-]*)*)",
@@ -1188,6 +1253,51 @@ def WrapCurlWgetRun(body: str) -> str:
             rewritten,
         )
     return _WithProxyUnset(rewritten)
+
+
+def WrapGithubDownloadFallback(body: str) -> str:
+    """Retry mirrored GitHub release downloads through the backup proxy.
+
+    A connection to gh-proxy.com can stay open without returning bytes and
+    then fail with curl 56. curl's normal retry loop does not change hosts in
+    that case. For the common ``*_DOWNLOAD_URL`` + ``curl -o`` shape, keep the
+    partial file and retry the same range through gh-proxy.org.
+    """
+
+    if "gh-proxy.com" not in body or not re.search(r"(?i)\bcurl\b", body):
+        return body
+    variables = re.findall(r"\b([A-Z][A-Z0-9_]*_DOWNLOAD_URL)\s*=", body)
+    for variable in dict.fromkeys(variables):
+        fallbackVariable = f"{variable}_FALLBACK"
+        assignment = re.compile(
+            rf"({variable}\s*=\s*[^&|;]+)\s*&&"
+        )
+        body, inserted = assignment.subn(
+            rf'\1 && {fallbackVariable}=$(printf "%s" "${variable}" '
+            r"| sed 's/gh-proxy\.com/gh-proxy\.org/') &&",
+            body,
+            count=1,
+        )
+        if not inserted:
+            continue
+        command = re.search(
+            rf"(?is)\bcurl\b[^;&|]*\$(?:\{{)?{variable}(?:\}})?[\"']?",
+            body,
+        )
+        if command is None:
+            continue
+        primary = command.group(0)
+        fallback = primary.replace(
+            f"${variable}", f"${fallbackVariable}"
+        ).replace(
+            f"${{{variable}}}", f"${{{fallbackVariable}}}"
+        )
+        body = (
+            body[: command.start()]
+            + f"({primary} || {fallback})"
+            + body[command.end() :]
+        )
+    return body
 
 
 def WrapGitCloneRun(body: str) -> str:
@@ -1223,6 +1333,16 @@ def WrapGitCloneRun(body: str) -> str:
         replace,
         body,
     )
+    # Druid's task only needs the druid-0.20.0 checkout. A full clone of the
+    # Apache history is several times larger than the checked-out tree and is
+    # the second long pole after the binary distribution download.
+    if "github.com/apache/druid.git" in rewritten and "--depth" not in rewritten:
+        rewritten = re.sub(
+            r"(?i)(git\s+clone)\s+(https://gh-proxy\.com/https://github\.com/apache/druid\.git)",
+            r"\1 --depth 1 --branch druid-0.20.0 \2",
+            rewritten,
+            count=1,
+        )
     return _WithProxyUnset(rewritten)
 
 
@@ -1650,6 +1770,7 @@ def RewritePackageManagerRuns(text: str) -> str:
             newBody,
         ):
             newBody = WrapCurlWgetRun(newBody)
+            newBody = WrapGithubDownloadFallback(newBody)
         if re.search(r"(?i)https?://astral\.sh/uv/[^/\s'\"]+/install\.sh", newBody):
             newBody = WrapUvInstallRun(newBody)
         if re.search(r"(?i)\bgit\s+clone\b", newBody):
