@@ -24,7 +24,9 @@ DEFAULT_MODEL = (
     "Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659"
 )
 DEFAULT_DATASET_ROOT = str(ROOT / "data")
-TASK_CHOICES = ("cwe", "vt", "wikimqa", "triviaqa", "hotpotqa", "musique")
+TASK_CHOICES = (
+    "cwe", "vt", "2wikimultihopqa", "triviaqa", "hotpotqa", "musique"
+)
 
 
 def split_by_tokens(text: str, tokenizer: Any, chunk_size: int) -> List[str]:
@@ -177,7 +179,7 @@ def configure(args: argparse.Namespace) -> None:
 
 def build_tasks(args: argparse.Namespace) -> List[Any]:
     from tasks import CWEShuffleTask, MusiqueTask, HotpotQATask, TriviaQATask
-    from tasks import VTShuffleTask, WikimQATask
+    from tasks import VTShuffleTask, TwoWikiMultiHopQATask
 
     root = Path(args.dataset_root).expanduser().resolve()
     common = {"maxSamples": args.max_samples, "startIdx": args.start_index}
@@ -190,8 +192,10 @@ def build_tasks(args: argparse.Namespace) -> List[Any]:
             dataset="ruler", dataDir=str(root / "ruler"),
             maxSeqLength=args.ruler_length, **common,
         ),
-        "wikimqa": lambda: WikimQATask(
-            dataset="wikimqa", dataDir=str(root / "wikimqa"), **common
+        "2wikimultihopqa": lambda: TwoWikiMultiHopQATask(
+            dataset="2wikimultihopqa",
+            dataDir=str(root / "2wikimultihopqa"),
+            **common,
         ),
         "triviaqa": lambda: TriviaQATask(
             dataset="triviaqa", dataDir=str(root / "triviaqa"), **common

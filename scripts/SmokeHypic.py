@@ -32,7 +32,7 @@ def Main() -> None:
     parser.add_argument("--pic-mode", default="addition")
     parser.add_argument(
         "--task",
-        choices=["niah", "cwe", "vt", "musique", "samsum", "wikimqa"],
+        choices=["niah", "cwe", "vt", "musique", "samsum", "2wikimultihopqa"],
         help="run the first case of a Main.py task instead of the synthetic smoke",
     )
     parser.add_argument("--full-prefill", action="store_true")
@@ -93,7 +93,7 @@ def Main() -> None:
                 NIAHShuffleTask,
                 SamsumTask,
                 VTShuffleTask,
-                WikimQATask,
+                TwoWikiMultiHopQATask,
             )
 
             taskType = {
@@ -102,7 +102,7 @@ def Main() -> None:
                 "vt": VTShuffleTask,
                 "musique": MusiqueTask,
                 "samsum": SamsumTask,
-                "wikimqa": WikimQATask,
+                "2wikimultihopqa": TwoWikiMultiHopQATask,
             }[args.task]
             task = taskType(maxSamples=1, maxNewTokens=args.max_new_tokens)
             case = next(task.Cases())

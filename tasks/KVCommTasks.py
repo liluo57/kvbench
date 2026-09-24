@@ -135,7 +135,7 @@ class KVCommMMLUTask(Task):
         if self._rows is None:
             rows = []
             root = DatasetDir("mmlu")
-            files = sorted((root / "val").glob("*.csv"))
+            files = sorted((root / "test").glob("*.csv"))
             for path in files:
                 with path.open(newline="", encoding="utf-8") as f:
                     for r in csv.reader(f):

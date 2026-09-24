@@ -16,10 +16,11 @@ Each task's dataset is resolved by *name* against ``DatasetPath`` from
   non-identity permutation. These are RAGInput fields, not Case fields. A
   method that detects the change recomputes; a naive one serves stale KV.
 
-- :class:`MusiqueTask` / :class:`WikimQATask` / :class:`SamsumTask` — the
-  knowledge-base workflows the original CacheBlend repo evaluates on
-  (``<DatasetPath>/musique``, ``/wikimqa``, ``/samsum``; each in its own module
-  sharing the machinery in :mod:`tasks.bases.KBBase`).
+- :class:`MusiqueTask` / :class:`TwoWikiMultiHopQATask` /
+  :class:`SamsumTask` — the knowledge-base workflows the original CacheBlend
+  repo evaluates on
+  (``<DatasetPath>/musique``, ``/2wikimultihopqa``, ``/samsum``; each in its own
+  module sharing the machinery in :mod:`tasks.bases.KBBase`).
 - :class:`HotpotQATask` / :class:`TriviaQATask` — local LongBench QA tasks;
   :class:`MultiNewsTask` / :class:`GovReportTask` — local LongBench
   summarization tasks.  Their snapshots are kept under ``data/`` and are not
@@ -41,7 +42,7 @@ from .Niah import NIAHShuffleTask, NIAHTask
 from .Samsum import SamsumTask
 from .TriviaQA import TriviaQATask
 from .Vt import VTShuffleTask, VTTask
-from .WikimQA import WikimQATask
+from .TwoWikiMultiHopQA import TwoWikiMultiHopQATask
 from .KVCommTasks import KVCommCopyTask, KVCommGSM8KTask, KVCommHumanEvalTask, KVCommMMLUTask
 
 __all__ = [
@@ -58,7 +59,7 @@ __all__ = [
     "TriviaQATask",
     "VTShuffleTask",
     "VTTask",
-    "WikimQATask",
+    "TwoWikiMultiHopQATask",
     "KVCommMMLUTask",
     "KVCommGSM8KTask",
     "KVCommHumanEvalTask",

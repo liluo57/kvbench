@@ -4,4 +4,6 @@ rich
 torch
 transformers
 datasets>=2.18
+gdown>=5.2
+py7zr>=0.20
 pytest

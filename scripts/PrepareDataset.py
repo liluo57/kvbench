@@ -27,6 +27,7 @@ import random
 import re
 import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.request import Request, urlopen
@@ -147,6 +148,131 @@ def _top_level_directory(path: Path) -> str:
     return path.parts[0]
 
 
+def _adapt_2wikimultihopqa(payload: Any) -> List[Dict[str, Any]]:
+    """Add the KBBase fields to the official, complete 2Wiki dev split."""
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("official 2Wiki development split must be a non-empty list")
+
+    records: List[Dict[str, Any]] = []
+    for index, raw in enumerate(payload):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"2Wiki sample {index} is not an object")
+        question = _text(raw.get("question")).strip()
+        answer = _text(raw.get("answer")).strip()
+        context = raw.get("context")
+        if not question or not answer:
+            raise ValueError(f"2Wiki sample {index} is missing question or answer")
+        if not isinstance(context, (list, tuple)) or not context:
+            raise ValueError(f"2Wiki sample {index} has no context passages")
+
+        ctxs: List[Dict[str, str]] = []
+        for passage_index, passage in enumerate(context):
+            if not isinstance(passage, (list, tuple)) or len(passage) < 2:
+                raise ValueError(
+                    f"2Wiki sample {index} context passage {passage_index} "
+                    "must be [title, sentences]"
+                )
+            title, sentences = passage[0], passage[1]
+            if isinstance(sentences, (list, tuple)):
+                text = " ".join(_text(sentence) for sentence in sentences)
+            else:
+                text = _text(sentences)
+            ctxs.append({"title": _text(title), "text": text})
+
+        record = dict(raw)
+        record["ctxs"] = ctxs
+        # Match the nested answer shape used by CacheBlend's evaluator.
+        record["answers"] = [[answer]]
+        records.append(record)
+    return records
+
+
+def _adapt_musique_ans(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Adapt one official answerable MuSiQue row to the KBBase schema."""
+    question = _text(row.get("question")).strip()
+    answer = _text(row.get("answer")).strip()
+    if not question or not answer:
+        raise ValueError("MuSiQue-Ans row is missing question or answer")
+    if row.get("answerable") is False:
+        raise ValueError("MuSiQue-Ans dev unexpectedly contains an unanswerable row")
+
+    paragraphs = row.get("paragraphs")
+    if not isinstance(paragraphs, list) or not paragraphs:
+        raise ValueError("MuSiQue-Ans row has no paragraphs")
+    ctxs: List[Dict[str, str]] = []
+    for index, paragraph in enumerate(paragraphs):
+        if not isinstance(paragraph, Mapping):
+            raise ValueError(f"MuSiQue paragraph {index} is not an object")
+        title = _text(paragraph.get("title")).strip()
+        text = _text(paragraph.get("paragraph_text") or paragraph.get("text")).strip()
+        if not text:
+            raise ValueError(f"MuSiQue paragraph {index} has no text")
+        ctxs.append({"title": title, "text": text})
+
+    answers: List[str] = []
+    aliases = row.get("answer_aliases") or []
+    if not isinstance(aliases, (list, tuple)):
+        aliases = [aliases]
+    for candidate in [answer, *aliases]:
+        candidate = _text(candidate).strip()
+        if candidate and candidate not in answers:
+            answers.append(candidate)
+    if not answers:
+        raise ValueError("MuSiQue-Ans row has no usable answer aliases")
+    return {
+        "question": question,
+        "ctxs": ctxs,
+        "answers": answers,
+        "length": _record_length(question, *(passage["text"] for passage in ctxs)),
+        "dataset": "musique",
+        "language": "en",
+        "all_classes": None,
+        "_id": _text(row.get("id", "")),
+    }
+
+
+def _adapt_samsum(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Adapt one official SAMSum row to the local dialogue-summary prompt."""
+    dialogue = _text(row.get("dialogue")).strip()
+    summary = _text(row.get("summary")).strip()
+    if not dialogue or not summary:
+        raise ValueError("SAMSum row is missing dialogue or summary")
+    context = f"Dialogue:\n{dialogue}"
+    return {
+        "ctxs": [{"title": "", "text": context}],
+        "question": "Summary:",
+        "answers": [summary],
+        "length": _record_length(dialogue),
+        "dataset": "samsum",
+        "language": "en",
+        "all_classes": None,
+        "_id": _text(row.get("id", "")),
+    }
+
+
+def _read_json_records(path: Path) -> List[Mapping[str, Any]]:
+    """Read either a JSON list or JSONL file containing object records."""
+    text = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = [json.loads(line) for line in text.splitlines() if line.strip()]
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(f"{path} must contain a non-empty list of records")
+    if any(not isinstance(row, Mapping) for row in payload):
+        raise ValueError(f"{path} contains a non-object record")
+    return payload
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
 def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
     output = _relative_path(entry.get("Output"), "Direct.Output")
     fmt = entry.get("Format", "bytes")
@@ -156,7 +282,66 @@ def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
             raise ValueError("Direct.Urls must be non-empty for govreport_jsonl")
         raw_files = [_download(str(url)).decode("utf-8") for url in urls]
         count = _write_jsonl(stage / output, _adapt_govreport_raw(raw_files))
+        expected_rows = entry.get("ExpectedRows")
+        if expected_rows is not None:
+            expected_rows = _positive_int(expected_rows, "Direct.ExpectedRows")
+            if count != expected_rows:
+                raise ValueError(
+                    f"GovReport test has {count} rows; expected {expected_rows}"
+                )
         print(f"[dataset] materialized {count} govreport rows -> {output}")
+        return
+    if fmt == "musique_ans_dev_google_drive_zip":
+        drive_id = entry.get("GoogleDriveId")
+        archive_file = entry.get("ArchiveFile", "data/musique_ans_v1.0_dev.jsonl")
+        if not isinstance(drive_id, str) or not drive_id:
+            raise ValueError("Direct.GoogleDriveId must be non-empty for MuSiQue")
+        if not isinstance(archive_file, str) or not archive_file:
+            raise ValueError("Direct.ArchiveFile must be a non-empty string")
+        try:
+            import gdown
+        except ImportError as exc:
+            raise RuntimeError(
+                "MuSiQue preparation needs gdown; install requirement.txt first"
+            ) from exc
+        with tempfile.TemporaryDirectory(prefix="kvbench-musique-") as temporary:
+            archive_path = Path(temporary) / "musique_v1.0.zip"
+            downloaded = gdown.download(
+                id=drive_id, output=str(archive_path), quiet=False
+            )
+            if not downloaded or not archive_path.is_file():
+                raise RuntimeError("could not download the official MuSiQue archive")
+            try:
+                with zipfile.ZipFile(archive_path) as archive:
+                    raw = archive.read(archive_file)
+            except KeyError as exc:
+                raise ValueError(
+                    f"official MuSiQue archive does not contain {archive_file!r}"
+                ) from exc
+            except zipfile.BadZipFile as exc:
+                raise ValueError("official MuSiQue download is not a valid ZIP") from exc
+        try:
+            rows = [
+                json.loads(line)
+                for line in raw.decode("utf-8").splitlines()
+                if line.strip()
+            ]
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"official MuSiQue member {archive_file!r} is not valid JSONL"
+            ) from exc
+        count = _write_jsonl(
+            stage / output,
+            (_adapt_musique_ans(_mapping(row, "MuSiQue row")) for row in rows),
+        )
+        expected_rows = entry.get("ExpectedRows")
+        if expected_rows is not None:
+            expected_rows = _positive_int(expected_rows, "Direct.ExpectedRows")
+            if count != expected_rows:
+                raise ValueError(
+                    f"MuSiQue-Ans dev has {count} rows; expected {expected_rows}"
+                )
+        print(f"[dataset] materialized all {count} official MuSiQue-Ans dev rows -> {output}")
         return
     url = entry.get("Url")
     if not isinstance(url, str) or not url:
@@ -167,6 +352,94 @@ def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
         raise ValueError(
             f"checksum mismatch for {url}: expected {expected}, got {_sha256(body)}"
         )
+
+    if fmt == "samsum_test_7z":
+        archive_file = entry.get("ArchiveFile", "test.json")
+        if not isinstance(archive_file, str) or not archive_file:
+            raise ValueError("Direct.ArchiveFile must be a non-empty string")
+        try:
+            import py7zr
+        except ImportError as exc:
+            raise RuntimeError(
+                "SAMSum preparation needs py7zr; install requirement.txt first"
+            ) from exc
+        with tempfile.TemporaryDirectory(prefix="kvbench-samsum-") as temporary:
+            temporary_dir = Path(temporary)
+            archive_path = temporary_dir / "samsum-corpus.7z"
+            archive_path.write_bytes(body)
+            extracted_dir = temporary_dir / "extracted"
+            extracted_dir.mkdir()
+            try:
+                with py7zr.SevenZipFile(archive_path, mode="r") as archive:
+                    matches = [
+                        name
+                        for name in archive.getnames()
+                        if Path(name).name == archive_file
+                    ]
+                    if len(matches) != 1:
+                        raise ValueError(
+                            f"SAMSum archive must contain exactly one {archive_file!r}"
+                        )
+                    archive_member = Path(matches[0])
+                    if archive_member.is_absolute() or ".." in archive_member.parts:
+                        raise ValueError("SAMSum archive member path is unsafe")
+                    targets = [matches[0]]
+                    if archive_member.parent != Path("."):
+                        targets.insert(0, str(archive_member.parent))
+                    archive.extract(
+                        path=extracted_dir, targets=targets, recursive=False
+                    )
+                    raw_path = extracted_dir / archive_member
+            except Exception as exc:
+                raise ValueError(f"could not extract SAMSum {archive_file!r}") from exc
+            rows = _read_json_records(raw_path)
+        count = _write_jsonl(
+            stage / output,
+            (_adapt_samsum(_mapping(row, "SAMSum row")) for row in rows),
+        )
+        expected_rows = entry.get("ExpectedRows")
+        if expected_rows is not None:
+            expected_rows = _positive_int(expected_rows, "Direct.ExpectedRows")
+            if count != expected_rows:
+                raise ValueError(
+                    f"SAMSum test has {count} rows; expected {expected_rows}"
+                )
+        print(f"[dataset] materialized all {count} official SAMSum test rows -> {output}")
+        return
+
+    if fmt == "2wikimultihopqa_dev_zip":
+        archive_file = entry.get("ArchiveFile", "data_ids/dev.json")
+        if not isinstance(archive_file, str) or not archive_file:
+            raise ValueError("Direct.ArchiveFile must be a non-empty string")
+        try:
+            with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                try:
+                    raw = archive.read(archive_file)
+                except KeyError as exc:
+                    raise ValueError(
+                        f"{url} does not contain {archive_file!r}"
+                    ) from exc
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"{url} is not a valid ZIP archive") from exc
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{url} archive member {archive_file!r} is not valid JSON") from exc
+        records = _adapt_2wikimultihopqa(payload)
+        expected_rows = entry.get("ExpectedRows")
+        if expected_rows is not None:
+            expected_rows = _positive_int(expected_rows, "Direct.ExpectedRows")
+            if len(records) != expected_rows:
+                raise ValueError(
+                    f"{archive_file} has {len(records)} rows; "
+                    f"expected the complete split of {expected_rows}"
+                )
+        _write_json(stage / output, records)
+        print(
+            f"[dataset] materialized all {len(records)} official 2Wiki dev rows "
+            f"from {archive_file} -> {output}"
+        )
+        return
 
     if fmt == "json_list":
         try:
@@ -275,9 +548,17 @@ def _trivia_context(row: Mapping[str, Any]) -> str:
     pages = row.get("entity_pages") or []
     if isinstance(pages, Mapping):
         # Accommodate a column-oriented representation from older builders.
+        page_count = max(
+            (len(values) for values in pages.values() if isinstance(values, (list, tuple))),
+            default=0,
+        )
         pages = [
-            {key: values[index] for key, values in pages.items()}
-            for index in range(len(next(iter(pages.values()), [])))
+            {
+                key: values[index]
+                for key, values in pages.items()
+                if isinstance(values, (list, tuple)) and index < len(values)
+            }
+            for index in range(page_count)
         ]
     for page in pages:
         if not isinstance(page, Mapping):
@@ -287,7 +568,27 @@ def _trivia_context(row: Mapping[str, Any]) -> str:
         if text:
             sections.append(f"Passage {len(sections) + 1}:\n{title}\n{text}")
     if not sections:
-        for page in row.get("search_results") or []:
+        search_results = row.get("search_results") or []
+        if isinstance(search_results, Mapping):
+            # The HF rows endpoint represents nested lists of structs as
+            # structs of lists; normalize that shape just like entity_pages.
+            result_count = max(
+                (
+                    len(values)
+                    for values in search_results.values()
+                    if isinstance(values, (list, tuple))
+                ),
+                default=0,
+            )
+            search_results = [
+                {
+                    key: values[index]
+                    for key, values in search_results.items()
+                    if isinstance(values, (list, tuple)) and index < len(values)
+                }
+                for index in range(result_count)
+            ]
+        for page in search_results:
             if not isinstance(page, Mapping):
                 continue
             title = _text(page.get("title")).strip()
@@ -486,6 +787,12 @@ def _prepare_huggingface(entry: Mapping[str, Any], stage: Path) -> None:
     if adapter == "mmlu":
         output_dir = stage / output
         output_dir.mkdir(parents=True, exist_ok=True)
+        source_split = _text(entry.get("Split")).strip().lower()
+        output_split = (
+            "val"
+            if source_split in {"validation", "valid", "val", "dev"}
+            else source_split
+        )
         writers: Dict[str, Tuple[io.TextIOWrapper, csv.writer]] = {}
         count = 0
         try:
@@ -495,7 +802,7 @@ def _prepare_huggingface(entry: Mapping[str, Any], stage: Path) -> None:
                 if not subject or len(choices) != 4:
                     raise ValueError("MMLU row must contain subject and four choices")
                 if subject not in writers:
-                    stream = (output_dir / f"{subject}_val.csv").open(
+                    stream = (output_dir / f"{subject}_{output_split}.csv").open(
                         "w", encoding="utf-8", newline=""
                     )
                     writers[subject] = (stream, csv.writer(stream, lineterminator="\n"))
@@ -508,6 +815,13 @@ def _prepare_huggingface(entry: Mapping[str, Any], stage: Path) -> None:
                 stream.close()
         if count == 0:
             raise ValueError("MMLU source produced no rows")
+        expected_rows = entry.get("ExpectedRows")
+        if expected_rows is not None:
+            expected_rows = _positive_int(
+                expected_rows, "HuggingFace.ExpectedRows"
+            )
+            if count != expected_rows:
+                raise ValueError(f"MMLU split has {count} rows; expected {expected_rows}")
         print(f"[dataset] materialized {count} MMLU rows -> {output}")
         return
 
@@ -515,6 +829,7 @@ def _prepare_huggingface(entry: Mapping[str, Any], stage: Path) -> None:
         "hotpotqa": _adapt_hotpot,
         "govreport": _adapt_govreport,
         "multinews": _adapt_multinews,
+        "samsum": _adapt_samsum,
         "triviaqa": _adapt_triviaqa,
         "gsm8k": _adapt_gsm8k,
         "humaneval": _adapt_humaneval,
@@ -522,6 +837,13 @@ def _prepare_huggingface(entry: Mapping[str, Any], stage: Path) -> None:
     if adapter not in adapters:
         raise ValueError(f"unsupported HuggingFace.Adapter: {adapter!r}")
     count = _write_jsonl(stage / output, (adapters[adapter](row) for row in rows))
+    expected_rows = entry.get("ExpectedRows")
+    if expected_rows is not None:
+        expected_rows = _positive_int(expected_rows, "HuggingFace.ExpectedRows")
+        if count != expected_rows:
+            raise ValueError(
+                f"{adapter} split has {count} rows; expected {expected_rows}"
+            )
     print(f"[dataset] materialized {count} {adapter} rows -> {output}")
 
 

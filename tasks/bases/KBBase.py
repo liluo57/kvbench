@@ -1,9 +1,9 @@
 """Shared machinery for knowledge-base and local LongBench tasks.
 
-These are the knowledge-base workflows the original CacheBlend repo evaluates
-on (``example/blend_musique.py``, ``blend_wikimqa.py``, ``blend_samsum.py``).
-The KVBench tasks reuse the same data and prompt layout, but the tasks
-themselves are independent of the CacheBlend method. Each resolves its data by
+These knowledge-base workflows use the chunk and prompt layout from the
+original CacheBlend examples (``blend_musique.py``, ``blend_wikimqa.py``,
+``blend_samsum.py``). The 2WikiMultiHopQA task is prepared from the official
+dataset release into the same record shape. Each task resolves its data by
 *name* against ``DatasetPath`` (see ``core.Config``): ``MusiqueTask()`` reads
 ``<DatasetPath>/musique`` etc.
 
@@ -12,10 +12,12 @@ prefixes, chunk format and query text) — minus the model-specific chat special
 tokens (``[INST]``/``[/INST]``), since the KVBench backends encode the chat
 format built by ``helpers.ModelAdapter``.
 
-Data shape (the original ``inputs/*.json``):
-    musique / wikimqa:  ``{"ctxs": [{"title", "text"}], "question", "answers"}``
+Data shape consumed by ``KBBase``:
+    musique / 2wikimultihopqa:
+        ``{"ctxs": [{"title", "text"}], "question", "answers"}``
     samsum:             ``{"ctxs": [{"title", "text"}], "question", "answers", ...}``
-    (wikimqa's ``answers`` is nested: ``[["answer"]]``)
+    (2WikiMultiHopQA's official ``context`` / ``answer`` fields are retained,
+     with ``ctxs`` / nested ``answers`` added by ``PrepareDataset.py``)
 
 LongBench snapshots use one JSON object per line with ``input``, ``context``
 and ``answers`` fields.  The loader below accepts both the original JSON array
@@ -32,7 +34,7 @@ recovered by the reuse methods via ``ComposeReuse``.
 
 :class:`KBBase` owns the data loading, the chat-prompt building and the scoring
 shared by the three task families; each family lives in its own module
-(:mod:`tasks.Musique`, :mod:`tasks.WikimQA`, :mod:`tasks.Samsum`).
+(:mod:`tasks.Musique`, :mod:`tasks.TwoWikiMultiHopQA`, :mod:`tasks.Samsum`).
 """
 
 import collections
@@ -354,12 +356,12 @@ class KBBase(Task):
 
 
 # ---------------------------------------------------------------------------
-# QA over a knowledge base (musique / wikimqa)
+# QA over a knowledge base (musique / 2wikimultihopqa)
 # ---------------------------------------------------------------------------
 
 
 class QABase(KBBase):
-    """Question-answering over isolated passages (musique / wikimqa).
+    """Question-answering over isolated passages (musique / 2wikimultihopqa).
 
     Prompt structure copied from ``example/blend_musique.py`` /
     ``blend_wikimqa.py``: instruction prefix, then ``title\n\ntext\n\n``
