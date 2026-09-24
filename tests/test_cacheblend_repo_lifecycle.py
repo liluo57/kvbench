@@ -1,4 +1,10 @@
+import importlib
+from pathlib import Path
+
 from methods.CacheblendRepo import CacheblendRepo
+
+
+_helper = importlib.import_module("helpers.cacheblend_repo.CacheblendRepoHelper")
 
 
 class _BrokenStream:
@@ -21,6 +27,30 @@ class _ClosedProcess:
 
     def kill(self):
         self.killed = True
+
+
+def test_modelscope_consolidated_checkpoint_is_excluded_from_cacheblend_view(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "model"
+    source.mkdir()
+    for name in (
+        "config.json",
+        "model.safetensors.index.json",
+        "model-00001-of-00003.safetensors",
+        "tokenizer.json",
+    ):
+        (source / name).write_text("placeholder")
+    (source / "consolidated.safetensors").write_text("incompatible")
+    staging_root = tmp_path / "staging"
+    monkeypatch.setattr(_helper.tempfile, "gettempdir", lambda: str(staging_root))
+
+    staged = Path(_helper._prepare_model_for_cacheblend(str(source)))
+
+    assert staged != source
+    assert not (staged / "consolidated.safetensors").exists()
+    assert (staged / "model-00001-of-00003.safetensors").is_symlink()
+    assert (staged / "config.json").resolve() == source / "config.json"
 
 
 def test_close_suppresses_broken_pipe_from_dead_helper():

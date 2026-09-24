@@ -42,10 +42,51 @@ counted as reused because it is fully recomputed.
 """
 
 import argparse
+import hashlib
 import json
 import os
+from pathlib import Path
 import sys
+import tempfile
 import time
+
+
+def _prepare_model_for_cacheblend(model: str) -> str:
+    """Return a loader-safe view of a ModelScope/HuggingFace model directory.
+
+    Some ModelScope snapshots contain both the normal HuggingFace sharded
+    checkpoint and ``consolidated.safetensors``.  The latter uses Meta's
+    ``layers.0.attention.wk.weight`` names, which the old vLLM 0.4.1 fork
+    bundled with CacheBlend cannot load.  If an HF index is present, expose a
+    small symlink-only directory without that extra file.  The source model
+    is never modified and models without this layout keep their original path.
+    """
+    source = Path(model)
+    index = source / "model.safetensors.index.json"
+    consolidated = source / "consolidated.safetensors"
+    if not source.is_dir() or not index.is_file() or not consolidated.is_file():
+        return model
+
+    source = source.resolve()
+    digest = hashlib.sha256(
+        f"{source}\n{index.stat().st_mtime_ns}\n{index.stat().st_size}".encode()
+    ).hexdigest()[:16]
+    staged = Path(tempfile.gettempdir()) / "kvbench-cacheblend-models" / (
+        f"{source.name}-{digest}"
+    )
+    staged.mkdir(parents=True, exist_ok=True)
+
+    # Link all snapshot files except the incompatible consolidated checkpoint.
+    # Keeping the metadata and tokenizer files in the view lets both vLLM and
+    # transformers resolve the model exactly as they would from the source.
+    for item in source.iterdir():
+        if item.name == "consolidated.safetensors":
+            continue
+        destination = staged / item.name
+        if destination.exists() or destination.is_symlink():
+            continue
+        os.symlink(item, destination)
+    return str(staged)
 
 
 def _repair_plan(segments: list, prefix_len: int, ratio: float) -> dict:
@@ -162,6 +203,13 @@ class CacheBlendWorker:
             raise ValueError("invalid --sampling_config JSON") from exc
         self._torch = __import__("torch")
         print(f"[cacheblend-helper] loading model {args.model} ...", flush=True)
+        modelPath = _prepare_model_for_cacheblend(args.model)
+        if modelPath != args.model:
+            print(
+                "[cacheblend-helper] using HF sharded checkpoint view "
+                f"{modelPath}",
+                flush=True,
+            )
         # The CacheBlend hooks live only in the xformers attention backend; the
         # fork's default already resolves there (no flash_attn in this venv),
         # but pin it so a future flash_attn install cannot silently switch
@@ -171,9 +219,9 @@ class CacheBlendWorker:
         # the out-of-tree model in Qwen3ForCacheBlendRepo registers itself when
         # the model's config.json declares Qwen3ForCausalLM. Mistral (the fork's
         # native model) goes through untouched.
-        self._registerOutOfTreeModel(args.model)
+        self._registerOutOfTreeModel(modelPath)
         # dtype="auto" loads the model's own config dtype (Mistral-7B-Instruct
-        # v0.2 is bfloat16). enforce_eager is left unset on purpose: CacheBlend's
+        # is bfloat16). enforce_eager is left unset on purpose: CacheBlend's
         # collect reads hack_kv captured during the prefill forward, and the
         # single decode step must NOT re-run the forward (eager would overwrite
         # hack_kv) — CUDA-graph decode replays instead, preserving it.
@@ -187,7 +235,7 @@ class CacheBlendWorker:
         # this venv (0.19.x) can parse, so Qwen3 runs on the slow BPE tokenizer
         # (vocab.json + merges.txt); Mistral keeps its fast tokenizer.
         self.llm = LLM(
-            model=args.model,
+            model=modelPath,
             dtype="auto",
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_model_len=args.max_model_len,
@@ -196,7 +244,7 @@ class CacheBlendWorker:
             **({"tokenizer_mode": "slow"} if self._isQwen3 else {}),
         )
         self.tokenizer = AutoTokenizer.from_pretrained(
-            args.model, **({"use_fast": False} if self._isQwen3 else {}))
+            modelPath, **({"use_fast": False} if self._isQwen3 else {}))
         self.llm.set_tokenizer(self.tokenizer)
         self.sampling_params = SamplingParams
 
