@@ -34,6 +34,8 @@ from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
 from .Hypic import HypicMethod
 from .Naive import NaiveTransformer
 from .KVComm import KVCommTransformer
+from .ProphetKV import ProphetKV
+from .CacheClip import CacheClip
 from .DependencyAnalysis import DependencyAnalysisMethod, DependencyAnalysisTransformer
 from .Rollout import RolloutMethod
 __all__ = [
@@ -46,6 +48,8 @@ __all__ = [
     "HypicMethod",
     "NaiveTransformer",
     "KVCommTransformer",
+    "ProphetKV",
+    "CacheClip",
     "DependencyAnalysisMethod",
     "DependencyAnalysisTransformer",
     "RolloutMethod",

@@ -21,6 +21,7 @@ Both ``Run`` methods process their whole batch in one call:
 irrelevant.
 """
 
+import time
 from typing import List, Mapping, Optional, Sequence
 
 from core.Config import Get, MaxModelLen, ModelPath as DefaultModelPath
@@ -155,15 +156,27 @@ class FullPrefillTransformer(_FullPrefillBase):
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
+        runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         idsList = [self._gen.Encode(d) for d in data]
         # The KVCOMM protocol is request-sequential (batch size 1). Generate()
         # exposes the real first-token boundary; GenerateBatch() can only
         # approximate TTFT from total generation time and must not be used for
         # latency comparisons.
-        batchOut = [
-            self._gen.Generate(ids, maxNewTokens=maxNewTokens) for ids in idsList
-        ]
+        batchOut = []
+        for ids in idsList:
+            generationStart = time.perf_counter()
+            text, backendTtft, total, nTokens = self._gen.Generate(
+                ids, maxNewTokens=maxNewTokens
+            )
+            batchOut.append(
+                (
+                    text,
+                    generationStart - runStart + backendTtft,
+                    generationStart - runStart + total,
+                    nTokens,
+                )
+            )
         return [
             self._Result(
                 text, ttft, total, nTokens, metadata={"n_input": len(ids)}
@@ -234,9 +247,14 @@ class FullPrefillVllm(_FullPrefillBase):
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
+        runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         batchOut = GenerateBatch(
-            self.llm, data, maxNewTokens, self.samplingConfig
+            self.llm,
+            data,
+            maxNewTokens,
+            self.samplingConfig,
+            onlineStart=runStart,
         )
         results = []
         for generation, prompt in zip(batchOut, data):

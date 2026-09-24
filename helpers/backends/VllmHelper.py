@@ -213,6 +213,7 @@ def GenerateBatch(
     promptTexts: List[str],
     maxNewTokens: int,
     samplingConfig: Optional[Mapping[str, Any]] = None,
+    onlineStart: Optional[float] = None,
 ) -> List[VllmGeneration]:
     """Generate a batch of prompts concurrently on the V1 engine.
 
@@ -220,6 +221,10 @@ def GenerateBatch(
     so the V1 scheduler batches them natively (one shared ``step`` loop covers
     every request). Returns one :class:`VllmGeneration` per prompt, in the
     input order.
+
+    ``onlineStart`` is an optional enclosing Method.Run timestamp. When set,
+    the interval before this helper's backend submission is added to TTFT;
+    the backend interval itself is still counted exactly once.
 
     - ``ttft`` — per-request wall time to its first decoded token. Latency is
       never divided by batch size; doing that turns a real request latency into
@@ -234,6 +239,10 @@ def GenerateBatch(
     engine = llm.llm_engine
     requestIds: List[str] = []
     t0 = time.perf_counter()
+    # ``t0`` is the backend submission boundary.  An adapter may pass the
+    # enclosing Method.Run boundary so request-dependent adapter work is added
+    # without counting any backend interval twice.
+    onlineOffset = 0.0 if onlineStart is None else t0 - onlineStart
     for i, prompt in enumerate(promptTexts):
         requestId = f"kvbench-{time.time_ns()}-{i}"
         engine.add_request(
@@ -282,7 +291,7 @@ def GenerateBatch(
     return [
         VllmGeneration(
             text=texts.get(rid, ""),
-            ttft=float(ttfts.get(rid, 0.0)),
+            ttft=float(ttfts.get(rid, 0.0) + onlineOffset),
             numTokens=tokenLens.get(rid, 0),
             totalTime=amortized,
             numCached=numCached.get(rid, 0),

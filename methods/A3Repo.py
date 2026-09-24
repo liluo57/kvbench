@@ -234,6 +234,7 @@ class A3Repo(Method):
         data: List[str],
         retainOutput: Optional[List[bool]] = None,
     ) -> List[Result]:
+        runStart = time.perf_counter()
         if len(self._chunks) != len(data):
             self._chunks = [[] for _ in data]
             self._wire_chunks = [[] for _ in data]
@@ -259,10 +260,24 @@ class A3Repo(Method):
             else:
                 response = self._request({"op": "full", "text": prompt, "retain_output": retain})
                 full = True
-            results.append(self._result(response, full=full, prompt_variant=variant))
+            results.append(
+                self._result(
+                    response,
+                    full=full,
+                    prompt_variant=variant,
+                    onlineStart=runStart,
+                )
+            )
         return results
 
-    def _result(self, response: Dict[str, Any], *, full: bool, prompt_variant: str = "raw") -> Result:
+    def _result(
+        self,
+        response: Dict[str, Any],
+        *,
+        full: bool,
+        prompt_variant: str = "raw",
+        onlineStart: Optional[float] = None,
+    ) -> Result:
         metadata = {
             "reuse_ratio": float(response.get("reuse_ratio", 0.0)),
             "recomp_ratio": self.recompRatio,
@@ -274,10 +289,14 @@ class A3Repo(Method):
             metadata["a3_debug"] = response["a3_debug"]
         if full:
             metadata["full_prefill"] = True
+        ttft = float(response.get("ttft", 0.0))
+        generationStart = response.get("generation_start")
+        if onlineStart is not None and generationStart is not None:
+            ttft += float(generationStart) - onlineStart
         return Result(
             output=response.get("text", ""),
             performance={
-                TtftKey: float(response.get("ttft", 0.0)),
+                TtftKey: ttft,
                 NumOutputTokensKey: int(response.get("num_tokens", 0)),
                 TotalTimeKey: float(response.get("total_time", response.get("ttft", 0.0))),
             },

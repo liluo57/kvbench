@@ -3,11 +3,18 @@ from types import SimpleNamespace
 import pytest
 
 from core import Config
+from core.Sampling import SglangSamplingParams
 from methods.Hypic import (
     HypicMethod,
     _BuildHypicEngineKwargs,
+    _QWEN35_ASSISTANT_MARKER,
+    _QWEN35_CHAT_PREFIX,
+    _QWEN35_SYSTEM,
+    _Qwen35RawBody,
+    _Qwen35IndependentPicWarmups,
     _SegmentedPrompt,
     _WARMUP_TAIL,
+    _WARMUP_MAX_NEW_TOKENS,
 )
 from tasks.FreshGap import FreshGapTask
 
@@ -81,6 +88,8 @@ class _FakeEngine:
 
 def _method():
     method = HypicMethod(maxNewTokens=8)
+    # Keep generic method tests independent of the checkout's active model.
+    method.modelPath = ""
     method.engine = _FakeEngine()
     return method
 
@@ -97,12 +106,9 @@ def test_prepare_makes_every_user_chunk_non_final_and_run_marks_reordered_hits()
 
     warmPrompt, warmParams, warmStream = method.engine.calls[0]
     assert warmPrompt == method.separator.join(["A", "B", _WARMUP_TAIL])
-    assert warmParams == {
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "top_k": 20,
-        "max_new_tokens": 1,
-    }
+    assert warmParams == SglangSamplingParams(
+        method.samplingConfig, _WARMUP_MAX_NEW_TOKENS
+    )
     assert warmStream is True
 
     result = method.Run(["head-B-middle-A-tail"])[0]
@@ -123,6 +129,25 @@ def test_prepare_makes_every_user_chunk_non_final_and_run_marks_reordered_hits()
     assert result.performance["num_output_tokens"] == 2
     assert result.performance["ttft"] >= 0
     assert result.performance["total_time"] >= result.performance["ttft"]
+
+
+def test_qwen35_prepare_uses_independent_priming_for_all_pic_modes(monkeypatch):
+    from methods import Hypic as HypicModule
+
+    method = _method()
+    method.modelPath = "/fake/Qwen3.5-35b"
+    monkeypatch.setattr(HypicModule, "arch_family", lambda _path: "qwen3_5")
+
+    method.Prepare([["A", "B"]])
+
+    assert [call[0] for call in method.engine.calls] == [
+        method.separator.join([_QWEN35_SYSTEM, "A", _WARMUP_TAIL]),
+        method.separator.join([_QWEN35_SYSTEM, "B", _WARMUP_TAIL]),
+    ]
+    assert _Qwen35IndependentPicWarmups(["A", "", "B"], method.separator) == [
+        method.separator.join([_QWEN35_SYSTEM, "A", _WARMUP_TAIL]),
+        method.separator.join([_QWEN35_SYSTEM, "B", _WARMUP_TAIL]),
+    ]
 
 
 def test_fresh_gap_keeps_a_fresh_query_tail_after_final_prepared_chunk():
@@ -154,7 +179,7 @@ def test_run_retains_output_as_a_segment_for_a_later_run():
 
     retentionPrompt, retentionParams, retentionStream = method.engine.calls[2]
     assert retentionPrompt == method.separator.join(["answer", _WARMUP_TAIL])
-    assert retentionParams["max_new_tokens"] == 1
+    assert retentionParams["max_new_tokens"] == _WARMUP_MAX_NEW_TOKENS
     assert retentionStream is True
     assert method._states[0]["prepare"] == ["cached", "answer"]
 
@@ -231,6 +256,49 @@ def test_full_prefill_engine_options_keep_radix_cache_without_pic(fake_hypic_con
     assert options["mamba_radix_cache_strategy"] == "no_buffer"
     assert options["disable_overlap_schedule"] is True
     assert "pic_separator_str" not in options
+
+
+def test_qwen35_raw_body_extracts_native_chat_prompt(monkeypatch):
+    from methods import Hypic as HypicModule
+
+    monkeypatch.setattr(HypicModule, "arch_family", lambda _model: "qwen3_5")
+    prompt = (
+        _QWEN35_CHAT_PREFIX
+        + "body text"
+        + _QWEN35_ASSISTANT_MARKER
+        + "\n<think>\n\n</think>\n\n"
+    )
+    assert _Qwen35RawBody(prompt, "/model") == "body text"
+    assert _Qwen35RawBody("already raw", "/model") is None
+
+
+def test_qwen35_addition_warms_each_segment_independently(monkeypatch):
+    from methods import Hypic as HypicModule
+
+    monkeypatch.setattr(HypicModule, "arch_family", lambda _model: "qwen3_5")
+    method = _method()
+    method.modelPath = "/model"
+    method.Prepare([["A", "B"]])
+
+    assert [call[0] for call in method.engine.calls] == [
+        method.separator.join(["You are a helpful assistant.", "A", _WARMUP_TAIL]),
+        method.separator.join(["You are a helpful assistant.", "B", _WARMUP_TAIL]),
+    ]
+
+
+def test_qwen35_transition_uses_the_same_independent_priming(monkeypatch):
+    from methods import Hypic as HypicModule
+
+    monkeypatch.setattr(HypicModule, "arch_family", lambda _model: "qwen3_5")
+    method = HypicMethod(picMode="transition")
+    method.modelPath = "/model"
+    method.engine = _FakeEngine()
+    method.Prepare([["A", "B"]])
+
+    assert [call[0] for call in method.engine.calls] == [
+        method.separator.join(["You are a helpful assistant.", "A", _WARMUP_TAIL]),
+        method.separator.join(["You are a helpful assistant.", "B", _WARMUP_TAIL]),
+    ]
 
 
 def test_pic_engine_options_auto_size_mamba_cache_by_default(fake_hypic_config):

@@ -642,6 +642,10 @@ class CacheBlendWorker:
         )
         if maxNewTokens < 1:
             raise ValueError("max_new_tokens must be at least 1")
+        # This is the boundary immediately before backend generation.  The
+        # parent adapter combines it with Method.Run's monotonic timestamp so
+        # matching, reserve, IPC, and worker-side assembly are included once.
+        backendWallStart = time.time()
         t0 = time.perf_counter()
         out = self.llm.generate(
             prompt_token_ids=[fullIds],
@@ -650,7 +654,12 @@ class CacheBlendWorker:
             ),
         )
         r = out[0]
-        ttft = r.metrics.first_token_time - r.metrics.first_scheduled_time
+        # The CacheBlend fork records its native request timestamps with
+        # ``time.time()``.  Measure from the wall-clock instant immediately
+        # before backend submission to the native first-token timestamp. This
+        # includes submission-to-arrival and queueing; first_scheduled_time
+        # would omit both the initial submission gap and queueing.
+        ttft = r.metrics.first_token_time - backendWallStart
         resp = r.outputs[0]
         token_ids = list(resp.token_ids)
         visible_ids = token_ids[:maxNewTokens]
@@ -671,6 +680,7 @@ class CacheBlendWorker:
             "ok": True,
             "text": text,
             "ttft": round(float(ttft), 6),
+            "generation_start": t0,
             "num_tokens": len(visible_ids),
             "retained_tokens": retained_tokens,
             "total_time": round(float(time.perf_counter() - t0), 6),
@@ -787,7 +797,6 @@ class CacheBlendWorker:
         overwrites those positions with freshly computed KV, so later layers
         do not consume cache captured before the inserted span.
         """
-        requestStart = time.perf_counter()
         try:
             segments, fullIds, sampleKv = self._ResolveSegments(parts)
         except ValueError as exc:
@@ -860,7 +869,6 @@ class CacheBlendWorker:
         oldRatio = self.cfm.get("recomp_ratio", baseRatio)
         self.cfm["recomp_ratio"] = effectiveRatio
         try:
-            generationStart = time.perf_counter()
             resp = self._generateWithRetention(
                 fullIds,
                 retain_output=retain_output,
@@ -868,10 +876,6 @@ class CacheBlendWorker:
             )
         finally:
             self.cfm["recomp_ratio"] = oldRatio
-
-        setupTime = generationStart - requestStart
-        resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
-        resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
 
         resp["reuse_ratio"] = self._reuseRatio(fullLen, reusedTokens)
         resp["cacheblend_debug"] = {
@@ -900,7 +904,6 @@ class CacheBlendWorker:
         max_new_tokens=None,
     ):
         """Legacy contiguous-prefix + fresh-suffix fuse path."""
-        requestStart = time.perf_counter()
         if not chunks:
             return {"ok": False, "error": "fuse: no context chunks"}
 
@@ -951,37 +954,28 @@ class CacheBlendWorker:
         self.cfm["suffix_len"] = suffixLen
         self.engine.model.old_kvs = oldKvs
 
-        generationStart = time.perf_counter()
         resp = self._generateWithRetention(
             fullIds,
             retain_output=retain_output,
             max_new_tokens=max_new_tokens,
         )
-        setupTime = generationStart - requestStart
-        resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
-        resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
         reusedTokens = max(0, len(fullIds) - suffixLen)
         resp["reuse_ratio"] = self._reuseRatio(len(fullIds), reusedTokens)
         return resp
 
     def Full(self, text: str, retain_output: bool = False, max_new_tokens=None):
         """Generate the whole prompt from scratch (no reuse of cached KVs)."""
-        requestStart = time.perf_counter()
         ids = self.tokenizer.encode(text, add_special_tokens=False)
         if not ids:
             return {"ok": False, "error": "empty prompt"}
         self.cfm["collect"] = False
         self.cfm["check"] = False
         self.engine.model.old_kvs = [[None, None]] * len(self.layers)
-        generationStart = time.perf_counter()
         resp = self._generateWithRetention(
             ids,
             retain_output=retain_output,
             max_new_tokens=max_new_tokens,
         )
-        setupTime = generationStart - requestStart
-        resp["ttft"] = round(float(resp["ttft"]) + setupTime, 6)
-        resp["total_time"] = round(float(resp["total_time"]) + setupTime, 6)
         resp["reuse_ratio"] = 0.0
         return resp
 

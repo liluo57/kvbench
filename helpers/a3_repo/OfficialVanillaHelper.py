@@ -121,6 +121,7 @@ class OfficialVanillaWorker:
     def run(self, text: str, input_ids=None) -> dict:
         from utils import vanilla
 
+        onlineStart = time.perf_counter()
         ids = list(input_ids) if input_ids is not None else self._encode(text)
         if not ids:
             raise ValueError("empty prompt")
@@ -134,7 +135,7 @@ class OfficialVanillaWorker:
             for token_id in (self.tokenizer.eos_token_id, self.tokenizer.bos_token_id)
             if token_id is not None
         ]
-        start = time.perf_counter()
+        generationStart = time.perf_counter()
         # vanilla() prints the decoded sequence.  Keep stdout machine-readable
         # and retain the diagnostic in the worker's stderr instead.
         captured = io.StringIO()
@@ -148,7 +149,9 @@ class OfficialVanillaWorker:
                 self.args.max_new_tokens,
                 self._full_config(),
             )
-        total = time.perf_counter() - start
+        onlineOffset = generationStart - onlineStart
+        ttft = onlineOffset + float(ttft)
+        total = onlineOffset + (time.perf_counter() - generationStart)
         diagnostic = captured.getvalue().strip()
         if diagnostic:
             print(f"[official-vanilla-helper output] {diagnostic}", file=sys.stderr, flush=True)

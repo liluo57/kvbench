@@ -8,7 +8,14 @@ metrics (TTFT, throughput, ...) can be computed.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-#: Time to first output token, in seconds.
+#: End-to-end online time to the first output token, in seconds.
+#:
+#: The clock starts when the request enters ``Method.Run`` and ends when the
+#: inference backend makes the first generated token available.  Request-
+#: dependent lookup, composition, cache assembly/transformation, selection,
+#: repair, fresh prefill, transfers, IPC, and backend queueing are included.
+#: ``Method.Initialize`` and reusable state built by ``Method.Prepare`` are
+#: outside this measurement.
 TtftKey = "ttft"
 #: Number of generated (output) tokens.
 NumOutputTokensKey = "num_output_tokens"

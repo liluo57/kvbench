@@ -1,16 +1,20 @@
 """HYPIC-backed position-independent cache method.
 
 This adapter drives the in-process ``sglang.Engine`` from the HYPIC checkout.
-``Prepare`` submits the original-order reusable segments once.  ``Run`` finds
-those segments in the complete prompt (including reordered/interleaved uses),
-inserts HYPIC's out-of-band separator between spans, and generates from the
-resulting position-independent cache composition.  HYPIC removes the separator
-before tokenization, so it is never visible to the model.
+``Prepare`` submits the original-order reusable segments to PICache.  For
+Qwen3.5, every PIC mode uses the same independent per-segment priming request:
+the fixed system segment, one reusable chunk, and a disposable tail.  This is
+the protocol used by HYPIC's Qwen reference tests; the tail makes the chunk
+cacheable because HYPIC never indexes the final segment of a request.  ``Run``
+finds those segments in the complete prompt (including reordered/interleaved
+uses), inserts HYPIC's out-of-band separator between spans, and generates from
+the resulting position-independent cache composition.  HYPIC removes the
+separator before tokenization, so it is never visible to the model.
 
 When a RUN asks to retain its output, the adapter performs an unmeasured,
-one-token warmup using the output as a segment.  HYPIC does not expose the
-decode KV through ``Engine.generate`` after a request finishes, so this
-warmup is the portable way to register the generated text in PICache.
+short warmup using the output as a segment.  HYPIC does not expose the decode
+KV through ``Engine.generate`` after a request finishes, so this warmup is the
+portable way to register the generated text in PICache.
 
 HYPIC v1 deliberately never caches the last segment of a request.  Prepare
 therefore appends a small throwaway tail so every user-provided segment is
@@ -29,6 +33,7 @@ from core.Config import Get, MaxModelLen, ModelPath as DefaultModelPath
 from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig, SglangSamplingParams
+from helpers.backends.ModelAdapter import arch_family
 from helpers.backends.Prompt import ComposeInterleavedReuse
 
 
@@ -39,6 +44,11 @@ _PIC_MODES = {
     "transition_rope_recompute",
 }
 _WARMUP_TAIL = "\n[KVBench HYPIC cache warmup]\n"
+_WARMUP_MAX_NEW_TOKENS = 4
+_QWEN35_SYSTEM = "You are a helpful assistant."
+_QWEN35_CHAT_PREFIX = "<|im_start|>user\n"
+_QWEN35_ASSISTANT_MARKER = "<|im_end|>\n<|im_start|>assistant"
+_QWEN35_POST = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
 def _HypicRepoPath() -> Path:
@@ -119,7 +129,7 @@ def _BuildHypicEngineKwargs(
         )
         # Cap the mamba / linear-attention state pool size from
         # Hypic.MaxMambaCacheSize (config.yaml). SGLang's auto-fit defaults to
-        # ~300 slots, which on Qwen3.5-27B eats ~47 GiB per GPU; the explicit
+        # ~300 slots, which on Qwen3.5-35B eats ~47 GiB per GPU; the explicit
         # cap keeps room for prefill workspace. ``None`` falls through to
         # SGLang auto-fit.
         maxMambaCacheSize = _MaxMambaCacheSize()
@@ -187,6 +197,42 @@ def _SegmentedPrompt(parts: Iterable[str], separator: str) -> str:
             f"prompt text contains the configured HYPIC separator {separator!r}"
         )
     return separator.join(spans)
+
+
+def _Qwen35IndependentPicWarmups(
+    chunks: Iterable[str], separator: str
+) -> List[str]:
+    """Build the official per-chunk Qwen3.5 PIC priming requests.
+
+    The final tail is intentionally disposable: PICache does not index the
+    final segment of a request, while the preceding system/chunk segments are
+    committed before it.  This helper is shared by every PIC mode.
+    """
+    return [
+        _SegmentedPrompt([_QWEN35_SYSTEM, chunk, _WARMUP_TAIL], separator)
+        for chunk in chunks
+        if chunk
+    ]
+
+
+def _Qwen35RawBody(runInput: str, modelPath: str) -> Optional[str]:
+    """Extract KBBase's user content from Qwen3.5 ChatML, if present.
+
+    HYPIC's Qwen3.5 reference path deliberately uses the model's raw prompt
+    format (system text + PIC separators), rather than putting a separator
+    inside a rendered ChatML user turn.  Other architectures and already-raw
+    prompts stay on the existing adapter path.
+    """
+    if arch_family(modelPath) != "qwen3_5":
+        return None
+    if not runInput.startswith(_QWEN35_CHAT_PREFIX):
+        return None
+    end = runInput.find(
+        _QWEN35_ASSISTANT_MARKER, len(_QWEN35_CHAT_PREFIX)
+    )
+    if end < 0:
+        return None
+    return runInput[len(_QWEN35_CHAT_PREFIX) : end]
 
 
 class HypicMethod(Method):
@@ -281,10 +327,26 @@ class HypicMethod(Method):
             if not prepare:
                 continue
 
+            if arch_family(self.modelPath) == "qwen3_5":
+                # HYPIC's official Qwen quick tests use the same independent
+                # PIC priming policy for Addition, Transition, Transition-RoPE
+                # and TRR.  A joint request changes the committed segment state
+                # because GDN conv history and the attention KV depend on the
+                # preceding segments; it is therefore not an equivalent batch
+                # form of independent priming.
+                warmups = _Qwen35IndependentPicWarmups(
+                    prepare, self.separator
+                )
+                for warmup in warmups:
+                    self._Generate(
+                        warmup, maxNewTokens=_WARMUP_MAX_NEW_TOKENS
+                    )
+                continue
+
             # PICache excludes the final segment by design.  The disposable
             # tail makes the final prepared chunk cacheable as well.
             warmup = _SegmentedPrompt([*prepare, _WARMUP_TAIL], self.separator)
-            self._Generate(warmup, maxNewTokens=1)
+            self._Generate(warmup, maxNewTokens=_WARMUP_MAX_NEW_TOKENS)
 
     def Run(
         self,
@@ -292,6 +354,7 @@ class HypicMethod(Method):
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
+        runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._states) != len(data):
             self._states = [{"prepare": []} for _ in data]
@@ -304,8 +367,16 @@ class HypicMethod(Method):
                 else False
             )
             if self.fullPrefill:
+                rawBody = _Qwen35RawBody(runInput, self.modelPath)
+                fullPrompt = (
+                    _QWEN35_SYSTEM + rawBody + _QWEN35_POST
+                    if rawBody is not None
+                    else runInput
+                )
                 output, ttft, total, nTokens, meta = self._Generate(
-                    runInput, maxNewTokens=maxNewTokens
+                    fullPrompt,
+                    maxNewTokens=maxNewTokens,
+                    onlineStart=runStart,
                 )
                 results.append(
                     self._Result(
@@ -324,7 +395,9 @@ class HypicMethod(Method):
                 if index < len(self._states)
                 else []
             )
-            parts = ComposeInterleavedReuse(prepare, runInput)
+            rawBody = _Qwen35RawBody(runInput, self.modelPath)
+            composeInput = rawBody if rawBody is not None else runInput
+            parts = ComposeInterleavedReuse(prepare, composeInput)
             matched = [
                 prepareIndex
                 for prepareIndex, _ in parts
@@ -333,13 +406,26 @@ class HypicMethod(Method):
 
             # With no prepared match, leave the prompt byte-for-byte unchanged.
             # It becomes one PIC miss segment, equivalent to full prefill.
-            prompt = (
-                _SegmentedPrompt((text for _, text in parts), self.separator)
-                if matched
-                else runInput
-            )
+            if rawBody is not None:
+                prompt = (
+                    _SegmentedPrompt(
+                        [_QWEN35_SYSTEM, *(text for _, text in parts)],
+                        self.separator,
+                    )
+                    + _QWEN35_POST
+                    if matched
+                    else _QWEN35_SYSTEM + rawBody + _QWEN35_POST
+                )
+            else:
+                prompt = (
+                    _SegmentedPrompt((text for _, text in parts), self.separator)
+                    if matched
+                    else runInput
+                )
             output, ttft, total, nTokens, meta = self._Generate(
-                prompt, maxNewTokens=maxNewTokens
+                prompt,
+                maxNewTokens=maxNewTokens,
+                onlineStart=runStart,
             )
 
             if retain:
@@ -380,7 +466,7 @@ class HypicMethod(Method):
             return
 
         warmup = _SegmentedPrompt([output, _WARMUP_TAIL], self.separator)
-        self._Generate(warmup, maxNewTokens=1)
+        self._Generate(warmup, maxNewTokens=_WARMUP_MAX_NEW_TOKENS)
         prepare.append(output)
 
     def _Result(
@@ -426,13 +512,23 @@ class HypicMethod(Method):
         )
 
     def _Generate(
-        self, prompt: str, *, maxNewTokens: int
+        self,
+        prompt: str,
+        *,
+        maxNewTokens: int,
+        onlineStart: Optional[float] = None,
     ) -> Tuple[str, float, float, int, Dict[str, Any]]:
-        """Generate one request and measure TTFT at the first streamed token."""
+        """Generate one request and measure TTFT at the first streamed token.
+
+        ``onlineStart`` is the enclosing Method.Run boundary.  Prepare and
+        output-retention warmups leave it unset, so they remain outside online
+        TTFT.
+        """
         if self.engine is None:
             raise RuntimeError("HypicMethod is not initialized")
 
         started = time.perf_counter()
+        onlineOffset = 0.0 if onlineStart is None else started - onlineStart
         ttft: Optional[float] = None
         final: Optional[Dict[str, Any]] = None
         maxCached = 0
@@ -466,8 +562,8 @@ class HypicMethod(Method):
         )
         return (
             final.get("text") or "",
-            float(ttft if ttft is not None else total),
-            total,
+            float(ttft if ttft is not None else total) + onlineOffset,
+            total + onlineOffset,
             nTokens,
             meta,
         )

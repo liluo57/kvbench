@@ -109,6 +109,7 @@ class NaiveTransformer(Method):
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
+        runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         # Naive processes the batch sequentially: every case builds a
         # differently-sized DynamicCache, so the past tensors cannot be packed
@@ -133,22 +134,24 @@ class NaiveTransformer(Method):
             ):
                 # Nothing reusable appears in this prompt.
                 ids = self._gen.Encode(runInput)
+                generationStart = time.perf_counter()
                 generated = self._gen.Generate(
                     ids, maxNewTokens=maxNewTokens, returnCache=retain
                 )
                 if retain:
-                    text, ttft, total, nTokens, fullCache, outputIds = generated
+                    text, backendTtft, total, nTokens, fullCache, outputIds = generated
                     self._registerOutput(state, text, outputIds, fullCache)
                 else:
-                    text, ttft, total, nTokens = generated
+                    text, backendTtft, total, nTokens = generated
+
+                ttft = generationStart - runStart + backendTtft
+                total = generationStart - runStart + total
 
                 nInput = len(ids)
                 reuseRatio = 0.0
 
             else:
                 from transformers.cache_utils import DynamicCache
-
-                t0 = time.perf_counter()
 
                 past = DynamicCache()
                 lastId: Optional[int] = None
@@ -195,23 +198,26 @@ class NaiveTransformer(Method):
                     lastId = ids[-1]
 
                 nInput = past.get_seq_length()
-                prefillTime = time.perf_counter() - t0
-
                 if nInput == 0 or lastId is None:
                     ids = self._gen.Encode(runInput)
+                    generationStart = time.perf_counter()
                     generated = self._gen.Generate(
                         ids, maxNewTokens=maxNewTokens, returnCache=retain
                     )
                     if retain:
-                        text, ttft, total, nTokens, fullCache, outputIds = generated
+                        text, backendTtft, total, nTokens, fullCache, outputIds = generated
                         self._registerOutput(state, text, outputIds, fullCache)
                     else:
-                        text, ttft, total, nTokens = generated
+                        text, backendTtft, total, nTokens = generated
+
+                    ttft = generationStart - runStart + backendTtft
+                    total = generationStart - runStart + total
 
                     nInput = len(ids)
                     reuseRatio = 0.0
 
                 else:
+                    generationStart = time.perf_counter()
                     decoded = self._decodeFromCache(
                         past,
                         lastId,
@@ -227,8 +233,8 @@ class NaiveTransformer(Method):
 
                     # Fresh intermediate prefill happens before Generate(), so
                     # include it in both TTFT and total time.
-                    ttft = prefillTime + decodeTtft
-                    total = prefillTime + decodeTotal
+                    ttft = generationStart - runStart + decodeTtft
+                    total = generationStart - runStart + decodeTotal
 
                     reuseRatio = (
                         reusedTokens / nInput
