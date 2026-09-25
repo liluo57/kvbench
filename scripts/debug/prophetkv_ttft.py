@@ -14,12 +14,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-try:
-    from prophetkv_kvbench_common import (
+if __package__:
+    from .prophetkv_kvbench_common import (
         build_methods, build_tasks, configure, parser_for, preflight
     )
-except ModuleNotFoundError:  # ``python -m scripts.prophetkv_ttft``
-    from scripts.prophetkv_kvbench_common import (
+else:
+    from prophetkv_kvbench_common import (
         build_methods, build_tasks, configure, parser_for, preflight
     )
 
@@ -81,7 +81,7 @@ def main():
     parser.set_defaults(
         tasks=["cwe", "vt"],
         methods=["full", "naive", "prophet20"],
-        output_root=str(Path(__file__).resolve().parents[1] / "outputs" / "prophetkv_ttft"),
+        output_root=str(Path(__file__).resolve().parents[2] / "outputs" / "prophetkv_ttft"),
     )
     args = parser.parse_args()
     if set(args.methods) != {"full", "naive", "prophet20"}:

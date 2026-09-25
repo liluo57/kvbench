@@ -2,8 +2,8 @@
 
 Run this script in a fresh process for each case, for example:
 
-  python scripts/diagnose_hypic_cache.py --priming isolated --mode transition_rope
-  python scripts/diagnose_hypic_cache.py --priming joint --mode transition_rope
+  python scripts/debug/diagnose_hypic_cache.py --priming isolated --mode transition_rope
+  python scripts/debug/diagnose_hypic_cache.py --priming joint --mode transition_rope
 
 The HYPIC-side opt-in instrumentation writes a .pt entry dump.  This runner
 uses the official raw Qwen prompt shape and intentionally keeps the measured
@@ -18,8 +18,17 @@ import os
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-HYPIC = Path("/root/hypic").resolve()
+from core.Config import Get  # noqa: E402
+
+_HYPIC_CONFIG = Get("Hypic", {}) or {}
+_HYPIC_ROOT = os.environ.get("HYPIC_REPO_PATH") or _HYPIC_CONFIG.get("RepoPath")
+if not _HYPIC_ROOT:
+    raise RuntimeError("Set Hypic.RepoPath or HYPIC_REPO_PATH to the HYPIC checkout")
+HYPIC = Path(_HYPIC_ROOT).expanduser().resolve()
 sys.path.insert(0, str(HYPIC / "python"))
 
 import sglang as sgl  # noqa: E402
@@ -31,8 +40,8 @@ from sglang.srt.pic.segmenter import segment_hash  # noqa: E402
 SEP = "<<PIC_SEP>>"
 SYSTEM = "You are a helpful assistant."
 POST = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-MODEL = os.environ.get("PIC_MODEL", "/root/autodl-tmp/models/Qwen3.5-35b")
-OUT = os.environ.get("PIC_CACHE_DEBUG_DUMP", "/root/kvbench/outputs/cache-debug")
+MODEL_DEFAULT = os.environ.get("PIC_MODEL")
+OUT_DEFAULT = os.environ.get("PIC_CACHE_DEBUG_DUMP", str(ROOT / "outputs" / "cache-debug"))
 
 # Long enough to exercise Qwen's convolutional history, but deliberately small
 # enough that each diagnostic run remains inexpensive.
@@ -55,10 +64,13 @@ def main() -> None:
         choices=("addition", "transition", "transition_rope", "transition_rope_recompute"),
         default="transition_rope",
     )
-    ap.add_argument("--out", default=OUT)
+    ap.add_argument("--model", default=MODEL_DEFAULT)
+    ap.add_argument("--out", default=OUT_DEFAULT)
     args = ap.parse_args()
+    if not args.model:
+        ap.error("--model or PIC_MODEL is required")
 
-    tok = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
+    tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     c2_ids = tok.encode(C2, add_special_tokens=False)
     c2_hash = segment_hash(c2_ids).hex()
     os.environ["PIC_CACHE_DEBUG_DUMP"] = str(Path(args.out).resolve())
@@ -66,7 +78,7 @@ def main() -> None:
     os.environ["PIC_CACHE_DEBUG_LABEL"] = f"{args.mode}_{args.priming}"
 
     kwargs = dict(
-        model_path=MODEL,
+        model_path=args.model,
         tp_size=int(os.environ.get("PIC_TP", "1")),
         dtype="bfloat16",
         context_length=32768,

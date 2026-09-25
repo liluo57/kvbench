@@ -15,13 +15,16 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import scripts.direct_hypic_hotpotqa as harness
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-MODEL = os.environ.get("PIC_MODEL", "/root/autodl-tmp/models/Qwen3.5-35b")
+from scripts.debug import direct_hypic_hotpotqa as harness
+
+MODEL_DEFAULT = os.environ.get("PIC_MODEL")
 
 
-def run_one(mode: str, cases, protocol: str, priming: str) -> dict:
+def run_one(mode: str, cases, protocol: str, priming: str, model: str) -> dict:
     if mode == "full":
         os.environ.pop("DIRECT_WARMUP_ALL", None)
         os.environ.pop("DIRECT_WARMUP_SEGMENT_ONLY", None)
@@ -59,7 +62,7 @@ def run_one(mode: str, cases, protocol: str, priming: str) -> dict:
 
     harness.generate = timed_generate
     try:
-        summary = harness.run_mode(mode, MODEL, cases, protocol)
+        summary = harness.run_mode(mode, model, cases, protocol)
     finally:
         harness.generate = original
     summary["ttft_wall_mean"] = sum(x["wall_sec"] for x in timings) / len(timings)
@@ -72,7 +75,10 @@ def run_one(mode: str, cases, protocol: str, priming: str) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="/root/kvbench/data/hotpotqa/hotpotqa.jsonl")
+    ap.add_argument("--model", default=MODEL_DEFAULT)
+    ap.add_argument(
+        "--data", default=str(ROOT / "data" / "hotpotqa" / "hotpotqa.jsonl")
+    )
     ap.add_argument("--limit", type=int, default=64)
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--modes", default="full,addition,transition_rope_recompute")
@@ -80,6 +86,8 @@ def main() -> None:
     ap.add_argument("--protocol", choices=("official", "kvbench"), default="official")
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
+    if not args.model:
+        ap.error("--model or PIC_MODEL is required")
 
     data = [
         json.loads(line)
@@ -94,11 +102,11 @@ def main() -> None:
     ][: args.limit]
     started = time.time()
     results = {
-        mode: run_one(mode, cases, args.protocol, args.priming)
+        mode: run_one(mode, cases, args.protocol, args.priming, args.model)
         for mode in [x.strip() for x in args.modes.split(",") if x.strip()]
     }
     result = {
-        "model": MODEL,
+        "model": args.model,
         "data": args.data,
         "cases": len(cases),
         "priming": args.priming,

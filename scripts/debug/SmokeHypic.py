@@ -2,7 +2,7 @@
 
 Run from the KVBench root::
 
-    python scripts/SmokeHypic.py --gpu 0
+    python scripts/debug/SmokeHypic.py --gpu 0
 
 The real file entry point and ``__main__`` guard are required because HYPIC's
 SGLang engine starts its scheduler with Python's ``spawn`` context.
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

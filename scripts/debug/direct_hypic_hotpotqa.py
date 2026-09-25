@@ -19,6 +19,9 @@ from typing import Any, Iterable
 
 import sglang as sgl
 
+ROOT = Path(__file__).resolve().parents[2]
+MODEL_DEFAULT = os.environ.get("PIC_MODEL")
+
 
 SEP = "<<PIC_SEP>>"
 # The official HYPIC quick test uses the first spelling.  The second spelling
@@ -284,8 +287,10 @@ def run_mode(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="/root/autodl-tmp/models/Qwen3.5-35b")
-    parser.add_argument("--data", default="/root/kvbench/data/hotpotqa/hotpotqa.jsonl")
+    parser.add_argument("--model", default=MODEL_DEFAULT)
+    parser.add_argument(
+        "--data", default=str(ROOT / "data" / "hotpotqa" / "hotpotqa.jsonl")
+    )
     parser.add_argument("--limit", type=int, default=64)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument(
@@ -305,8 +310,13 @@ def main() -> None:
         default="official",
         help="official raw prompt or KVBench's Qwen ChatML boundary protocol",
     )
-    parser.add_argument("--output", default="/root/kvbench/outputs/direct-hypic-hotpotqa-64.json")
+    parser.add_argument(
+        "--output",
+        default=str(ROOT / "outputs" / "direct-hypic-hotpotqa-64.json"),
+    )
     args = parser.parse_args()
+    if not args.model:
+        parser.error("--model or PIC_MODEL is required")
 
     data = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line.strip()]
     cases = [
@@ -326,7 +336,9 @@ def main() -> None:
         for mode in [item.strip() for item in args.modes.split(",") if item.strip()]
     }
     output = {"model": args.model, "data": args.data, "cases": len(cases), "elapsed_sec": time.time() - started, "results": results}
-    Path(args.output).write_text(json.dumps(output, indent=2, ensure_ascii=True) + "\n")
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(output, indent=2, ensure_ascii=True) + "\n")
     print(f"wrote {args.output}", flush=True)
 
 

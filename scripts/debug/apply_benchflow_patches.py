@@ -55,8 +55,8 @@ upgrade and the markers will be absent — the script re-applies everything
 from scratch.
 
 Usage:
-    python3 scripts/apply_benchflow_patches.py           # apply all
-    python3 scripts/apply_benchflow_patches.py --check    # exit 1 if any missing
+    python3 scripts/debug/apply_benchflow_patches.py        # apply all
+    python3 scripts/debug/apply_benchflow_patches.py --check # exit 1 if any missing
 """
 
 from __future__ import annotations
@@ -67,23 +67,8 @@ import os
 import sys
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_LEGACY_BENCHFLOW_ROOT = Path(
-    "/data/lyh/.local/cpython-3.13.9/lib/python3.13/site-packages/benchflow"
-)
-
-
 def _ResolveBenchflowRoot() -> Path:
-    """Find the BenchFlow package used by the invoking Python interpreter.
-
-    The original smoke-run host used ``/data/lyh``.  Keep that path as a
-    fallback for the remote host, but prefer an explicit override or the
-    package import path so the same script works in the local ``/root``
-    environment as well.
-    """
+    """Find BenchFlow from an explicit override or the active Python environment."""
     configured = os.environ.get("KVBENCH_BENCHFLOW_ROOT")
     if configured:
         return Path(configured).expanduser().resolve()
@@ -97,15 +82,35 @@ def _ResolveBenchflowRoot() -> Path:
             return Path(next(iter(locations))).resolve()
         if spec.origin:
             return Path(spec.origin).resolve().parent
-    return _LEGACY_BENCHFLOW_ROOT
+    raise RuntimeError(
+        "Could not locate BenchFlow. Install it in the active Python environment "
+        "or set KVBENCH_BENCHFLOW_ROOT to the BenchFlow package directory."
+    )
 
 
-BENCHFLOW_ROOT = _ResolveBenchflowRoot()
-REGISTRY_PATH = BENCHFLOW_ROOT / "agents" / "registry.py"
-DOCKER_PATH = BENCHFLOW_ROOT / "sandbox" / "docker.py"
-LITELLM_CONFIG_PATH = BENCHFLOW_ROOT / "providers" / "litellm_config.py"
-LITELLM_RUNTIME_PATH = BENCHFLOW_ROOT / "providers" / "litellm_runtime.py"
-PI_LAUNCHER_PATH = BENCHFLOW_ROOT / "agents" / "pi_acp_launcher.py"
+BENCHFLOW_ROOT: Path
+REGISTRY_PATH: Path
+DOCKER_PATH: Path
+LITELLM_CONFIG_PATH: Path
+LITELLM_RUNTIME_PATH: Path
+PI_LAUNCHER_PATH: Path
+
+
+def _ConfigureBenchflowPaths() -> None:
+    """Resolve patch targets after CLI parsing, so ``--help`` needs no install."""
+    global BENCHFLOW_ROOT
+    global REGISTRY_PATH
+    global DOCKER_PATH
+    global LITELLM_CONFIG_PATH
+    global LITELLM_RUNTIME_PATH
+    global PI_LAUNCHER_PATH
+
+    BENCHFLOW_ROOT = _ResolveBenchflowRoot()
+    REGISTRY_PATH = BENCHFLOW_ROOT / "agents" / "registry.py"
+    DOCKER_PATH = BENCHFLOW_ROOT / "sandbox" / "docker.py"
+    LITELLM_CONFIG_PATH = BENCHFLOW_ROOT / "providers" / "litellm_config.py"
+    LITELLM_RUNTIME_PATH = BENCHFLOW_ROOT / "providers" / "litellm_runtime.py"
+    PI_LAUNCHER_PATH = BENCHFLOW_ROOT / "agents" / "pi_acp_launcher.py"
 
 # Marker comments — also serve as the patch "fingerprint" for idempotency.
 # Re-applying the patch on a file that already has the marker is a no-op.
@@ -767,6 +772,12 @@ def main(argv: list[str] | None = None) -> int:
         help="exit 1 if any expected patch marker is missing; do not modify files",
     )
     args = parser.parse_args(argv)
+
+    try:
+        _ConfigureBenchflowPaths()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     if args.check:
         missing: list[str] = []

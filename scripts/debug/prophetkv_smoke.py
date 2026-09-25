@@ -5,9 +5,11 @@ Default run: two samples per task, FullPrefill, ProphetKV@1.0, and
 ProphetKV@20%.  ``--methods`` and all common runner options are supported.
 """
 
-from prophetkv_kvbench_common import main
+if __package__:
+    from .prophetkv_kvbench_common import main
+else:
+    from prophetkv_kvbench_common import main
 
 
 if __name__ == "__main__":
     main("smoke")
-

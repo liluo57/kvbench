@@ -22,14 +22,16 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# The driver sits beside this file in KVBench's ``scripts/`` directory.  Use a
-# sibling import so this standalone script works even though ``scripts/`` is
-# intentionally not a Python package.
-import RunA3KVBenchMistral as driver
+# The driver is a sibling in ``scripts/debug/``.  Support direct execution and
+# ``python -m`` invocation through the implicit namespace package.
+if __package__:
+    from . import RunA3KVBenchMistral as driver
+else:
+    import RunA3KVBenchMistral as driver
 
 
 def parse_args() -> argparse.Namespace:

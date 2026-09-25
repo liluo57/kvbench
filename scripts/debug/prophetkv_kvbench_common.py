@@ -11,19 +11,22 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-DEFAULT_MODEL = (
-    "/data1/ly/.cache/huggingface/hub/models--meta-llama--"
-    "Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659"
-)
+from core import Config
+
+_CONFIG = Config.LoadConfig()
+DEFAULT_MODEL = _CONFIG.get("ModelPath")
 DEFAULT_DATASET_ROOT = str(ROOT / "data")
+_CACHEBLEND = _CONFIG.get("Cacheblend") or {}
+_CACHEBLEND_REPO = (_CACHEBLEND.get("Repo") or {}).get("RepoPath")
 TASK_CHOICES = (
     "cwe", "vt", "2wikimultihopqa", "triviaqa", "hotpotqa", "musique"
 )
@@ -112,9 +115,13 @@ def parser_for(mode: str) -> argparse.ArgumentParser:
     smoke = mode == "smoke"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gpu-id", type=int, required=True)
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--model", default=DEFAULT_MODEL, required=not bool(DEFAULT_MODEL))
     parser.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT)
-    parser.add_argument("--cacheblend-repo", default="/data1/ly/Projects/CacheBlend", help="original CacheBlend checkout containing .venv/bin/python")
+    parser.add_argument(
+        "--cacheblend-repo",
+        default=os.environ.get("KVBENCH_CACHEBLEND_REPO_PATH") or _CACHEBLEND_REPO,
+        help="original CacheBlend checkout containing .venv/bin/python",
+    )
     parser.add_argument(
         "--output-root",
         default=str(ROOT / "outputs" / ("prophetkv_smoke" if smoke else "prophetkv_full")),
@@ -159,9 +166,10 @@ def configure(args: argparse.Namespace) -> None:
     config["ModelConfig"] = {"mode": "greedy"}
     cacheblend = copy.deepcopy(config.get("Cacheblend") or {})
     cacheblend_repo = copy.deepcopy(cacheblend.get("Repo") or {})
-    cacheblend_repo["RepoPath"] = str(Path(args.cacheblend_repo).expanduser().resolve())
-    cacheblend["Repo"] = cacheblend_repo
-    config["Cacheblend"] = cacheblend
+    if args.cacheblend_repo:
+        cacheblend_repo["RepoPath"] = str(Path(args.cacheblend_repo).expanduser().resolve())
+        cacheblend["Repo"] = cacheblend_repo
+        config["Cacheblend"] = cacheblend
     engine = dict(config.get("Engine") or {})
     engine.update({
         "AvailableGpuIds": [int(args.gpu_id)],
@@ -259,6 +267,11 @@ def preflight(args: argparse.Namespace) -> None:
         if not directory.is_dir():
             raise FileNotFoundError(f"dataset directory not found: {directory}")
     if "cacheblend" in args.methods:
+        if not args.cacheblend_repo:
+            raise ValueError(
+                "CacheBlend is selected but no repository path is configured; "
+                "set --cacheblend-repo or KVBENCH_CACHEBLEND_REPO_PATH"
+            )
         cb = Path(args.cacheblend_repo).expanduser()
         if not (cb / ".venv" / "bin" / "python").is_file():
             raise FileNotFoundError("CacheBlend venv not found: " + str(cb / ".venv" / "bin" / "python"))

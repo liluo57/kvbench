@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -36,15 +36,6 @@ _spawn_model_path = os.environ.get("KVBENCH_MODEL_PATH")
 if _spawn_model_path:
     from core import Config as _SpawnConfig
     _SpawnConfig.LoadConfig()["ModelPath"] = _spawn_model_path
-
-DEFAULT_MODEL = (
-    "/data1/ly/.cache/huggingface/hub/"
-    "models--mistralai--Mistral-7B-Instruct-v0.2/snapshots/"
-    "63a8b081895390a26e140280378bc85ec8bce07a"
-)
-DEFAULT_A3_REPO = "/data1/ly/Projects/ragkv"
-DEFAULT_A3_PYTHON = "/data1/ly/envs/ragkv/bin/python"
-DEFAULT_CACHEBLEND_REPO = "/data1/ly/Projects/CacheBlend"
 
 TASK_SPECS = {
     "hotpotqa": "HotpotQATask",
@@ -68,16 +59,28 @@ PRIMARY_METRICS = {
 
 
 def parse_args() -> argparse.Namespace:
+    from core import Config
+
+    config = Config.LoadConfig()
+    cacheblend = config.get("Cacheblend") or {}
+    cacheblend_repo = cacheblend.get("Repo") or {}
+    default_model = os.environ.get("KVBENCH_MODEL_PATH") or config.get("ModelPath")
+    default_a3_repo = os.environ.get("KVBENCH_A3_REPO_PATH")
+    default_a3_python = os.environ.get("KVBENCH_A3_PYTHON")
+    default_cacheblend_repo = (
+        os.environ.get("KVBENCH_CACHEBLEND_REPO_PATH")
+        or cacheblend_repo.get("RepoPath")
+    )
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default=DEFAULT_MODEL,
+    parser.add_argument("--model", default=default_model, required=not bool(default_model),
                         help="Mistral-7B-Instruct-v0.2 checkpoint")
     parser.add_argument("--dataset-root", type=Path, default=ROOT / "data",
                         help="KVBench data directory")
-    parser.add_argument("--a3-repo-root", default=DEFAULT_A3_REPO,
+    parser.add_argument("--a3-repo-root", default=default_a3_repo,
                         help="Official ragkv checkout used by A3Repo")
-    parser.add_argument("--a3-python", default=DEFAULT_A3_PYTHON,
+    parser.add_argument("--a3-python", default=default_a3_python,
                         help="Python executable in the official ragkv env")
-    parser.add_argument("--cacheblend-root", default=DEFAULT_CACHEBLEND_REPO,
+    parser.add_argument("--cacheblend-root", default=default_cacheblend_repo,
                         help="Original CacheBlend checkout")
     parser.add_argument("--gpu", type=int, required=True,
                         help="One physical GPU id; methods run sequentially")
@@ -108,7 +111,18 @@ def parse_args() -> argparse.Namespace:
                         default=["vanilla", "fullreuse", "cacheblend", "a3"],
                         help="Comparison methods; default is all four")
     parser.add_argument("--pair-retries", type=int, default=0)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if "a3" in args.methods:
+        if not args.a3_repo_root:
+            parser.error("--a3-repo-root or KVBENCH_A3_REPO_PATH is required for A3")
+        if not args.a3_python:
+            parser.error("--a3-python or KVBENCH_A3_PYTHON is required for A3")
+    if "cacheblend" in args.methods and not args.cacheblend_root:
+        parser.error(
+            "--cacheblend-root or KVBENCH_CACHEBLEND_REPO_PATH is required "
+            "for CacheBlend"
+        )
+    return args
 
 
 def configure_runtime(args: argparse.Namespace) -> Dict[str, Any]:
@@ -120,15 +134,17 @@ def configure_runtime(args: argparse.Namespace) -> Dict[str, Any]:
     config["DatasetPath"] = str(args.dataset_root.expanduser().resolve())
     os.environ["KVBENCH_MODEL_PATH"] = config["ModelPath"]
     config["ModelConfig"] = {"mode": "greedy"}
-    config["A3"] = {
-        "Repo": {
-            "RepoPath": str(Path(args.a3_repo_root).expanduser().resolve()),
-            "Python": str(Path(args.a3_python).expanduser().resolve()),
+    if "a3" in args.methods:
+        config["A3"] = {
+            "Repo": {
+                "RepoPath": str(Path(args.a3_repo_root).expanduser().resolve()),
+                "Python": str(Path(args.a3_python).expanduser().resolve()),
+            }
         }
-    }
-    config["Cacheblend"] = {
-        "Repo": {"RepoPath": str(Path(args.cacheblend_root).expanduser().resolve())}
-    }
+    if args.cacheblend_root:
+        config["Cacheblend"] = {
+            "Repo": {"RepoPath": str(Path(args.cacheblend_root).expanduser().resolve())}
+        }
     engine = dict(config.get("Engine") or {})
     engine.update({
         "AvailableGpuIds": [int(args.gpu)],
@@ -155,11 +171,15 @@ def preflight(args: argparse.Namespace) -> None:
         raise FileNotFoundError(
             f"KVBench dataset directories missing under {dataset_root}: {missing}"
         )
-    for label, path in (
-        ("A3 repo", args.a3_repo_root),
-        ("A3 Python", args.a3_python),
-        ("CacheBlend repo", args.cacheblend_root),
-    ):
+    required_paths = []
+    if "a3" in args.methods:
+        required_paths.extend((
+            ("A3 repo", args.a3_repo_root),
+            ("A3 Python", args.a3_python),
+        ))
+    if "cacheblend" in args.methods:
+        required_paths.append(("CacheBlend repo", args.cacheblend_root))
+    for label, path in required_paths:
         if not Path(path).expanduser().exists():
             raise FileNotFoundError(f"{label} not found: {path}")
     if args.max_samples == 0 or args.max_samples < -1:
@@ -352,8 +372,14 @@ def make_manifest(args: argparse.Namespace, config: Dict[str, Any]) -> Dict[str,
         "max_new_tokens": args.max_new_tokens,
         "max_model_len": args.max_model_len,
         "gpu": args.gpu,
-        "a3_repo": str(Path(args.a3_repo_root).expanduser().resolve()),
-        "cacheblend_repo": str(Path(args.cacheblend_root).expanduser().resolve()),
+        "a3_repo": (
+            str(Path(args.a3_repo_root).expanduser().resolve())
+            if args.a3_repo_root else None
+        ),
+        "cacheblend_repo": (
+            str(Path(args.cacheblend_root).expanduser().resolve())
+            if args.cacheblend_root else None
+        ),
         "engine": config.get("Engine", {}),
     }
 

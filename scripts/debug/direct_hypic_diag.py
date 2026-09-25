@@ -14,6 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+MODEL_DEFAULT = os.environ.get("PIC_MODEL")
+
 
 SEP = "<<PIC_SEP>>"
 SYSTEM = "You are a helpful assistant.\n\n"
@@ -150,11 +153,17 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", type=int, default=1)
-    parser.add_argument("--data", default="data/hotpotqa/hotpotqa.jsonl")
-    parser.add_argument("--model", default="/root/autodl-tmp/models/Qwen3.5-35b")
+    parser.add_argument(
+        "--data", default=ROOT / "data" / "hotpotqa" / "hotpotqa.jsonl"
+    )
+    parser.add_argument("--model", default=MODEL_DEFAULT)
     parser.add_argument("--mode", default="transition_rope_recompute")
-    parser.add_argument("--output-dir", default="outputs/direct-hypic-diag")
+    parser.add_argument(
+        "--output-dir", default=ROOT / "outputs" / "direct-hypic-diag"
+    )
     args = parser.parse_args()
+    if not args.model:
+        parser.error("--model or PIC_MODEL is required")
 
     samples = [
         json.loads(line)

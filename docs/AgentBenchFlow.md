@@ -105,7 +105,7 @@ bench eval run \
   --sandbox docker \
   --skill-mode with-skill \
   --usage-tracking off \
-  --jobs-dir /data/lyh/kvbench/outputs/benchflow/citation-check \
+  --jobs-dir outputs/benchflow/citation-check \
   --concurrency 1 \
   --agent-env BENCHFLOW_PROVIDER_BASE_URL=http://127.0.0.1:<kvbench-port>/v1 \
   --agent-env BENCHFLOW_PROVIDER_API_KEY=dummy \

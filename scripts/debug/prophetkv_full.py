@@ -5,9 +5,11 @@ Default run: all locally available samples for the six overlapping KVBench
 tasks, comparing FullPrefill, NaiveReuse, CacheBlend, and ProphetKV@20%.
 """
 
-from prophetkv_kvbench_common import main
+if __package__:
+    from .prophetkv_kvbench_common import main
+else:
+    from prophetkv_kvbench_common import main
 
 
 if __name__ == "__main__":
     main("full")
-

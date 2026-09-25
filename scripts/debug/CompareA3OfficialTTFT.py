@@ -172,7 +172,7 @@ def main() -> None:
                 seen_chunks.add(chunk)
                 all_chunks.append(chunk)
 
-    helper_dir = Path(__file__).resolve().parents[1] / "helpers" / "a3_repo"
+    helper_dir = Path(__file__).resolve().parents[2] / "helpers" / "a3_repo"
     # Run the workers sequentially.  A3 keeps both its precompute and runtime
     # model resident; starting Vanilla concurrently would unnecessarily double
     # peak GPU memory and can turn a valid comparison into an OOM.

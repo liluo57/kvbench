@@ -10,10 +10,10 @@ latency fields but doubles the number of generations.
 
 The report is JSON, so it can be archived and compared across revisions::
 
-    python scripts/TestQwen3A3.py \
-      --model /data1/ly/models/Qwen3-8b \
-      --repo-root /data1/ly/Projects/ragkv \
-      --python /data1/ly/envs/ragkv/bin/python \
+    python scripts/debug/TestQwen3A3.py \
+      --model "$MODEL_PATH" \
+      --repo-root "$RAGKV_REPO" \
+      --python "$RAGKV_PYTHON" \
       --gpu 3 --output outputs/test_qwen3_a3.json
 """
 
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

@@ -1,8 +1,7 @@
 """Small four-workload HYPIC reproduction harness.
 
-This is intentionally an untracked research script.  It uses the local
-LongBench snapshots and the same raw Qwen3.5 prompt shape as HYPIC's official
-quick test.  It separates:
+This research script uses the local LongBench snapshots and the same raw
+Qwen3.5 prompt shape as HYPIC's official quick test.  It separates:
 
 * ``isolated``: one ``SYSTEM + SEP + chunk + SEP + query`` request per chunk;
 * ``joint``: one request containing all chunks plus a disposable final tail;
@@ -20,12 +19,17 @@ import json
 import os
 import re
 import string
+import sys
 import time
 from pathlib import Path
 from typing import Any, Iterable
 
 import sglang as sgl
 from transformers import AutoTokenizer
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tasks.GovReport import GovReportTask
 from tasks.HotpotQA import HotpotQATask
@@ -40,6 +44,7 @@ POST = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 WARMUP_TAIL = "\n[KVBench HYPIC cache warmup]\n"
 WARMUP_MAX_NEW_TOKENS = int(os.environ.get("DIRECT_WARMUP_MAX_NEW_TOKENS", "4"))
 MAX_NEW_TOKENS = int(os.environ.get("DIRECT_MAX_NEW_TOKENS", "512"))
+MODEL_DEFAULT = os.environ.get("PIC_MODEL")
 
 
 def _read_jsonl(path: str) -> list[dict[str, Any]]:
@@ -276,7 +281,7 @@ def main() -> None:
         "--task", choices=("hotpotqa", "triviaqa", "multinews", "govreport"), required=True
     )
     parser.add_argument("--data", required=True)
-    parser.add_argument("--model", default="/root/autodl-tmp/models/Qwen3.5-35b")
+    parser.add_argument("--model", default=MODEL_DEFAULT)
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--n-chunks", type=int, default=1)
@@ -288,6 +293,8 @@ def main() -> None:
     )
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
+    if not args.model:
+        parser.error("--model or PIC_MODEL is required")
 
     cases = _build_cases(
         args.task, args.data, args.start, args.limit, args.n_chunks

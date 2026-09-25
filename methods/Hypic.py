@@ -53,7 +53,13 @@ _QWEN35_POST = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 def _HypicRepoPath() -> Path:
     config = Get("Hypic", {}) or {}
-    return Path(config.get("RepoPath") or "/root/hypic").expanduser().resolve()
+    repoPath = config.get("RepoPath") or os.environ.get("HYPIC_REPO_PATH")
+    if not repoPath:
+        raise ValueError(
+            "HYPIC repository path is unset; configure Hypic.RepoPath or "
+            "HYPIC_REPO_PATH"
+        )
+    return Path(repoPath).expanduser().resolve()
 
 
 def _MaxMambaCacheSize() -> Optional[int]:
