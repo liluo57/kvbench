@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
-import queue
 import signal
 import time
 from datetime import datetime
@@ -95,7 +94,9 @@ class Engine:
         self.gpuReleaseStableSeconds = float(gpuReleaseStableSeconds)
         self.gpuReleaseMemoryTolerance = int(gpuReleaseMemoryToleranceMiB) * 1024 * 1024
         self.pairRetries = int(pairRetries)
-        self.outputRoot = Path(outputRoot)
+        self.outputRoot = Path(outputRoot).expanduser()
+        if not self.outputRoot.is_absolute():
+            self.outputRoot = Path(__file__).resolve().parents[2] / self.outputRoot
         self.recordAllSamples = recordAllSamples
         self.tuiEnabled = tui
         self.tuiWaitForQuit = tuiWaitForQuit
@@ -138,7 +139,6 @@ class Engine:
             outputDir=self.outputDir,
             maxAttempts=maxAttempts,
         )
-        ctx.eventQueue = ctx.mpContext.Queue()
         ctx.eventsFile = ctx.eventsPath.open("a", encoding="utf-8", buffering=1)
         self._tui = BenchmarkTui(
             enabled=self.tuiEnabled,
@@ -247,10 +247,7 @@ class Engine:
             for worker in ctx.workers.values():
                 self.scheduler.stopWorker(worker)
             while ctx.workers and time.monotonic() < shutdownDeadline:
-                try:
-                    self.scheduler.handleEvent(ctx.eventQueue.get(timeout=0.1))
-                except queue.Empty:
-                    pass
+                self.scheduler.drainEvents(ctx)
                 for workerId, worker in list(ctx.workers.items()):
                     if not worker.process.is_alive():
                         self.scheduler.releaseWorker(workerId)
@@ -310,8 +307,6 @@ class Engine:
             self._tui.FinishAndWait()
             self._tui.Stop()
             ctx.eventsFile.close()
-            ctx.eventQueue.close()
-            ctx.eventQueue.join_thread()
             if previousSigintHandler is not None:
                 signal.signal(signal.SIGINT, previousSigintHandler)
 

@@ -34,6 +34,7 @@ Each task's dataset is resolved by *name* against ``DatasetPath`` from
 
 from .AgentBenchFlowTask import AgentBenchFlowTask
 from .Cwe import CWEShuffleTask, CWETask
+from .FreshGap import FreshGapTask
 from .GovReport import GovReportTask
 from .HotpotQA import HotpotQATask
 from .Musique import MusiqueTask
@@ -49,6 +50,7 @@ __all__ = [
     "AgentBenchFlowTask",
     "CWEShuffleTask",
     "CWETask",
+    "FreshGapTask",
     "GovReportTask",
     "HotpotQATask",
     "MusiqueTask",

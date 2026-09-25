@@ -23,6 +23,7 @@ from methods import (
 from tasks import (
     AgentBenchFlowTask,
     CWEShuffleTask,
+    FreshGapTask,
     GovReportTask,
     HotpotQATask,
     MultiNewsTask,

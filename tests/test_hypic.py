@@ -31,7 +31,7 @@ def fake_hypic_config(monkeypatch):
     """
     from methods import Hypic as HypicModule
 
-    default = {"RepoPath": "/root/hypic", "MaxMambaCacheSize": 32}
+    default = {"MaxMambaCacheSize": 32}
     hypic_cfg = dict(default)
 
     def _override(**overrides):
@@ -150,7 +150,19 @@ def test_qwen35_prepare_uses_independent_priming_for_all_pic_modes(monkeypatch):
     ]
 
 
-def test_fresh_gap_keeps_a_fresh_query_tail_after_final_prepared_chunk():
+def test_fresh_gap_keeps_a_fresh_query_tail_after_final_prepared_chunk(monkeypatch):
+    from tasks import FreshGap as FreshGapModule
+
+    monkeypatch.setattr(
+        FreshGapModule,
+        "user_turn_prefix",
+        lambda *_args, **_kwargs: "<user>",
+    )
+    monkeypatch.setattr(
+        FreshGapModule,
+        "assistant_turn_suffix",
+        lambda *_args, **_kwargs: "<assistant>",
+    )
     task = FreshGapTask(nCases=1, linesPerChunk=1)
     case = next(task.Cases())
 

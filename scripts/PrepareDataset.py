@@ -130,7 +130,7 @@ def _dataset_root(config: Mapping[str, Any], config_path: Path) -> Path:
     value = config.get("DatasetPath", "data")
     if not isinstance(value, str) or not value:
         raise ValueError("DatasetPath must be a non-empty string")
-    root = Path(value)
+    root = Path(value).expanduser()
     return (config_path.parent / root).resolve() if not root.is_absolute() else root
 
 

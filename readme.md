@@ -12,9 +12,6 @@ KVBench focuses on **benchmarking and fair comparison**.
 ## Quick Start
 
 1. Clone
-```bash
-git clone https://github.com/liluo57/kvbench.git
-```
 
 2. Environment Setup
 ```bash
@@ -35,7 +32,7 @@ pip install -r requirement.txt
 > 2. Setup that repo according to their instructions.
 > 3. Write the repo path in `config.yaml`.
 
-4. Prepare datasets
+3. Prepare datasets
 ```bash
 python scripts/PrepareDataset.py
 ```
@@ -46,9 +43,11 @@ dataset sources, splits, revisions, and RULER generation parameters from
 `DatasetPath`.
 
 
-5. Edit config.yaml and Main.py
+4. Set `ModelPath` and any optional third-party repository paths in `config.yaml`.
+   The default model value is a Hugging Face model id; local checkpoint paths
+   are also supported.
 
-6. Just do it!
+5. Run the benchmark:
 ```bash
 python Main.py
 ```

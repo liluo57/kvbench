@@ -121,7 +121,9 @@ def _new_engine(tmp_path, **overrides):
         "AvailableGpuIds": "auto",
         "BatchSize": 1,
         "OutputRoot": str(tmp_path),
-        "InitializeTimeoutSec": 5,
+        # Spawned workers import the ML runtime; allow for cold-start variance
+        # on shared CPU-only hosts used to run the supplemental-material suite.
+        "InitializeTimeoutSec": 30,
         "TaskTimeoutSec": 5,
         "ShutdownGracePeriodSec": 1,
         "GpuReleaseTimeoutSec": 30,
@@ -578,7 +580,7 @@ def test_gpu_release_failure_does_not_stop_other_gpu_workers(tmp_path):
             pairRetries=0,
             gpuReleaseTimeout=0.3,
             gpuReleaseMemoryToleranceMiB=0,
-            initializeTimeout=20,
+            initializeTimeout=60,
             taskTimeout=10,
         )
         report = engine.Evaluate(

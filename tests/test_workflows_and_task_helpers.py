@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-from core.Config import ModelPath as _ModelPath
 from core.Result import Result
 from core.Workflow import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
@@ -32,13 +31,34 @@ from workflow import (
 
 
 @pytest.fixture
-def modelPath():
-    """The model path used by ``render_chat`` / ``_thinking_kwargs`` tests.
+def modelPath(monkeypatch):
+    """Use a deterministic chat-template double without downloading a model."""
+    class FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            tokenize,
+            add_generation_prompt,
+            tools=None,
+            **kwargs,
+        ):
+            userContent = "\n".join(
+                str(message.get("content", ""))
+                for message in messages
+                if message.get("role") == "user"
+            )
+            suffix = "<|im_end|>\n<|im_start|>assistant\n"
+            if kwargs.get("enable_thinking") is True:
+                suffix += "<think>\n"
+            elif kwargs.get("enable_thinking") is False:
+                suffix += "<think>\n\n</think>\n\n"
+            return f"<|im_start|>user\n{userContent}{suffix}"
 
-    Mirrors :class:`core.Config.ModelPath` so tests use the real configured
-    tokenizer (Qwen3 in this environment).
-    """
-    return _ModelPath()
+    ModelAdapter.set_arch_for_testing(None)
+    monkeypatch.setattr(ModelAdapter, "_tokenizer", lambda _path: FakeTokenizer())
+    yield "synthetic-chat-model"
+    ModelAdapter.set_arch_for_testing(None)
 
 
 def test_rag_workflow_prepare_run_and_final_result():
@@ -120,7 +140,7 @@ def test_multiagent_observe_requires_one_result():
         1,
         MultiAgentFullConnectionInput(
             "task", [AgentSpec("A", "{task}")],
-            modelPath=_ModelPath(),
+            chatTemplate=False,
         ),
     )
     workflow.next()
@@ -260,8 +280,10 @@ class _RulerTask(RulerBase):
         return {}
 
 
-def test_ruler_shuffle_guard_handles_empty_parts():
-    assert _RulerTask()._Shuffled(["", "needle"], seed=7) == ["", "needle"]
+def test_ruler_shuffle_guard_handles_empty_parts(tmp_path):
+    assert _RulerTask(dataDir=str(tmp_path))._Shuffled(
+        ["", "needle"], seed=7
+    ) == ["", "needle"]
 
 
 def test_ruler_loader_filters_length_and_slices(tmp_path):
@@ -349,10 +371,14 @@ def test_model_adapter_thinking_kwargs_translate_per_arch():
 def test_model_adapter_render_chat_includes_assistant_generation_prompt(modelPath):
     """render_chat appends the assistant generation prompt regardless of body."""
     ModelAdapter.set_arch_for_testing("qwen3")
-    out = ModelAdapter.render_chat([{"role": "user", "content": "hi"}], modelPath=modelPath)
-    assert "hi" in out
-    assert "<|im_start|>assistant\n" in out
-    ModelAdapter.set_arch_for_testing(None)
+    try:
+        out = ModelAdapter.render_chat(
+            [{"role": "user", "content": "hi"}], modelPath=modelPath
+        )
+        assert "hi" in out
+        assert "<|im_start|>assistant\n" in out
+    finally:
+        ModelAdapter.set_arch_for_testing(None)
 
 
 def test_model_adapter_boundaries_reassemble_the_rendered_user_prompt(modelPath):

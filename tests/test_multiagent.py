@@ -1,19 +1,14 @@
 import unittest
 from decimal import Decimal
 
-from core.Config import ModelPath
 from core.Result import Result
 from core.Workflow import ActionKind, ActionResult
-from helpers.backends import ModelAdapter
 from tasks.KVCommTasks import _extract_choice, _extract_number, _extract_python
 from workflow import AgentSpec, MultiAgentFullConnectionInput, MultiAgentFullConnectionWorkflow
 
 
 def _BuildExpectedPrompt(spec, task, priorOutputs, priorAgents):
-    """Mirror :meth:`MultiAgentFullConnectionWorkflow._BuildPrompt`'s
-    user-prompt construction so the test can predict the input to
-    :func:`ModelAdapter.render_chat`.
-    """
+    """Mirror the raw user-prompt construction used by the workflow."""
     userPrompt = spec.promptTemplate.replace("{task}", task)
     if priorOutputs:
         userPrompt += (
@@ -27,7 +22,6 @@ def _BuildExpectedPrompt(spec, task, priorOutputs, priorAgents):
 
 class MultiAgentWorkflowTest(unittest.TestCase):
     def _run(self, decision):
-        modelPath = ModelPath()
         agents = [
             AgentSpec("A", "a {task}"),
             AgentSpec("B", "b {task}"),
@@ -36,7 +30,7 @@ class MultiAgentWorkflowTest(unittest.TestCase):
         w = MultiAgentFullConnectionWorkflow(
             1, MultiAgentFullConnectionInput(
                 "TASK", agents, decision,
-                modelPath=modelPath,
+                chatTemplate=False,
             ),
         )
         prompts, retains, agentOutputs = [], [], []
@@ -55,13 +49,8 @@ class MultiAgentWorkflowTest(unittest.TestCase):
             else:
                 spec = decision
                 priorOutputs = list(agentOutputs)
-            expectedPrompt = ModelAdapter.render_chat(
-                [{"role": "user", "content": _BuildExpectedPrompt(
-                    spec, "TASK", priorOutputs, agents,
-                )}],
-                modelPath=modelPath,
-                system_prefix=f"You are the {spec.role}.",
-                thinking=False,
+            expectedPrompt = _BuildExpectedPrompt(
+                spec, "TASK", priorOutputs, agents,
             )
             self.assertEqual(action.data, expectedPrompt)
 

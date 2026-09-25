@@ -60,7 +60,9 @@ class AgentBenchFlowTask(Task):
         self.dataset = abf.get("Dataset", "skillsbench@1.1")
         configuredRepo = abf.get("SkillsBenchRepo")
         repoValue = configuredRepo
-        self.skillsbenchDir = Path(repoValue) if repoValue else None
+        self.skillsbenchDir = Path(repoValue).expanduser() if repoValue else None
+        if self.skillsbenchDir is not None and not self.skillsbenchDir.is_absolute():
+            self.skillsbenchDir = Path(__file__).resolve().parents[1] / self.skillsbenchDir
         if self.sourceMode == "local" and self.skillsbenchDir is None:
             raise FileNotFoundError(
                 "local AgentBenchFlow source requires AgentBenchFlow.SkillsBenchRepo"
@@ -90,7 +92,9 @@ class AgentBenchFlowTask(Task):
             self.endpointPortRange = (firstPort, lastPort)
         self.modelId = abf.get("ModelId")
         configuredOutput = abf.get("OutputDir")
-        self.outputDir = Path(configuredOutput) if configuredOutput else None
+        self.outputDir = Path(configuredOutput).expanduser() if configuredOutput else None
+        if self.outputDir is not None and not self.outputDir.is_absolute():
+            self.outputDir = Path(__file__).resolve().parents[1] / self.outputDir
         self.resultJsonTimeout = float(abf.get("ResultJsonTimeoutSec", 3600))
         self.thinking = abf.get("Thinking")
         self.providerApiKey = abf.get("ProviderApiKey")

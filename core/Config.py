@@ -46,7 +46,9 @@ def DatasetDir(dataset: str, config: Optional[Dict[str, Any]] = None) -> Path:
     Raises ``FileNotFoundError`` when the directory does not exist so a typo or
     a missing dataset is reported loudly instead of silently yielding no cases.
     """
-    root = Path(Get("DatasetPath", "data", config=config))
+    root = Path(Get("DatasetPath", "data", config=config)).expanduser()
+    if not root.is_absolute():
+        root = DefaultConfigPath.parent / root
     path = root / dataset
     if not path.is_dir():
         raise FileNotFoundError(
@@ -73,4 +75,3 @@ def MaxModelLen(config: Optional[Dict[str, Any]] = None) -> int:
     if value < 1:
         raise ValueError("MaxModelLen must be at least 1")
     return value
-

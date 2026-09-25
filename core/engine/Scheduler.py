@@ -76,6 +76,7 @@ class Scheduler:
             instanceLog, f"{method.Label} {workerId} instance/runtime"
         )
         parentConnection, childConnection = self.ctx.mpContext.Pipe()
+        eventQueue = self.ctx.mpContext.Queue()
         process = self.ctx.mpContext.Process(
             target=WorkerMain,
             name=f"kvbench-{workerId}",
@@ -87,12 +88,18 @@ class Scheduler:
                 gpuIds,
                 self.ctx.effectiveBatchSizes[methodIndex],
                 childConnection,
-                self.ctx.eventQueue,
+                eventQueue,
                 instanceLog,
                 self.engine.recordAllSamples,
             ),
         )
-        process.start()
+        try:
+            process.start()
+        except BaseException:
+            parentConnection.close()
+            childConnection.close()
+            eventQueue.close()
+            raise
         childConnection.close()
         self.ctx.workers[workerId] = _WorkerState(
             workerId=workerId,
@@ -101,6 +108,7 @@ class Scheduler:
             gpuIds=gpuIds,
             process=process,
             connection=parentConnection,
+            eventQueue=eventQueue,
             instanceLog=instanceLog,
             deadline=time.monotonic() + self.engine.initializeTimeout,
         )
@@ -207,6 +215,10 @@ class Scheduler:
         worker.process.join(timeout=0.2)
         try:
             worker.connection.close()
+        except Exception:
+            pass
+        try:
+            worker.eventQueue.close()
         except Exception:
             pass
         now = time.monotonic()
@@ -379,24 +391,25 @@ class Scheduler:
     # sequence of collaborator calls (≤ 15 lines of intent).
 
     def drainEvents(self, ctx: "RunContext") -> None:
-        """Pull every event currently queued and route it through :meth:`handleEvent`.
+        """Drain each worker's isolated event queue and control pipe.
 
-        Blocks up to 100ms when the queue is empty so a quiet run doesn't
-        spin; drains the rest of the queue non-blockingly once the first
-        event arrives so a burst of events doesn't starve other loop work.
+        A queue shared by all workers can become unusable if a worker exits
+        abruptly while its multiprocessing queue feeder is writing. Keeping
+        one queue per worker limits that failure to the process that crashed,
+        so replacement workers can still report their lifecycle events.
         """
-        try:
-            event = ctx.eventQueue.get(timeout=0.1)
-        except queue.Empty:
-            self._DrainWorkerControl()
-            return
-        self.handleEvent(event)
-        while True:
-            try:
-                self.handleEvent(ctx.eventQueue.get_nowait())
-            except queue.Empty:
-                self._DrainWorkerControl()
-                return
+        received = False
+        for worker in list(ctx.workers.values()):
+            while True:
+                try:
+                    event = worker.eventQueue.get_nowait()
+                except (queue.Empty, EOFError, OSError, ValueError):
+                    break
+                self.handleEvent(event)
+                received = True
+        self._DrainWorkerControl()
+        if not received:
+            time.sleep(0.1)
 
     def _DrainWorkerControl(self) -> None:
         """Read synchronous worker messages before the reap pass."""

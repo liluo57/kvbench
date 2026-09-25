@@ -50,6 +50,7 @@ class _WorkerState:
     gpuIds: List[int]
     process: Any
     connection: Any
+    eventQueue: Any
     instanceLog: str
     state: str = "initializing"
     deadline: Optional[float] = None
@@ -200,7 +201,6 @@ class RunContext:
     cancelled: bool
     status: str
     mpContext: Any
-    eventQueue: Any
     eventsFile: Any
     eventsPath: Path
     startedWall: float
@@ -225,9 +225,10 @@ def BuildRunContext(
 ) -> RunContext:
     """Initialize the mutable state ``Engine.Evaluate`` starts with.
 
-    Pure factory — keeps ``Engine`` short. The first ``BenchmarkTui``,
-    ``mp`` context, and ``eventQueue`` are constructed by ``Engine``
-    directly because they belong to that class, not the context.
+    Pure factory — keeps ``Engine`` short. The first ``BenchmarkTui`` and
+    multiprocessing context are constructed by ``Engine`` directly because
+    they belong to that class, not the context. ``Scheduler`` creates one
+    isolated event queue per worker.
     """
     startedWall = time.time()
     startedMono = time.monotonic()
@@ -270,7 +271,6 @@ def BuildRunContext(
         cancelled=False,
         status="running",
         mpContext=mp.get_context("spawn"),
-        eventQueue=None,  # set by Engine right after construction
         eventsFile=None,
         eventsPath=outputDir / "events.jsonl",
         startedWall=startedWall,

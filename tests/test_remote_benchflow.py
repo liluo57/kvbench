@@ -71,8 +71,9 @@ def test_remote_server_rejects_source_path_traversal(tmp_path):
 
 def test_remote_server_rejects_reserved_bench_arguments(tmp_path):
     manager = RemoteRunManager(workRoot=tmp_path / "runtime")
+    other_jobs = str(tmp_path / "other-jobs")
     with pytest.raises(ApiError, match="may not override --jobs-dir"):
-        manager.CreateRun(_spec(bench_extra_args=["--jobs-dir", "/tmp/other"]))
+        manager.CreateRun(_spec(bench_extra_args=["--jobs-dir", other_jobs]))
 
 
 def test_remote_server_forwards_client_agent_env_into_command(tmp_path):
@@ -225,7 +226,11 @@ def test_remote_server_uses_existing_conventional_prebuilt_image(
         len(archiveBuffer.getvalue()),
     )
 
-    monkeypatch.setattr(remoteDockerModule.shutil, "which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(
+        remoteDockerModule.shutil,
+        "which",
+        lambda _: str(tmp_path / "docker"),
+    )
 
     class InspectResult:
         returncode = 0
