@@ -1,9 +1,18 @@
-pyyaml
-nvidia-ml-py
-rich
-torch
-transformers
-datasets>=2.18
-gdown>=5.2
-py7zr>=0.20
-pytest
+# Common KVBench runtime, dataset preparation, and test dependencies.
+PyYAML==6.0.3
+nvidia-ml-py==13.610.43
+rich==15.0.0
+# Choose the PyTorch wheel index/build matching the target CUDA installation.
+# The release is pinned here; the local CUDA build suffix is intentionally not.
+torch==2.13.0
+transformers==4.57.6
+datasets==5.0.0
+gdown==5.2.1
+py7zr==0.20.8
+requests==2.34.2
+benchflow==0.7.5
+pytest==9.1.1
+
+# GPU backend packages (vLLM, LMCache, and FlashInfer) are installed separately
+# with versions and wheels matching the selected CUDA/PyTorch build.
+# External repos use their configured external checkouts/venvs.
