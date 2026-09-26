@@ -38,8 +38,9 @@ Refer to each class constructor for its implementation and configurable paramete
 | `KVCommTransformer` | KVCOMM-style cache reuse for multi-agent workloads. |
 | `DependencyAnalysisMethod` | Computes cache dependency analysis metrics. |
 | `RolloutMethod` | Decorator that repeats `Run` on a base Method and aggregates the results. |
-
-Methods are exported from `methods/__init__.py`. Some require separate repositories, specific model architectures, or CUDA extensions; see their implementation files and backend settings in the root `config.yaml`.
+| `KVPacket` | Reuses prepared text through KV Packet wrappers and packet-aware matching. |
+| `EPIC`, `RandRecomputeTransformer` | KVPacket-artifact cache-combination methods with token-count or ratio-based recomputation. |
+| `FullRecomputeTransformer` | Full-prompt baseline through the KVPacket recomputation artifact. |
 
 ## Using a method in an evaluation
 

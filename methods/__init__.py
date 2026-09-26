@@ -38,6 +38,14 @@ from .ProphetKV import ProphetKV
 from .CacheClip import CacheClip
 from .DependencyAnalysis import DependencyAnalysisMethod, DependencyAnalysisTransformer
 from .Rollout import RolloutMethod
+from .KVPacket import KVPacket
+from .KVPacketRecompute import (
+    EPIC,
+    FullRecomputeTransformer,
+    RandRecomputeTransformer,
+)
+
+RandRecompute = RandRecomputeTransformer
 __all__ = [
     "CacheblendLmcache",
     "CacheblendRepo",
@@ -53,4 +61,9 @@ __all__ = [
     "DependencyAnalysisMethod",
     "DependencyAnalysisTransformer",
     "RolloutMethod",
+    "KVPacket",
+    "EPIC",
+    "RandRecomputeTransformer",
+    "RandRecompute",
+    "FullRecomputeTransformer",
 ]
