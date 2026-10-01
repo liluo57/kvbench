@@ -1,0 +1,5 @@
+-r requirements-common.txt
+ray==2.56.1
+nvidia-ml-py
+torch==2.13.0
+xformers==0.0.35

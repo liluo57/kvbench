@@ -1,0 +1,3 @@
+# Optional CacheBlend dependencies installed in the main project environment.
+-r backend/requirements-build.txt
+-r backend/requirements-cuda.txt

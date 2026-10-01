@@ -1,10 +1,23 @@
 import importlib
 from pathlib import Path
+import sys
 
 from methods.CacheblendRepo import CacheblendRepo
 
 
-_helper = importlib.import_module("helpers.cacheblend_repo.CacheblendRepoHelper")
+_helper = importlib.import_module("methods.Cacheblend.Worker")
+_method = importlib.import_module("methods.Cacheblend.Method")
+
+
+def test_worker_defaults_to_main_project_interpreter(monkeypatch):
+    monkeypatch.setattr(_method, "Get", lambda *args: {})
+    assert CacheblendRepo().workerPython == Path(sys.executable)
+
+
+def test_worker_explicit_interpreter_override_resolves_from_project(monkeypatch):
+    monkeypatch.setattr(_method, "Get", lambda *args: {"Python": "custom/bin/python"})
+    root = Path(_method.__file__).resolve().parents[2]
+    assert CacheblendRepo().workerPython == root / "custom/bin/python"
 
 
 class _BrokenStream:

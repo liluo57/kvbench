@@ -40,8 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--a3-repo-root", required=True)
     parser.add_argument("--a3-python", required=True)
-    parser.add_argument("--cacheblend-root", required=True,
-                        help="Existing path needed by the shared KVBench preflight")
+    parser.add_argument("--cacheblend-python",
+                        help="Optional interpreter for the bundled CacheBlend worker")
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--output-root", type=Path,
                         default=Path("outputs/compare_a3_ttft"))

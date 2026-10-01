@@ -21,11 +21,23 @@ pip install -r requirement.txt
 
 > If you need CacheblendLmcache method, `vllm` and `lmcache` are acquired.
 
-> If you need CacheblendRepo method, 
-> 1. Clone [Cacheblend Repo](https://github.com/YaoJiayi/CacheBlend)
-> 2. Setup `venv` in that repo.
-> 3. Setup Cacheblend Repo according to their instructions.
-> 4. Write the repo path in `config.yaml`.
+> If you need CacheblendRepo or NaiveCacheblendRepo, install `uv` and a CUDA
+> toolkit, then run `./setup.py --cacheblend` (or `python setup.py --cacheblend`).
+> This installs the project and optional CacheBlend dependencies into the current
+> Python environment, then builds the CUDA extensions. Use Python 3.12 or 3.13;
+> the shared stack uses Torch 2.13.0, Transformers 4.57.6 and xFormers 0.0.35.
+> Running it again checks the installation and skips a ready environment.
+> Use `--rebuild` after changing native CUDA/C++ sources. On older Linux x86-64
+> hosts, setup downloads GCC 12 build tools into `.cache/cacheblend`; you can
+> also supply `CC`, `CXX` and `CUDAHOSTCXX` yourself.
+> The bundled backend supports Llama/Mistral and dense Qwen3, with the private
+> package name `kvbench_cacheblend` to coexist with installed vLLM. The worker
+> uses the same Python as KVBench. No additional CacheBlend checkout is required.
+> `--python` selects an existing project interpreter for installation;
+> `Cacheblend.Python` optionally overrides the runtime worker interpreter.
+> The upgraded stack preserves the worker protocol and reuse metrics, but
+> floating-point differences can change recomputation selections and generated
+> text. Timings from the former Torch 2.2 environment need to be measured again.
 
 > If you need Hypic method,
 > 1. Clone [Hypic Repo](https://github.com/redai-studio/HYPIC)

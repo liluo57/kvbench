@@ -19,7 +19,7 @@ Modules:
   the shared context and the fresh suffix for the reuse methods.
 
 These five modules are unrelated to :mod:`helpers.benchflow` and
-:mod:`helpers.cacheblend_repo`; they live together only because they share
+:mod:`methods.Cacheblend`; they live together only because they share
 the same audience (Methods / Tasks) and the same dependency direction (→
 :mod:`core` only).
 """

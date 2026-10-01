@@ -2,10 +2,8 @@ from types import SimpleNamespace
 
 import torch
 
-from helpers.cacheblend_repo.CacheblendRepoHelper import (
-    CacheBlendWorker,
-    _indexed_causal_mask,
-)
+from methods.Cacheblend.Worker import CacheBlendWorker
+from methods.Cacheblend.backend.cacheblend_ops import indexed_causal_mask
 
 
 class _Tokenizer:
@@ -71,7 +69,7 @@ def test_indexed_causal_mask_keeps_aligned_stride_for_single_selected_token():
         "_num_queries_per_kv": 4,
     }
 
-    mask = _indexed_causal_mask(cfm, lambda: None)
+    mask = indexed_causal_mask(cfm, lambda: None)
 
     assert mask.shape == (1, 8, 4, 1, keyLen)
     assert mask.stride(-2) == 16

@@ -1,0 +1,12 @@
+psutil>=7
+sentencepiece>=0.2
+numpy>=2
+requests>=2.32.2
+py-cpuinfo>=9
+transformers==4.57.6
+tokenizers>=0.22,<0.23
+pydantic>=2
+prometheus-client>=0.18
+tiktoken>=0.6
+typing-extensions
+filelock>=3.10.4

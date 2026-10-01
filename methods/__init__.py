@@ -9,11 +9,9 @@ Each constructor declares the strict ``gpuNums`` requirement and a relative
   generates the whole prompt when reuse is impossible. All runtime wiring lives
   in the framework (``helpers.VllmCacheblendPatches``), so no host-level
   ``sitecustomize.py`` or modified vLLM is required.
-- :class:`CacheblendRepo` — CacheBlend via the *original* repo: a worker
-  subprocess under the repo's venv (patched vLLM 0.4.1, ``helpers.
-  CacheblendRepoHelper``) collects the context KV once and fuses each fresh
-  query against it; ``reuse_ratio`` is reported by the worker. Repo/model paths
-  come from ``config.yaml`` (``Cacheblend.Repo.*``).
+- :class:`CacheblendRepo` — CacheBlend through the bundled backend in
+  ``methods.Cacheblend``. A worker sharing the project Python owns collected KV and
+  fuses fresh queries; sampling and reuse metrics follow the shared contracts.
 - :class:`A3Repo` — A^3 via the authors' official ``ragkv`` repository: a
   worker subprocess under that repository's environment, with only the
   KVBench lifecycle and request protocol implemented in this checkout.

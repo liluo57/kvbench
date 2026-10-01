@@ -30,7 +30,7 @@ Refer to each class constructor for its implementation and configurable paramete
 | --- | --- |
 | `FullPrefillTransformer`, `FullPrefillVllm` | Full-prefill baselines using Transformers and vLLM, respectively. |
 | `NaiveTransformer`, `NaiveCacheblendRepo` | Controls that directly reuse cached state without repairing context changes. |
-| `CacheblendRepo`, `CacheblendLmcache` | CacheBlend recomputation and fusion implementations; the former runs the backend from a separate CacheBlend checkout. |
+| `CacheblendRepo`, `CacheblendLmcache` | CacheBlend recomputation and fusion implementations; the former runs the bundled backend in `methods/Cacheblend` through a worker sharing the main project's Python environment. |
 | `HypicMethod` | HYPIC position-independent reuse. `picMode` supports `addition`, `transition`, `transition_rope`, and `transition_rope_recompute`. |
 | `A3Repo` | Adapter for the A3 repository implementation. |
 | `ProphetKV` | ProphetKV implementation. |

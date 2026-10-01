@@ -26,7 +26,7 @@ _CONFIG = Config.LoadConfig()
 DEFAULT_MODEL = _CONFIG.get("ModelPath")
 DEFAULT_DATASET_ROOT = str(ROOT / "data")
 _CACHEBLEND = _CONFIG.get("Cacheblend") or {}
-_CACHEBLEND_REPO = (_CACHEBLEND.get("Repo") or {}).get("RepoPath")
+_CACHEBLEND_PYTHON = _CACHEBLEND.get("Python") or sys.executable
 TASK_CHOICES = (
     "cwe", "vt", "2wikimultihopqa", "triviaqa", "hotpotqa", "musique"
 )
@@ -118,9 +118,9 @@ def parser_for(mode: str) -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL, required=not bool(DEFAULT_MODEL))
     parser.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT)
     parser.add_argument(
-        "--cacheblend-repo",
-        default=os.environ.get("KVBENCH_CACHEBLEND_REPO_PATH") or _CACHEBLEND_REPO,
-        help="original CacheBlend checkout containing .venv/bin/python",
+        "--cacheblend-python",
+        default=os.environ.get("KVBENCH_CACHEBLEND_PYTHON") or _CACHEBLEND_PYTHON,
+        help="Python executable for the bundled CacheBlend worker",
     )
     parser.add_argument(
         "--output-root",
@@ -165,10 +165,8 @@ def configure(args: argparse.Namespace) -> None:
     config["DatasetPath"] = str(Path(args.dataset_root).expanduser().resolve())
     config["ModelConfig"] = {"mode": "greedy"}
     cacheblend = copy.deepcopy(config.get("Cacheblend") or {})
-    cacheblend_repo = copy.deepcopy(cacheblend.get("Repo") or {})
-    if args.cacheblend_repo:
-        cacheblend_repo["RepoPath"] = str(Path(args.cacheblend_repo).expanduser().resolve())
-        cacheblend["Repo"] = cacheblend_repo
+    if args.cacheblend_python:
+        cacheblend["Python"] = str(Path(args.cacheblend_python).expanduser().resolve())
         config["Cacheblend"] = cacheblend
     engine = dict(config.get("Engine") or {})
     engine.update({
@@ -267,14 +265,13 @@ def preflight(args: argparse.Namespace) -> None:
         if not directory.is_dir():
             raise FileNotFoundError(f"dataset directory not found: {directory}")
     if "cacheblend" in args.methods:
-        if not args.cacheblend_repo:
-            raise ValueError(
-                "CacheBlend is selected but no repository path is configured; "
-                "set --cacheblend-repo or KVBENCH_CACHEBLEND_REPO_PATH"
+        worker = Path(args.cacheblend_python).expanduser()
+        if not worker.is_absolute():
+            worker = ROOT / worker
+        if not worker.is_file():
+            raise FileNotFoundError(
+                f"CacheBlend worker Python not found: {worker}; run ./setup.py --cacheblend"
             )
-        cb = Path(args.cacheblend_repo).expanduser()
-        if not (cb / ".venv" / "bin" / "python").is_file():
-            raise FileNotFoundError("CacheBlend venv not found: " + str(cb / ".venv" / "bin" / "python"))
     if args.max_samples == 0 or args.max_samples < -1:
         raise ValueError("--max-samples must be -1 or positive")
     if args.chunk_size < 0:

@@ -1,0 +1,66 @@
+[build-system]
+# Should be mirrored in requirements-build.txt
+requires = [
+    "cmake==4.4.0",
+    "ninja>=1.11",
+    "packaging>=24.2",
+    "setuptools>=78.1",
+    "torch == 2.13.0",
+    "wheel>=0.45",
+]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 80
+exclude = [
+    # External file, leaving license intact
+    "examples/fp8/quantizer/quantize.py"
+]
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    # "I",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+]
+
+[tool.mypy]
+python_version = "3.13"
+
+ignore_missing_imports = true
+check_untyped_defs = true
+follow_imports = "skip"
+
+files = "kvbench_cacheblend"
+# TODO(woosuk): Include the code from Megatron and HuggingFace.
+exclude = [
+    "kvbench_cacheblend/model_executor/parallel_utils/|kvbench_cacheblend/model_executor/models/",
+    # Ignore triton kernels in ops.
+    'kvbench_cacheblend/attention/ops/.*\.py$'
+]
+
+[tool.codespell]
+ignore-words-list = "dout, te, indicies"
+skip = "./tests/prompts,./benchmarks/sonnet.txt"
+
+[tool.isort]
+use_parentheses = true
+skip_gitignore = true

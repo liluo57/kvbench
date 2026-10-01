@@ -14,7 +14,7 @@ from methods.FullPrefill import FullPrefillTransformer
 from methods.Hypic import HypicMethod
 from methods.Naive import NaiveTransformer
 from methods.ProphetKV import ProphetKV
-from helpers.cacheblend_repo.CacheblendRepoHelper import CacheBlendWorker
+from methods.Cacheblend.Worker import CacheBlendWorker
 
 
 class _EncodingDelayGenerator:

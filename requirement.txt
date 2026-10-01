@@ -1,7 +1,7 @@
 # Common KVBench runtime, dataset preparation, and test dependencies.
 PyYAML==6.0.3
 nvidia-ml-py==13.610.43
-rich==15.0.0
+rich==13.9.4  # Compatible with BenchFlow / LiteLLM proxy.
 # Choose the PyTorch wheel index/build matching the target CUDA installation.
 # The release is pinned here; the local CUDA build suffix is intentionally not.
 torch==2.13.0
@@ -15,4 +15,5 @@ pytest==9.1.1
 
 # GPU backend packages (vLLM, LMCache, and FlashInfer) are installed separately
 # with versions and wheels matching the selected CUDA/PyTorch build.
-# External repos use their configured external checkouts/venvs.
+# CacheBlend shares this environment: ./setup.py --cacheblend.
+# Other external backends use their configured checkouts/venvs.

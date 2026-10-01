@@ -8,7 +8,7 @@ and datasets currently shipped in this checkout:
     HotpotQA, GovReport, MultiNews, TriviaQA, and SAMSum.
 
 The default method set is the one needed to validate the adapter in context:
-Vanilla (full prefill), FullReuse (naive), the existing CacheBlend repository
+Vanilla (full prefill), FullReuse (naive), the bundled CacheBlend
 adapter, and the official A3 repository adapter.  No CacheBlend, core, task,
 or workload source is modified by this script.
 """
@@ -63,13 +63,13 @@ def parse_args() -> argparse.Namespace:
 
     config = Config.LoadConfig()
     cacheblend = config.get("Cacheblend") or {}
-    cacheblend_repo = cacheblend.get("Repo") or {}
     default_model = os.environ.get("KVBENCH_MODEL_PATH") or config.get("ModelPath")
     default_a3_repo = os.environ.get("KVBENCH_A3_REPO_PATH")
     default_a3_python = os.environ.get("KVBENCH_A3_PYTHON")
-    default_cacheblend_repo = (
-        os.environ.get("KVBENCH_CACHEBLEND_REPO_PATH")
-        or cacheblend_repo.get("RepoPath")
+    default_cacheblend_python = (
+        os.environ.get("KVBENCH_CACHEBLEND_PYTHON")
+        or cacheblend.get("Python")
+        or sys.executable
     )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=default_model, required=not bool(default_model),
@@ -80,8 +80,8 @@ def parse_args() -> argparse.Namespace:
                         help="Official ragkv checkout used by A3Repo")
     parser.add_argument("--a3-python", default=default_a3_python,
                         help="Python executable in the official ragkv env")
-    parser.add_argument("--cacheblend-root", default=default_cacheblend_repo,
-                        help="Original CacheBlend checkout")
+    parser.add_argument("--cacheblend-python", default=default_cacheblend_python,
+                        help="Python executable for the bundled CacheBlend worker")
     parser.add_argument("--gpu", type=int, required=True,
                         help="One physical GPU id; methods run sequentially")
     parser.add_argument("--output-root", type=Path,
@@ -117,11 +117,6 @@ def parse_args() -> argparse.Namespace:
             parser.error("--a3-repo-root or KVBENCH_A3_REPO_PATH is required for A3")
         if not args.a3_python:
             parser.error("--a3-python or KVBENCH_A3_PYTHON is required for A3")
-    if "cacheblend" in args.methods and not args.cacheblend_root:
-        parser.error(
-            "--cacheblend-root or KVBENCH_CACHEBLEND_REPO_PATH is required "
-            "for CacheBlend"
-        )
     return args
 
 
@@ -141,10 +136,10 @@ def configure_runtime(args: argparse.Namespace) -> Dict[str, Any]:
                 "Python": str(Path(args.a3_python).expanduser().resolve()),
             }
         }
-    if args.cacheblend_root:
-        config["Cacheblend"] = {
-            "Repo": {"RepoPath": str(Path(args.cacheblend_root).expanduser().resolve())}
-        }
+    if args.cacheblend_python:
+        cacheblend = dict(config.get("Cacheblend") or {})
+        cacheblend["Python"] = str(Path(args.cacheblend_python).expanduser().resolve())
+        config["Cacheblend"] = cacheblend
     engine = dict(config.get("Engine") or {})
     engine.update({
         "AvailableGpuIds": [int(args.gpu)],
@@ -178,7 +173,7 @@ def preflight(args: argparse.Namespace) -> None:
             ("A3 Python", args.a3_python),
         ))
     if "cacheblend" in args.methods:
-        required_paths.append(("CacheBlend repo", args.cacheblend_root))
+        required_paths.append(("CacheBlend worker Python", args.cacheblend_python))
     for label, path in required_paths:
         if not Path(path).expanduser().exists():
             raise FileNotFoundError(f"{label} not found: {path}")
@@ -353,7 +348,7 @@ def make_manifest(args: argparse.Namespace, config: Dict[str, Any]) -> Dict[str,
         "dtype": {
             "transformer_baselines": args.dtype,
             "a3_repo": "official-loader-default (currently bfloat16)",
-            "cacheblend_repo": "repository-default",
+            "cacheblend_repo": "bundled-backend",
         },
         "chunk_size_tokens": args.chunk_size,
         "primary_metric_by_task": {
@@ -376,9 +371,9 @@ def make_manifest(args: argparse.Namespace, config: Dict[str, Any]) -> Dict[str,
             str(Path(args.a3_repo_root).expanduser().resolve())
             if args.a3_repo_root else None
         ),
-        "cacheblend_repo": (
-            str(Path(args.cacheblend_root).expanduser().resolve())
-            if args.cacheblend_root else None
+        "cacheblend_python": (
+            str(Path(args.cacheblend_python).expanduser().resolve())
+            if args.cacheblend_python else None
         ),
         "engine": config.get("Engine", {}),
     }

@@ -5,6 +5,7 @@ venv/
 dist/
 build/
 *.egg-info/
+methods/Cacheblend/backend/kvbench_cacheblend/*.so
 outputs/
 .cache/
 .claude

@@ -1,7 +1,7 @@
 """Cross-cutting helpers grouped by concern.
 
 This package is a deliberate ``helpers/`` catch-all: it is the only place
-outside :mod:`core` that tasks, methods, and workflows depend on. Three
+outside :mod:`core` that tasks, methods, and workflows depend on. Two
 loosely-coupled subsystems live here today:
 
 1. **Backend adapters** — talk to model runtimes.
@@ -21,16 +21,7 @@ loosely-coupled subsystems live here today:
    - :mod:`helpers.Prompt` — splitting a case's complete prompt into the
      shared context and the fresh suffix for the reuse methods.
 
-2. **CacheBlend (original repo)** — JSONL worker that drives the upstream
-   CacheBlend vLLM fork.
-
-   - :mod:`helpers.CacheblendRepoHelper` — JSON-lines worker for the
-     original CacheBlend repository and its isolated virtual environment.
-   - :mod:`helpers.Qwen3ForCacheBlendRepo` — Qwen3 model adapter registered
-     via side-effect (``AutoConfig.register`` + ``ModelRegistry.register_model``)
-     for that worker.
-
-3. **BenchFlow bridge** — :mod:`helpers.benchflow` starts the installed
+2. **BenchFlow bridge** — :mod:`helpers.benchflow` starts the installed
    BenchFlow CLI; :mod:`helpers.endpoint` is the generic KVBench-owned
    OpenAI-compatible inference endpoint. BenchFlow owns benchmark harness
    concerns, while the endpoint remains the inference chokepoint used by

@@ -43,16 +43,12 @@ Engine:
   TuiWaitForQuit: true
   Verbose: true
 
-# The CacheblendRepo method (methods/CacheblendRepo.py) runs the *original*
-# CacheBlend repo (YaoJiayi/CacheBlend): a patched vLLM 0.4.1 whose collect /
-# check / fusion machinery lives in <RepoPath>/vllm_blend. The method launches a
-# worker subprocess under <RepoPath>/.venv/bin/python, so neither path may be
-# omitted — the constructor raises if either is missing.
+# CacheBlend's vLLM 0.4.1 backend is bundled in methods/Cacheblend/backend.
+# Run `./setup.py --cacheblend` to install it in the main project environment.
 Cacheblend:
-  Repo:
-    # The original CacheBlend repo clone (holds vllm_blend + .venv).
-    RepoPath: ~/cache-blend/CacheBlend
-    GpuMemoryUtilization: 0.7
+  GpuMemoryUtilization: 0.7
+  # Defaults to the project's current Python. Relative overrides use the root.
+  # Python: /path/to/project/python
 
 # Global dataset configuration.
 #
