@@ -55,6 +55,44 @@ for module in (kvbench_cacheblend, kvbench_cacheblend._C, kvbench_cacheblend._mo
 print(kvbench_cacheblend.__file__)
 """
 
+_CHECK_KVPACKET = """
+from pathlib import Path
+import importlib.metadata as metadata
+import sys
+
+root = Path(sys.argv[1]).resolve()
+assert (3, 12) <= sys.version_info[:2] < (3, 14), (
+    "Use project Python 3.12 or 3.13"
+)
+sys.path.insert(0, str(root))
+
+expected = {
+    "torch": "2.13.0",
+    "transformers": "4.57.6",
+    "PyYAML": "6.0.3",
+}
+for name, version in expected.items():
+    actual = metadata.version(name)
+    if name == "torch":
+        from packaging.version import Version
+        assert Version(actual).release == (2, 13, 0), (
+            f"torch: expected 2.13.0 (any CUDA build), found {actual}"
+        )
+    else:
+        assert actual == version, f"{name}: expected {version}, found {actual}"
+
+import importlib
+method = importlib.import_module("methods.KVPacket")
+backend = importlib.import_module("methods.KVPacket.backend.kvpacket")
+assert Path(method.__file__).resolve().is_relative_to(root / "methods" / "KVPacket"), (
+    f"Unexpected KVPacket method: {method.__file__}"
+)
+assert Path(backend.__file__).resolve().is_relative_to(root / "methods" / "KVPacket"), (
+    f"Unexpected KVPacket backend: {backend.__file__}"
+)
+print(backend.__file__)
+"""
+
 
 def _compiler_major(command):
     try:
@@ -156,9 +194,33 @@ def setup_cacheblend(args):
     print(f"CacheBlend is ready in the project environment: {python}", flush=True)
 
 
+def setup_kvpacket(args):
+    """Check the vendored backend in the selected main Python environment.
+
+    KVPacket adds no Python dependencies or compiled extensions. Its runtime
+    shares the pinned project PyTorch, Transformers, and PyYAML packages, so
+    this command is deliberately read-only and can be repeated offline.
+    """
+    python = shutil.which(args.python) or str(Path(args.python).expanduser())
+    result = subprocess.run(
+        [python, "-I", "-B", "-c", _CHECK_KVPACKET, str(ROOT)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            "KVPacket setup check failed; use the project Python 3.12 or 3.13 environment "
+            f"with torch 2.13.0, transformers 4.57.6, and PyYAML 6.0.3.\n{detail}"
+        )
+    print(f"KVPacket is ready in the project environment: {python}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cacheblend", action="store_true", help="install the bundled CacheBlend backend")
+    parser.add_argument("--kvpacket", action="store_true", help="check the bundled KVPacket backend in the main environment")
     parser.add_argument("--rebuild", action="store_true", help="rebuild even if the installation is ready")
     parser.add_argument("--python", default=sys.executable,
                         help="existing project Python interpreter (defaults to this script's interpreter)")
@@ -167,10 +229,13 @@ def main():
     parser.add_argument("--find-links", action="append", default=[], metavar="LOCATION",
                         help="additional directory or URL containing dependency wheels")
     args = parser.parse_args()
-    if not args.cacheblend:
-        parser.error("select a method to install, e.g. --cacheblend")
+    if not args.cacheblend and not args.kvpacket:
+        parser.error("select a method, e.g. --cacheblend or --kvpacket")
     try:
-        setup_cacheblend(args)
+        if args.cacheblend:
+            setup_cacheblend(args)
+        if args.kvpacket:
+            setup_kvpacket(args)
     except (OSError, RuntimeError, subprocess.CalledProcessError, tarfile.TarError) as error:
         print(f"Setup failed: {error}", file=sys.stderr)
         return 1

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,55 +33,6 @@ def _resolve_config_path(value: object) -> Optional[Path]:
     return path.resolve()
 
 
-def _import_kvpacket(repo_path: Optional[Path]):
-    """Import the sibling checkout when KV Packet is not installed.
-
-    Keeping this import lazy is important: KVBench's CPU-only tests and methods
-    that do not use KV Packet should not need KV Packet's optional runtime at import
-    time.
-    """
-
-    candidates: list[Path] = []
-    if repo_path is not None:
-        if not (repo_path / "kvpacket").is_dir():
-            raise RuntimeError(
-                f"KVPacket checkout does not contain kvpacket/: {repo_path}"
-            )
-        candidates.append(repo_path)
-
-    # The repository layout used by this workspace is ``kvreusebench/`` with
-    # sibling ``kvbench/`` and ``KVPacket/`` directories.
-    candidates.append(Path(__file__).resolve().parents[2] / "KVPacket")
-    first_error = None
-    if repo_path is None:
-        try:
-            return importlib.import_module("kvpacket")
-        except ModuleNotFoundError as error:
-            first_error = error
-
-    for candidate in candidates:
-        package_dir = candidate / "kvpacket"
-        if not package_dir.is_dir():
-            continue
-        text = str(candidate)
-        if text not in sys.path:
-            sys.path.insert(0, text)
-        try:
-            return importlib.import_module("kvpacket")
-        except ModuleNotFoundError as error:
-            first_error = first_error or error
-
-    if repo_path is not None:
-        try:
-            return importlib.import_module("kvpacket")
-        except ModuleNotFoundError as error:
-            first_error = first_error or error
-    raise RuntimeError(
-        "KVPacket is not installed and no KVPacket checkout was found; "
-        "install kvpacket or set KVPacket.RepoPath in config.yaml"
-    ) from first_error
-
-
 class KVPacket(Method):
     """Recomputation-free KV Packet serving through ``PacketSession``."""
 
@@ -103,10 +52,11 @@ class KVPacket(Method):
         dtype: str = "bfloat16",
         wrapperCheckpointPath: Optional[str] = None,
         wrapperId: Optional[str] = None,
+        wrapperModelId: Optional[str] = None,
         headerLen: Optional[int] = None,
         trailerLen: Optional[int] = None,
         match: Optional[str] = None,
-        repoPath: Optional[str] = None,
+        allowUntrainedWrapper: Optional[bool] = None,
         tag: Optional[str] = None,
     ):
         super().__init__(gpuNums=gpuNums, perfWeight=perfWeight, maxGpuNums=1, tag=tag)
@@ -125,6 +75,14 @@ class KVPacket(Method):
         self.wrapperCheckpointPath = _resolve_config_path(checkpoint)
 
         self.wrapperId = str(wrapperId or cfg.get("WrapperId", "document"))
+        configured_model_id = (
+            wrapperModelId
+            if wrapperModelId is not None
+            else cfg.get("WrapperModelId")
+        )
+        if configured_model_id is not None and not isinstance(configured_model_id, str):
+            raise TypeError("KVPacket.WrapperModelId must be a string or null")
+        self.wrapperModelId = configured_model_id.strip() if configured_model_id else None
         self.headerLen = int(headerLen if headerLen is not None else cfg.get("HeaderLen", 8))
         self.trailerLen = int(
             trailerLen if trailerLen is not None else cfg.get("TrailerLen", 8)
@@ -132,7 +90,14 @@ class KVPacket(Method):
         self.match = str(match or cfg.get("Match", "token"))
         if self.match not in ("token", "string"):
             raise ValueError("KVPacket match must be 'token' or 'string'")
-        self.repoPath = _resolve_config_path(repoPath or cfg.get("RepoPath"))
+        configured_untrained = (
+            allowUntrainedWrapper
+            if allowUntrainedWrapper is not None
+            else cfg.get("AllowUntrainedWrapper", False)
+        )
+        if not isinstance(configured_untrained, bool):
+            raise TypeError("KVPacket.AllowUntrainedWrapper must be a boolean")
+        self.allowUntrainedWrapper = configured_untrained
         self.modelPath = DefaultModelPath()
         self.samplingConfig = ResolveSamplingConfig(self.modelPath)
         self.maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
@@ -144,11 +109,25 @@ class KVPacket(Method):
         self._backend = None
         self._kv = None
         self._wrapper = None
+        self._wrapper_format = "untrained"
         self._states: List[_CaseState] = []
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
         super().Initialize(gpuIds)
-        self._kv = _import_kvpacket(self.repoPath)
+        if self.wrapperCheckpointPath is None and not self.allowUntrainedWrapper:
+            raise RuntimeError(
+                "KVPacket requires a model-compatible trained wrapper checkpoint. "
+                "Set KVPacket.WrapperCheckpointPath to a checkpoint trained for this "
+                "exact model, or explicitly set KVPacket.AllowUntrainedWrapper=true "
+                "for a smoke test (results are not representative of trained KVPacket)."
+            )
+        if self.wrapperCheckpointPath is not None and not self.wrapperCheckpointPath.exists():
+            raise FileNotFoundError(
+                f"KVPacket wrapper checkpoint not found: {self.wrapperCheckpointPath}"
+            )
+        from .backend import kvpacket
+
+        self._kv = kvpacket
 
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -162,22 +141,21 @@ class KVPacket(Method):
             device = "cpu"
 
         self._tokenizer = AutoTokenizer.from_pretrained(self.modelPath)
-        model_kwargs: dict[str, Any] = {
-            "dtype": getattr(torch, self.dtype),
-            "device_map": device,
-            "low_cpu_mem_usage": True,
-        }
+        model_dtype = getattr(torch, self.dtype)
         try:
-            self._model = AutoModelForCausalLM.from_pretrained(self.modelPath, **model_kwargs)
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self.modelPath,
+                dtype=model_dtype,
+            )
         except TypeError:
-            model_kwargs.pop("dtype", None)
-            model_kwargs["torch_dtype"] = getattr(torch, self.dtype)
-            self._model = AutoModelForCausalLM.from_pretrained(self.modelPath, **model_kwargs)
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self.modelPath,
+                torch_dtype=model_dtype,
+            )
+        self._model.to(device)
         self._model.eval()
 
-        from kvpacket import HFBackend
-
-        self._backend = HFBackend(self._model)
+        self._backend = self._kv.HFBackend(self._model)
         self._wrapper = self._load_wrapper(device)
 
     def _load_wrapper(self, device: str):
@@ -190,29 +168,40 @@ class KVPacket(Method):
                 raise FileNotFoundError(
                     f"KVPacket wrapper checkpoint not found: {self.wrapperCheckpointPath}"
                 )
-            from kvpacket.training import PacketTrainer
-
-            trainer = PacketTrainer.load(
+            state = self._torch.load(
                 self.wrapperCheckpointPath,
-                backend=self._backend,
-                device=device,
+                map_location="cpu",
+                weights_only=True,
             )
-            if self.wrapperId not in trainer.registry:
-                raise KeyError(
-                    f"KVPacket wrapper {self.wrapperId!r} is absent from "
-                    f"{self.wrapperCheckpointPath}"
+            if isinstance(state, dict) and state.get("format") == "kvpacket.trainer_checkpoint/1":
+                trainer = self._kv.PacketTrainer.load(
+                    self.wrapperCheckpointPath,
+                    backend=self._backend,
+                    device=device,
                 )
-            wrapper = trainer.registry[self.wrapperId].wrapper
-            wrapper = wrapper.to(device=device, dtype=dtype)
-            wrapper.requires_grad_(False)
-            wrapper.eval()
-            return wrapper
+                if self.wrapperId not in trainer.registry:
+                    raise KeyError(
+                        f"KVPacket wrapper {self.wrapperId!r} is absent from "
+                        f"{self.wrapperCheckpointPath}"
+                    )
+                wrapper = trainer.registry[self.wrapperId].wrapper
+                wrapper = wrapper.to(device=device, dtype=dtype)
+                wrapper.requires_grad_(False)
+                wrapper.eval()
+                self._wrapper_format = "trainer_checkpoint"
+                return wrapper
+            return self._load_legacy_wrapper(state, device=device, dtype=dtype)
 
+        if not self.allowUntrainedWrapper:
+            raise RuntimeError(
+                "KVPacket requires a model-compatible trained wrapper checkpoint. "
+                "Set KVPacket.WrapperCheckpointPath to a checkpoint trained for this "
+                "exact model, or explicitly set KVPacket.AllowUntrainedWrapper=true "
+                "for a smoke test (results are not representative of trained KVPacket)."
+            )
         if self.headerLen < 0 or self.trailerLen < 0:
             raise ValueError("KVPacket HeaderLen and TrailerLen must be non-negative")
-        from kvpacket.packet import PacketWrapper
-
-        return PacketWrapper(
+        return self._kv.PacketWrapper(
             self.headerLen,
             self.trailerLen,
             self._backend.hidden_size,
@@ -221,13 +210,81 @@ class KVPacket(Method):
             requires_grad=False,
         )
 
+    def _load_legacy_wrapper(self, state: object, *, device: str, dtype: Any):
+        """Load a paper-era tensor-only wrapper with an explicit model identity."""
+
+        import torch
+
+        if not isinstance(state, dict) or not all(
+            key in state for key in ("header", "trailer", "header_len", "trailer_len", "dim")
+        ):
+            raise ValueError(
+                "unsupported KVPacket wrapper checkpoint format; expected a current "
+                "PacketTrainer checkpoint or a legacy header/trailer checkpoint"
+            )
+        if self.wrapperModelId is None:
+            raise ValueError(
+                "legacy KVPacket wrapper files do not record an exact model identity or "
+                "weight revision; set KVPacket.WrapperModelId to the exact model ID "
+                "reported by the loaded HF backend after verifying that it names the "
+                "checkpoint's source weights"
+            )
+        runtime_model_id = self._backend.compatibility.model_id
+        if self.wrapperModelId != runtime_model_id:
+            raise ValueError(
+                "legacy KVPacket wrapper model mismatch: configured WrapperModelId "
+                f"{self.wrapperModelId!r}, loaded model is {runtime_model_id!r}"
+            )
+
+        header, trailer = state["header"], state["trailer"]
+        header_len, trailer_len, dim = (
+            state["header_len"], state["trailer_len"], state["dim"]
+        )
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in (
+            header_len, trailer_len, dim
+        )):
+            raise ValueError("legacy KVPacket wrapper dimensions must be integers")
+        if dim != self._backend.hidden_size:
+            raise ValueError(
+                f"legacy KVPacket wrapper dim {dim} does not match model hidden size "
+                f"{self._backend.hidden_size}"
+            )
+        if not isinstance(header, torch.Tensor) or not isinstance(trailer, torch.Tensor):
+            raise ValueError("legacy KVPacket header and trailer must be tensors")
+        if tuple(header.shape) != (1, header_len, dim):
+            raise ValueError(f"legacy KVPacket header shape is invalid: {tuple(header.shape)}")
+        if tuple(trailer.shape) != (1, trailer_len, dim):
+            raise ValueError(f"legacy KVPacket trailer shape is invalid: {tuple(trailer.shape)}")
+
+        wrapper = self._kv.PacketWrapper(
+            header_len,
+            trailer_len,
+            dim,
+            mean=float(state.get("mean", 0.0)),
+            std=float(state.get("std", 0.02)),
+            dtype=dtype,
+            device=device,
+            requires_grad=False,
+        )
+        with torch.no_grad():
+            wrapper.header.copy_(header.to(device=device, dtype=dtype))
+            wrapper.trailer.copy_(trailer.to(device=device, dtype=dtype))
+        wrapper.eval()
+        self._wrapper_format = "legacy_tensor_checkpoint"
+        return wrapper
+
     def Prepare(self, data: List[List[str]]) -> None:
         """Materialize one packet store per case from the reusable chunks."""
 
         assert self._kv is not None and self._backend is not None and self._tokenizer is not None
-        from kvpacket import PacketPreprocessor, RawText, TextSourceEncoder
-        from kvpacket.packet import WrapperEntry, WrapperRegistry
-        from kvpacket.session import PacketStore
+        from .backend.kvpacket import (
+            PacketPreprocessor,
+            PacketStore,
+            RawText,
+            TextSourceEncoder,
+            WrapperEntry,
+            WrapperRegistry,
+        )
 
         self._states = []
         for case_index, raw_chunks in enumerate(data):
@@ -239,7 +296,11 @@ class KVPacket(Method):
             seen: set[str] = set()
             for chunk in raw_chunks:
                 text = str(chunk)
-                if text and text not in seen:
+                # Whitespace-only segments (often emitted by sentence splitters)
+                # are not useful reusable packets and can match many unrelated
+                # token positions. Keep them in the original Run prompt, where
+                # they are forwarded as part of the fresh request text.
+                if text.strip() and text not in seen:
                     seen.add(text)
                     chunks.append(text)
 
@@ -272,7 +333,7 @@ class KVPacket(Method):
         """Serve complete prompts through independent packet sessions."""
 
         assert self._backend is not None and self._tokenizer is not None
-        from kvpacket.session import Mode, PacketSession
+        from .backend.kvpacket import Mode, PacketSession
 
         generation_limit = (
             self.maxNewTokens
@@ -295,7 +356,7 @@ class KVPacket(Method):
             sampling_kwargs["eos_token_id"] = sampling["eos_token_id"]
 
         if len(self._states) != len(data):
-            from kvpacket.session import PacketStore
+            from .backend.kvpacket import PacketStore
 
             self._states = [
                 _CaseState(chunks=[], store=PacketStore(backend=self._backend))
@@ -315,11 +376,15 @@ class KVPacket(Method):
             if state.store.ids():
                 session.register_store_chunks()
             session.push(prompt)
-            request_ready = time.perf_counter()
             generated = session.generate(
                 max_new_tokens=generation_limit,
+                started_at=request_started,
                 **sampling_kwargs,
             )
+            if self._backend.device.type == "cuda":
+                # Finish any asynchronous cache commits before recording request
+                # latency; TTFT was already captured at the first visible token.
+                self._torch.cuda.synchronize(self._backend.device)
 
             input_ids = self._tokenizer(
                 prompt,
@@ -332,17 +397,17 @@ class KVPacket(Method):
                 Result(
                     output=generated.text,
                     performance={
-                        # Store registration and request buffering are outside the
-                        # session's measured generation interval. PacketSession
-                        # also performs prompt matching before starting its own
-                        # TTFT clock; its public result does not expose that cost.
-                        TtftKey: float(request_ready - request_started)
-                        + float(generated.ttft),
+                        # The start time covers registration, matching, prefill,
+                        # and generation through the first visible token.
+                        TtftKey: float(generated.ttft),
                         NumOutputTokensKey: len(generated.token_ids),
                         TotalTimeKey: float(time.perf_counter() - request_started),
                     },
                     metadata={
                         "backend": self.backend,
+                        "wrapper_status": (
+                            self._wrapper_format
+                        ),
                         "reuse_ratio": reuse_ratio,
                         "cached_tokens": cached_tokens,
                         "matched_chunk_ids": generated.matched_chunk_ids,

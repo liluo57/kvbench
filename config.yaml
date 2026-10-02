@@ -50,6 +50,27 @@ Cacheblend:
   # Defaults to the project's current Python. Relative overrides use the root.
   # Python: /path/to/project/python
 
+# KVPacket's backend is vendored under methods/KVPacket and shares the main
+# Python 3.12 or 3.13 / PyTorch / Transformers environment. Run `./setup.py --kvpacket`
+# to check that environment; it does not install or replace shared packages.
+KVPacket:
+  # A trained PacketTrainer checkpoint must match the configured ModelPath.
+  # Relative paths resolve from the project root. Leave unset until a matching
+  # trained wrapper is available; initialization then fails clearly.
+  WrapperCheckpointPath:
+  WrapperId: document
+  # Required only for legacy header/trailer tensor checkpoints without embedded
+  # fingerprints. Set to the exact HF config._name_or_path loaded at runtime
+  # (a Hub ID or exact local directory) and verify it names the training source.
+  # Legacy files do not record a revision or weight digest.
+  WrapperModelId:
+  HeaderLen: 8
+  TrailerLen: 8
+  Match: token
+  # Set true only for plumbing smoke tests; random wrappers are untrained and
+  # their quality/latency results do not represent trained KVPacket.
+  AllowUntrainedWrapper: false
+
 # Global dataset configuration.
 #
 # DatasetPath is the root directory that holds every benchmark dataset, one

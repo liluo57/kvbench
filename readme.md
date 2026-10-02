@@ -39,6 +39,17 @@ pip install -r requirement.txt
 > floating-point differences can change recomputation selections and generated
 > text. Timings from the former Torch 2.2 environment need to be measured again.
 
+> KVPacket's core runtime is vendored in this repository and uses the shared
+> Python 3.12 or 3.13, Torch 2.13.0, Transformers 4.57.6 and PyYAML 6.0.3 environment.
+> Run `./setup.py --kvpacket` to check it offline; this does not install or
+> replace packages. Before running KVPacket, set `KVPacket.WrapperCheckpointPath`
+> to a trained wrapper checkpoint compatible with `ModelPath`. Random wrappers
+> are disabled by default; `AllowUntrainedWrapper: true` is for smoke tests only.
+> Legacy tensor-only wrappers also require `KVPacket.WrapperModelId` to equal the
+> exact runtime Hugging Face `config._name_or_path` value (Hub ID or local directory).
+> This is an explicit source assertion: legacy files contain no revision or weight
+> digest, so KVBench also checks tensor shapes but cannot prove the source weights.
+
 > If you need Hypic method,
 > 1. Clone [Hypic Repo](https://github.com/redai-studio/HYPIC)
 > 2. Setup that repo according to their instructions.

@@ -16,4 +16,6 @@ pytest==9.1.1
 # GPU backend packages (vLLM, LMCache, and FlashInfer) are installed separately
 # with versions and wheels matching the selected CUDA/PyTorch build.
 # CacheBlend shares this environment: ./setup.py --cacheblend.
+# KVPacket's core is vendored and adds no runtime package requirements;
+# ./setup.py --kvpacket checks the shared environment without installing packages.
 # Other external backends use their configured checkouts/venvs.
