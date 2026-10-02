@@ -403,7 +403,7 @@ def _MetricSummary(metric: Metric, includeSamples: bool) -> Dict[str, Any]:
 
 def _RunMethod(
     method: Method,
-    data: List[str],
+    data: List[List[int]],
     retainOutput: List[bool],
     maxNewTokens: int,
 ) -> List[Result]:

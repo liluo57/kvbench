@@ -211,7 +211,7 @@ class KVCommTransformer(Method):
         # per-agent shared KV store.  Keep a bounded structural equivalent
         # here.  These entries contain only template/fresh-prefix KV; actual
         # request text is still computed in Run and remains part of TTFT.
-        self._prefixTemplates: Dict[str, Dict[str, Any]] = {}
+        self._prefixTemplates: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         self._prefixTemplateOrder: List[str] = []
         self._maxPrefixTemplates = 32
 
@@ -242,19 +242,17 @@ class KVCommTransformer(Method):
             samplingConfig=self.samplingConfig,
         )
 
-    def Prepare(self, data: List[List[str]]) -> None:
-        # PREPARE is only a case-local registration point.  In particular, do
-        # not tokenize/prefill here: those operations depend on the current
-        # RUN prompt and must be visible in its TTFT.
+    def Prepare(self, data: List[List[List[int]]]) -> None:
+        # PREPARE is only a case-local registration point.  Do not prefill
+        # here: online cache construction remains part of the RUN TTFT.
         self._states = []
         for chunks in data:
-            prepared = [str(text) for text in list(chunks or []) if str(text)]
+            prepared = [tuple(int(token) for token in ids) for ids in (chunks or []) if ids]
             segments = []
-            for index, text in enumerate(prepared):
+            for index, tokenIds in enumerate(prepared):
                 segments.append(
                     {
-                        "text": text,
-                        "base_ids": None,
+                        "base_ids": tokenIds,
                         "base_cache": None,
                         # The KVCOMM workloads prepare the shared user request
                         # first. Keep a deterministic fallback for any future
@@ -268,7 +266,7 @@ class KVCommTransformer(Method):
             # used only to update the same anchor as it flows through later
             # agents; it is deliberately not part of the workload namespace,
             # so distinct dataset samples still share one online pool.
-            messageText = prepared[0] if prepared else f"case:{self._caseSerial}"
+            messageText = repr(prepared[0] if prepared else ("case", self._caseSerial))
             self._states.append(
                 {
                     "segments": segments,
@@ -282,7 +280,7 @@ class KVCommTransformer(Method):
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -316,7 +314,7 @@ class KVCommTransformer(Method):
                 )
                 result = self._RunOne(
                     state,
-                    str(runInput),
+                    list(runInput),
                     retain,
                     maxNewTokens,
                     requestStart,
@@ -373,7 +371,7 @@ class KVCommTransformer(Method):
     def _RunOne(
         self,
         state: Dict[str, Any],
-        runInput: str,
+        runInput: List[int],
         retain: bool,
         maxNewTokens: int,
         requestStart: float,
@@ -383,7 +381,7 @@ class KVCommTransformer(Method):
 
         segments = state["segments"]
         matches = ComposeInterleavedReuse(
-            [segment["text"] for segment in segments], runInput
+            [list(segment["base_ids"]) for segment in segments], runInput
         )
         reusable = any(segmentIndex is not None for segmentIndex, _ in matches)
         if not reusable:
@@ -396,32 +394,8 @@ class KVCommTransformer(Method):
             )
 
         parts = self._MakeParts(segments, matches)
-        fullIds = self._gen.Encode(runInput)
-        pieceIds = self._TokenizeParts(runInput, fullIds, parts)
-
-        # Boundary-sensitive BPE tokenization means separately encoding each
-        # text piece is not equivalent to encoding the complete prompt.  Use
-        # the full prompt's offset mapping to partition its actual token IDs;
-        # if this tokenizer cannot provide offsets, retain the safe dense path.
-        if pieceIds is None:
-            return self._DenseResult(
-                runInput,
-                retain,
-                maxNewTokens,
-                requestStart,
-                anchorFallbacks=len([p for p in parts if p["kind"] == "reuse"]),
-            )
-
-        # Retained agent responses already carry the isolated, position-zero
-        # KV returned by their generation.  The official runtime stores that
-        # response cache in shared memory and fetches it later; keep its token
-        # IDs as the reusable segment's canonical IDs instead of re-encoding
-        # the response at the surrounding prompt boundary.
-        for index, part in enumerate(parts):
-            segment = part.get("segment")
-            cachedIds = segment.get("base_ids") if segment is not None else None
-            if cachedIds is not None:
-                pieceIds[index] = list(cachedIds)
+        fullIds = list(runInput)
+        pieceIds = [list(part["ids"]) for part in parts]
 
         def denseFallback(materializeParts: Optional[set[int]] = None) -> Result:
             # Generate the current response from fullIds exactly, so fallback
@@ -443,24 +417,8 @@ class KVCommTransformer(Method):
                 materializeParts=materializeParts,
             )
 
-        # The official implementation tokenizes each text segment around a
-        # placeholder independently and then concatenates those segment IDs.
-        # Reusing the raw rendered-prompt IDs here makes the token count of a
-        # suffix depend on the generated placeholder text's BPE boundary;
-        # that in turn makes otherwise-compatible prefix deltas look like
-        # different shapes and forces a whole-request fallback.  Keep the
-        # actual placeholder IDs, but use the persistent canonical IDs for
-        # fresh text segments, matching ``locate_placeholder`` plus
-        # ``prepare_prefix_kv_segments`` in the official runtime.
-        template = self._GetPrefixTemplate(parts)
-        if template is not None:
-            pieceIds = [
-                list(template["piece_ids"][index])
-                if part["kind"] == "fresh"
-                else ids
-                for index, (part, ids) in enumerate(zip(parts, pieceIds))
-            ]
         assembledIds = [token for ids in pieceIds for token in ids]
+        assert assembledIds == runInput, "KVComm pieces must reproduce RUN token IDs"
         if not assembledIds:
             return self._DenseResult(
                 runInput,
@@ -556,10 +514,8 @@ class KVCommTransformer(Method):
             [part["cache"] for part in predictedParts if part.get("cache") is not None]
         )
         nInput = len(assembledIds)
-        if predictedCache is None or _CacheLength(predictedCache) != nInput or nInput <= 1:
-            # This is a defensive correctness boundary for unusual cache
-            # implementations; it never reports a partial reuse ratio.
-            return denseFallback()
+        assert predictedCache is not None, "KVComm assembled no cache rows"
+        assert _CacheLength(predictedCache) == nInput, "KVComm cache length differs from RUN IDs"
 
         lastId = assembledIds[-1]
         predictedCache.crop(nInput - 1)
@@ -569,18 +525,19 @@ class KVCommTransformer(Method):
             pastKeyValues=predictedCache,
             maxNewTokens=maxNewTokens,
             returnCache=retain,
+            returnTokenIds=True,
         )
         if retain:
-            text, generationTtft, generationTotal, nTokens, fullCache, outputIds = generated
+            text, generationTtft, generationTotal, nTokens, fullCache, rawOutputIds = generated
+            outputIds = self._gen.OutputTokenIds(rawOutputIds)
             self._RegisterOutput(
                 state,
-                text,
                 outputIds,
                 fullCache=fullCache,
                 promptLength=nInput,
             )
         else:
-            text, generationTtft, generationTotal, nTokens = generated
+            text, generationTtft, generationTotal, nTokens, outputIds = generated
 
         reusedTokens = sum(
             len(part["ids"])
@@ -602,39 +559,41 @@ class KVCommTransformer(Method):
                 "anchor_fallbacks": 0,
                 "anchor_count": self._AnchorCount(),
             },
+            outputIds,
         )
 
     def _DenseResult(
         self,
-        prompt: str,
+        prompt: List[int],
         retain: bool,
         maxNewTokens: int,
         requestStart: float,
         *,
         anchorFallbacks: int,
     ) -> Result:
-        ids = self._gen.Encode(prompt)
+        ids = list(prompt)
         preprocessTime = time.perf_counter() - requestStart
         generated = self._gen.Generate(
             ids,
             maxNewTokens=maxNewTokens,
             returnCache=retain,
+            returnTokenIds=True,
         )
         if retain:
-            text, generationTtft, generationTotal, nTokens, fullCache, outputIds = generated
+            text, generationTtft, generationTotal, nTokens, fullCache, rawOutputIds = generated
+            outputIds = self._gen.OutputTokenIds(rawOutputIds)
             # The text registration is useful even when this request had no
             # reusable segment; its output can become one in the next RUN.
             state = self._states[0] if len(self._states) == 1 else None
             if state is not None:
                 self._RegisterOutput(
                     state,
-                    text,
                     outputIds,
                     fullCache=fullCache,
                     promptLength=len(ids),
                 )
         else:
-            text, generationTtft, generationTotal, nTokens = generated
+            text, generationTtft, generationTotal, nTokens, outputIds = generated
         return self._Result(
             text,
             preprocessTime + generationTtft,
@@ -648,11 +607,12 @@ class KVCommTransformer(Method):
                 "anchor_fallbacks": anchorFallbacks,
                 "anchor_count": self._AnchorCount(),
             },
+            outputIds,
         )
 
     def _DenseWithBase(
         self,
-        prompt: str,
+        prompt: List[int],
         fullIds: List[int],
         parts: List[Dict[str, Any]],
         retain: bool,
@@ -673,13 +633,13 @@ class KVCommTransformer(Method):
             maxNewTokens=maxNewTokens,
             returnCache=True,
         )
-        text, generationTtft, generationTotal, nTokens, fullCache, outputIds = generated
+        text, generationTtft, generationTotal, nTokens, fullCache, rawOutputIds = generated
+        outputIds = self._gen.OutputTokenIds(rawOutputIds)
         if retain:
             state = self._states[0] if len(self._states) == 1 else None
             if state is not None:
                 self._RegisterOutput(
                     state,
-                    text,
                     outputIds,
                     fullCache=fullCache,
                     promptLength=len(fullIds),
@@ -721,123 +681,43 @@ class KVCommTransformer(Method):
                 "anchor_fallbacks": anchorFallbacks,
                 "anchor_count": self._AnchorCount(),
             },
+            outputIds,
         )
 
     def _MakeParts(
         self,
         segments: List[Dict[str, Any]],
-        matches: List[Tuple[Optional[int], str]],
+        matches: List[Tuple[Optional[int], List[int]]],
     ) -> List[Dict[str, Any]]:
         parts: List[Dict[str, Any]] = []
         slot = 0
-        # ComposeInterleavedReuse is intentionally content-addressed. When two
-        # agents emit identical text, every occurrence can therefore resolve
-        # to the first matching segment. Official KVCOMM retains the source
-        # placeholder identity (agent_i_current), so recover that identity by
-        # pairing equal-text occurrences with retained segments in workflow
-        # order. MultiAgentFullConnection emits each prior output once and in
-        # that same order.
-        segmentIndicesByText: Dict[str, List[int]] = {}
-        for index, segment in enumerate(segments):
-            segmentIndicesByText.setdefault(str(segment["text"]), []).append(index)
-        consumedByText: Dict[str, int] = {}
-        for segmentIndex, text in matches:
-            if not text:
+        for segmentIndex, ids in matches:
+            tokenIds = list(ids)
+            if not tokenIds:
                 continue
             if segmentIndex is None:
-                parts.append({"kind": "fresh", "text": text, "slot": None})
+                parts.append({"kind": "fresh", "ids": tokenIds, "slot": None})
             else:
-                candidates = segmentIndicesByText.get(text, [])
-                occurrence = consumedByText.get(text, 0)
-                if occurrence < len(candidates):
-                    segmentIndex = candidates[occurrence]
-                consumedByText[text] = occurrence + 1
+                segment = segments[segmentIndex]
                 parts.append(
                     {
                         "kind": "reuse",
-                        "text": text,
-                        "segment": segments[segmentIndex],
+                        "ids": tokenIds,
+                        "segment": segment,
                         "slot": slot,
                     }
                 )
                 slot += 1
         return parts
 
-    def _TokenizeParts(
-        self,
-        prompt: str,
-        fullIds: List[int],
-        parts: List[Dict[str, Any]],
-    ) -> Optional[List[List[int]]]:
-        """Partition full-prompt token IDs by character-span ownership.
-
-        KVBench passes complete rendered prompts to ``Run``.  Encoding each
-        reusable segment independently changes BPE tokens at boundaries (a
-        common example is ``" For"`` versus ``"For"``), which would make a
-        stitched cache address a different token sequence.  Fast tokenizers
-        expose offsets, so assign every complete-prompt token to the span where
-        that token starts.  A token crossing a boundary is consequently kept
-        whole in one piece and the concatenated IDs remain exactly equal to
-        the real prompt IDs.
-        """
-        tokenizer = getattr(self._gen, "tokenizer", None)
-        if tokenizer is None:
-            return None
-        char = 0
-        for part in parts:
-            part["char_start"] = char
-            char += len(part["text"])
-            part["char_end"] = char
-        if char != len(prompt):
-            return None
-        try:
-            encoded = tokenizer(
-                prompt,
-                add_special_tokens=False,
-                return_offsets_mapping=True,
-            )
-            offsets = encoded["offset_mapping"]
-            encodedIds = encoded["input_ids"]
-        except (AttributeError, KeyError, NotImplementedError, TypeError, ValueError):
-            return None
-
-        if offsets and isinstance(offsets[0], (list, tuple)) and offsets[0] and isinstance(offsets[0][0], (list, tuple)):
-            offsets = offsets[0]
-        if encodedIds and isinstance(encodedIds[0], list):
-            encodedIds = encodedIds[0]
-        if len(offsets) != len(fullIds) or list(encodedIds) != list(fullIds):
-            return None
-
-        owners: List[int] = []
-        partIndex = 0
-        for start, _ in offsets:
-            start = int(start)
-            while (
-                partIndex + 1 < len(parts)
-                and start >= parts[partIndex]["char_end"]
-            ):
-                partIndex += 1
-            owners.append(partIndex)
-
-        result: List[List[int]] = []
-        for partIndex in range(len(parts)):
-            ids = [
-                token
-                for token, owner in zip(fullIds, owners)
-                if owner == partIndex
-            ]
-            result.append(ids)
-        return result if [token for ids in result for token in ids] == list(fullIds) else None
-
-    def _TemplateKey(self, parts: List[Dict[str, Any]]) -> str:
-        """Return a structural prompt key with slot-specific placeholders."""
-        pieces = []
-        for part in parts:
-            if part["kind"] == "reuse":
-                pieces.append(self._TemplateMarker(int(part["slot"])))
-            else:
-                pieces.append(part["text"])
-        return "".join(pieces)
+    def _TemplateKey(self, parts: List[Dict[str, Any]]) -> Tuple[Any, ...]:
+        """Return a token-native key with slot-specific placeholders."""
+        return tuple(
+            ("reuse", int(part["slot"]))
+            if part["kind"] == "reuse"
+            else ("fresh", tuple(part["ids"]))
+            for part in parts
+        )
 
     @staticmethod
     def _TemplateMarker(slot: int) -> str:
@@ -846,7 +726,7 @@ class KVCommTransformer(Method):
         # to generation as user-visible prompt content.
         return f"[KVCOMM_PLACEHOLDER_{slot}]"
 
-    def _TouchPrefixTemplate(self, key: str) -> None:
+    def _TouchPrefixTemplate(self, key: Tuple[Any, ...]) -> None:
         if key in self._prefixTemplateOrder:
             self._prefixTemplateOrder.remove(key)
         self._prefixTemplateOrder.append(key)
@@ -869,26 +749,20 @@ class KVCommTransformer(Method):
             return cached
 
         templateParts = []
+        templatePieceIds: List[List[int]] = []
         for part in parts:
             if part["kind"] == "reuse":
-                text = self._TemplateMarker(int(part["slot"]))
+                ids = self._gen.Encode(self._TemplateMarker(int(part["slot"])))
             else:
-                text = part["text"]
+                ids = list(part["ids"])
             templateParts.append(
                 {
                     "kind": part["kind"],
-                    "text": text,
                     "slot": part.get("slot"),
                 }
             )
-
-        templateText = "".join(part["text"] for part in templateParts)
-        templateIds = self._gen.Encode(templateText)
-        templatePieceIds = self._TokenizeParts(
-            templateText, templateIds, templateParts
-        )
-        if templatePieceIds is None:
-            return None
+            templatePieceIds.append(list(ids))
+        templateIds = [token for ids in templatePieceIds for token in ids]
 
         templateCursor = 0
         for part, ids in zip(templateParts, templatePieceIds):
@@ -946,22 +820,14 @@ class KVCommTransformer(Method):
         parts: List[Dict[str, Any]],
         pieceIds: List[List[int]],
     ) -> Any:
-        """Build the official KVCOMM base cache for this request.
+        """Build the KVCOMM base cache from the exact RUN token pieces.
 
         Reusable pieces are prefetched in isolation, then their K is RoPE
-        shifted to the current absolute position.  Static fresh pieces come
-        from the persistent canonical template cache, just like official
-        ``prepare_prefix_kv_segments``.  If boundary tokenization prevents
-        that exact cache match, the safe contextual prefill path is retained.
-        Any first-time template or dynamic prefill still happens in Run and is
-        therefore part of TTFT.
+        shifted to the current absolute position. Static fresh pieces use the
+        persistent template cache. Any first-time template or contextual
+        prefill still happens in Run and is therefore part of TTFT.
         """
         template = self._GetPrefixTemplate(parts)
-        # Static segments before the first incompatible boundary remain valid.
-        # Once a fresh segment's BPE boundary differs from the canonical
-        # template, later fresh text is context-dependent and must be
-        # prefetched against the assembled actual prefix.
-        dynamicFreshTail = template is None
         assembled: List[Any] = []
         cursor = 0
         for index, (part, ids) in enumerate(zip(parts, pieceIds)):
@@ -979,44 +845,31 @@ class KVCommTransformer(Method):
                 segment = part.get("segment")
                 storedIds = segment.get("base_ids") if segment is not None else None
                 storedCache = segment.get("base_cache") if segment is not None else None
-                if (
-                    storedCache is not None
-                    and storedIds is not None
-                    and list(storedIds) == list(ids)
-                ):
+                if segment is not None:
+                    assert storedIds is not None and list(storedIds) == list(ids), (
+                        "KVComm reused IDs differ from the matched segment"
+                    )
+                if storedCache is not None:
                     # This is the official response-cache path.  It avoids a
                     # second prefill for a retained output whose KV was
                     # already produced by the preceding RUN.
                     rawCache = storedCache
                 else:
                     rawCache = self._GetIsolatedBase(ids)
-                    if segment is not None and storedIds is None:
-                        # Official shared input memory records one tokenization
-                        # and one isolated KV for ``message`` and every later
-                        # destination agent consumes that same pair.  A raw
-                        # KVBench prompt boundary can otherwise assign a
-                        # boundary-crossing BPE token to opposite sides in two
-                        # RUNs, giving one message inconsistent placeholder
-                        # lengths (and invalid anchor deltas).  Canonicalize on
-                        # the first online use; this work still occurs in Run
-                        # and remains inside TTFT.
-                        segment["base_ids"] = list(ids)
-                        segment["base_cache"] = rawCache
                 shiftedCache = self._ShiftCache(rawCache, cursor)
                 part["raw_cache"] = rawCache
                 part["base_cache"] = shiftedCache
                 part["cache"] = shiftedCache
                 assembled.append(shiftedCache)
             else:
-                staticPart = False
-                if not dynamicFreshTail:
+                templateCache = None
+                if template is not None:
                     templatePart = template["parts"][index]
                     templateCache = template["caches"].get(index)
-                    staticPart = bool(
-                        templateCache is not None
-                        and list(ids) == list(template["piece_ids"][index])
-                    )
-                    if staticPart:
+                    if templateCache is not None:
+                        assert list(ids) == list(template["piece_ids"][index]), (
+                            "KVComm template IDs differ from RUN IDs"
+                        )
                         # Shift canonical template keys from marker positions
                         # to actual request positions. Values are contextualized
                         # by the canonical placeholder layout; anchor prefix
@@ -1028,8 +881,7 @@ class KVCommTransformer(Method):
                         part["base_cache"] = part["cache"]
                         assembled.append(part["cache"])
 
-                if not staticPart:
-                    dynamicFreshTail = True
+                if templateCache is None:
                     output = self._gen.Prefill(
                         ids,
                         pastKeyValues=(
@@ -1066,14 +918,14 @@ class KVCommTransformer(Method):
         skeleton = []
         for part in parts:
             if part["kind"] == "reuse":
-                skeleton.append("<reusable-placeholder>")
+                skeleton.append(("reusable-placeholder",))
             else:
-                skeleton.append(part["text"])
+                skeleton.append(tuple(part["ids"]))
         # Do not include the request/run counter here.  The counter is only a
         # local execution detail; including it would create a fresh namespace
         # for every agent/case and defeat KVCOMM's online cross-case learning.
         # The first-RUN topology separates different KVCOMM Tasks.
-        return "".join(skeleton)
+        return repr(tuple(skeleton))
 
     def _PoolKey(self, namespace: str, placeholderId: str) -> str:
         digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:24]
@@ -1441,48 +1293,35 @@ class KVCommTransformer(Method):
     def _RegisterOutput(
         self,
         state: Dict[str, Any],
-        text: str,
         outputIds: List[int],
         *,
-        fullCache: Any = None,
-        promptLength: Optional[int] = None,
+        fullCache: Any,
+        promptLength: int,
     ) -> None:
-        """Register retained generated text for later workflow RUNs.
+        """Register the exact native output fragment and matching contextual KV.
 
-        The official backend retains response KV for the following agent.  HF
-        generation returns a cache that is one token short of the generated
-        text (the last token has not yet been fed back through the model), so
-        complete that one-token cache before storing it.  The cache is rotated
-        back to position zero; ``_BuildBase`` applies the new absolute offset
-        when the segment appears in the next prompt.  This is case-local state,
-        not a persistent anchor, and is cleared by ``Reset``.
+        The helper completes the last sampled non-stop token and excludes only
+        a terminal stop EOS from the retained fragment. Internal special IDs
+        are kept verbatim; any cache/ID length disagreement is a contract bug.
+        Stored cache keys are shifted to position zero and `_BuildBase` applies
+        their new absolute offset on reuse.
         """
-        if not outputIds or not text:
+        if not outputIds:
             return
-        baseCache = None
-        if fullCache is not None and promptLength is not None:
-            # ``text`` is what the workflow inserts into the next prompt;
-            # decode(skip_special_tokens=True) can remove EOS/chat markers from
-            # ``outputIds``.  Align the stored cache to those actual text ids,
-            # otherwise the next request would necessarily take the dense path.
-            textIds = self._gen.Encode(text)
-            if outputIds[: len(textIds)] == textIds:
-                expectedLength = int(promptLength) + len(textIds)
-                cache = fullCache
-                cacheLength = _CacheLength(cache)
-                # Generate stops after producing the final token, so its
-                # returned past cache normally contains the preceding output
-                # tokens.  Feed the final text token once when needed.
-                if cacheLength == expectedLength - 1:
-                    cache = self._gen.Forward([textIds[-1]], cache).past_key_values
-                    cacheLength = _CacheLength(cache)
-                if cacheLength == expectedLength:
-                    outputCache = _SliceCache(cache, int(promptLength), expectedLength)
-                    baseCache = self._ShiftCache(outputCache, -int(promptLength))
+        textIds = list(outputIds)
+        cache = fullCache
+        cacheStart = int(promptLength)
+        expectedLength = cacheStart + len(textIds)
+        if cache is None or _CacheLength(cache) != expectedLength:
+            raise AssertionError("native output KV length differs from retained token IDs")
+        for key, value in _CachePairs(cache):
+            if key.shape[-2] != expectedLength or value.shape[-2] != expectedLength:
+                raise AssertionError("native output KV layer length differs from retained token IDs")
+        outputCache = _SliceCache(cache, cacheStart, expectedLength)
+        baseCache = self._ShiftCache(outputCache, -cacheStart)
         state["segments"].append(
             {
-                "text": str(text),
-                "base_ids": self._gen.Encode(text),
+                "base_ids": tuple(int(token) for token in outputIds),
                 "base_cache": baseCache,
                 # RUN order is stable and maxCaseBatchSize=1, so this is the
                 # same semantic identity as official agent_<node_id>_current.
@@ -1590,6 +1429,7 @@ class KVCommTransformer(Method):
         total: float,
         nTokens: int,
         metadata: Dict[str, Any],
+        outputIds: Optional[List[int]] = None,
     ) -> Result:
         return Result(
             output=text,
@@ -1599,4 +1439,5 @@ class KVCommTransformer(Method):
                 TotalTimeKey: total,
             },
             metadata={"backend": self.backend, **metadata},
+            output_ids=outputIds,
         )

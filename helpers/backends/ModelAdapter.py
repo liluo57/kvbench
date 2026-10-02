@@ -132,6 +132,7 @@ def set_arch_for_testing(arch: Optional[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=8)
 def _tokenizer(modelPath: str):
     """Lazy-load a ``transformers`` tokenizer for the configured model.
 
@@ -317,7 +318,9 @@ _BOUNDARY_MARKER = "KVBENCH_CHAT_BOUNDARY_MARKER_7f3a"
 
 @lru_cache(maxsize=16)
 def _chat_boundary_parts(
-    modelPath: str, thinking: Optional[bool]
+    modelPath: str,
+    thinking: Optional[bool],
+    system_prefix: str = "",
 ) -> Tuple[str, str]:
     """Return ``(prefix, assistant_suffix)`` for one user message.
 
@@ -329,6 +332,7 @@ def _chat_boundary_parts(
     rendered = render_chat(
         [{"role": "user", "content": _BOUNDARY_MARKER}],
         modelPath=modelPath,
+        system_prefix=system_prefix,
         thinking=thinking,
     )
     idx = rendered.find(_BOUNDARY_MARKER)

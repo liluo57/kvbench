@@ -37,6 +37,58 @@ def capture_kv(attention, key, value, status, metadata):
             collector.append(attention, attention.hack_kv)
 
 
+def register_retained_output(
+    chunk_ids, chunk_kv, output_ids, retained, *, expected_layers=None
+):
+    """Register one complete native output fragment and its matching KV rows.
+
+    The caller requests one extra decode token so every returned output token
+    has completed a forward pass and has a captured KV row. Never truncate IDs
+    to fit a partial collector result: that would make the cache key diverge
+    from the workflow's output fragment.
+    """
+    ids = [int(token) for token in output_ids]
+    if not ids:
+        return 0
+    if retained is None:
+        raise RuntimeError(
+            "CacheBlend output retention did not capture KV for the output fragment"
+        )
+    if not retained or (
+        expected_layers is not None and len(retained) != expected_layers
+    ):
+        raise RuntimeError(
+            "CacheBlend output retention captured an incomplete layer set: "
+            f"captured={len(retained)}, expected={expected_layers}"
+        )
+
+    required_rows = len(ids)
+    stored = []
+    for layer_index, kv in enumerate(retained):
+        if not isinstance(kv, (list, tuple)) or len(kv) != 2:
+            raise RuntimeError(
+                f"CacheBlend output retention has invalid KV for layer {layer_index}"
+            )
+        key, value = kv
+        key_rows = int(key.shape[0])
+        value_rows = int(value.shape[0])
+        if key_rows < required_rows or value_rows < required_rows:
+            raise RuntimeError(
+                "CacheBlend output retention captured fewer KV rows than native "
+                f"output IDs for layer {layer_index}: ids={required_rows}, "
+                f"key_rows={key_rows}, value_rows={value_rows}"
+            )
+        stored.append([
+            key[:required_rows].detach(),
+            value[:required_rows].detach(),
+        ])
+
+    cache_key = tuple(ids)
+    chunk_ids[cache_key] = ids
+    chunk_kv[cache_key] = stored
+    return required_rows
+
+
 class RetainedOutputCollector:
     def __init__(self, layers):
         self.indices = {id(layer.self_attn): i for i, layer in enumerate(layers)}

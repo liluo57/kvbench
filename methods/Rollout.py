@@ -95,7 +95,7 @@ def _AggregateMapping(
 
 def _CallRun(
     method: Method,
-    data: List[str],
+    data: List[List[int]],
     retainOutput: List[bool],
     maxNewTokens: int,
 ) -> List[Result]:
@@ -175,7 +175,7 @@ class RolloutMethod(Method):
         super().Initialize(gpuIds)
         self.base_method.Initialize(gpuIds)
 
-    def Prepare(self, data: List[List[str]]) -> None:
+    def Prepare(self, data: List[List[List[int]]]) -> None:
         self.base_method.Prepare(data)
 
     def Reset(self) -> None:
@@ -188,7 +188,7 @@ class RolloutMethod(Method):
     # ------------------------------------------------------------------ Run
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -462,6 +462,7 @@ class RolloutMethod(Method):
             output=output,
             performance=performance,
             metadata=metadata,
+            output_ids=(individual[0].output_ids if individual else None),
         )
 
 

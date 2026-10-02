@@ -48,9 +48,10 @@ class NIAHTask(RulerBase):
     def Cases(self) -> Iterator[Case]:
         for i, s in enumerate(self._LoadSamples()):
             _, fullPrompt = self._BuildChatParts(s, splitNeedle=True)
+            data = RAGInput(prepare_input=[], run_input=fullPrompt)
             yield Case(
-                input=RAGInput(prepare_input=[], run_input=fullPrompt),
-                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=[], run_input=fullPrompt)),
+                input=data,
+                workflow=RAGWorkflow(case_id=i, data=data),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 
@@ -87,9 +88,10 @@ class NIAHShuffleTask(NIAHTask):
             parts, fullPrompt = self._SplitSegments(s)
             shuffled = self._Shuffled(parts[1:-1], seed=int(s.get("index", i)))
             run_input = parts[0] + "".join(shuffled) + parts[-1]
+            data = RAGInput(prepare_input=parts, run_input=run_input)
             yield Case(
-                input=RAGInput(prepare_input=parts, run_input=run_input),
-                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=parts, run_input=run_input)),
+                input=data,
+                workflow=RAGWorkflow(case_id=i, data=data),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 

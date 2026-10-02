@@ -1,64 +1,45 @@
 import pytest
 
-from helpers.backends.Prompt import ComposeInterleavedReuse, ComposeReuse, ContextText
-
-
-def test_context_text_handles_empty_and_preserves_segments():
-    assert ContextText([]) == ""
-    assert ContextText(["a", "", "b"]) == "ab"
+from helpers.backends.Prompt import (
+    ComposeInterleavedReuse,
+    ComposeInterleavedReuseText,
+    ComposeReuse,
+)
 
 
 @pytest.mark.parametrize(
     ("prepare", "run", "expected"),
     [
-        ([], "prompt", (None, "prompt")),
-        (["A", "B"], "ABtail", (["A", "B"], "tail")),
-        (["A", "B", "C"], "BACtail", (["B", "A", "C"], "tail")),
-        (["same", "same"], "samesame!", (["same", "same"], "!")),
-        (["A"], "unmatched", (None, "unmatched")),
+        ([], [7], (None, [7])),
+        ([[1], [2]], [1, 2, 9], ([[1], [2]], [9])),
+        ([[1], [2], [3]], [2, 1, 3, 9], ([[2], [1], [3]], [9])),
+        ([[4], [4]], [4, 4, 5], ([[4], [4]], [5])),
+        ([[], []], [8, 9], (None, [8, 9])),
     ],
 )
 def test_compose_reuse_finds_longest_prefix(prepare, run, expected):
     assert ComposeReuse(prepare, run) == expected
 
 
-def test_interleaved_reuse_keeps_fresh_spans_and_repeats_chunks():
-    parts = ComposeInterleavedReuse(["ab", "cd"], "XcdYabZcd")
-
-    assert parts == [
-        (None, "X"),
-        (1, "cd"),
-        (None, "Y"),
-        (0, "ab"),
-        (None, "Z"),
-        (1, "cd"),
-    ]
-    assert "".join(text for _, text in parts) == "XcdYabZcd"
-
-
 @pytest.mark.parametrize(
     ("prepare", "run", "expected"),
     [
-        (["abc"], "", []),
-        ([], "abc", [(None, "abc")]),
-        (["", ""], "abc", [(None, "abc")]),
-        (["abc", "bc", "c"], "abc", [(0, "abc")]),
-        (["aba", "bab"], "abab", [(0, "aba"), (None, "b")]),
-        (["xyz"], "abc", [(None, "abc")]),
+        ([], [7, 8], [(None, [7, 8])]),
+        ([[1, 2], [3]], [9, 3, 8, 1, 2, 7, 3], [
+            (None, [9]), (1, [3]), (None, [8]), (0, [1, 2]),
+            (None, [7]), (1, [3]),
+        ]),
+        ([[1, 2]], [], []),
+        ([[], []], [8, 9], [(None, [8, 9])]),
+        ([[1, 2]], [1, 2, 1, 2], [(0, [1, 2]), (0, [1, 2])]),
     ],
 )
-def test_interleaved_reuse_edge_cases(prepare, run, expected):
+def test_token_and_text_interleaved_matcher(prepare, run, expected):
     assert ComposeInterleavedReuse(prepare, run) == expected
 
 
-def test_interleaved_anchor_is_only_a_prefilter():
-    common = "x" * 64
-    prepare = [common + "A", common + "B"]
-    run = "fresh" + common + "B" + "tail"
-
-    assert ComposeInterleavedReuse(prepare, run) == [
-        (None, "fresh"),
-        (1, common + "B"),
-        (None, "tail"),
+def test_text_matcher_preserves_repeated_chunk_selection():
+    assert ComposeInterleavedReuseText(["ab", "cd"], "XcdYabZcd") == [
+        (None, "X"), (1, "cd"), (None, "Y"),
+        (0, "ab"), (None, "Z"), (1, "cd"),
     ]
-

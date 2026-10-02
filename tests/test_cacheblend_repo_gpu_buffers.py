@@ -27,23 +27,23 @@ def _worker():
         [torch.ones(2, 3), torch.ones(2, 3)],
         [torch.ones(2, 3), torch.ones(2, 3)],
     ]
-    worker._chunkIds = {"AB": [1, 2]}
-    worker._chunkKv = {"AB": kv}
+    worker._chunkIds = {(1, 2): [1, 2]}
+    worker._chunkKv = {(1, 2): kv}
     return worker
 
 
 def test_reserve_allocates_and_reuses_device_local_assembly_buffers():
     worker = _worker()
 
-    report = worker.Reserve([[[True, "AB"], [False, "xyz"]]])
+    report = worker.Reserve([[[True, [1, 2]], [False, [3, 4, 5]]]])
 
     assert report == {"ok": True, "capacity": 5, "requested": 5}
     assert len(worker._assembledKv) == 2
     assert worker._assembledKv[0][0].shape == (5, 3)
-    assert worker._assembledKv[0][0].device == worker._chunkKv["AB"][0][0].device
+    assert worker._assembledKv[0][0].device == worker._chunkKv[(1, 2)][0][0].device
     first_buffer = worker._assembledKv[0][0]
 
-    worker.Reserve([[[True, "AB"]]])
+    worker.Reserve([[[True, [1, 2]]]])
     assert worker._assembledKv[0][0] is first_buffer
 
 
@@ -52,7 +52,7 @@ def test_reserve_rejects_prompt_beyond_model_limit():
     worker.args.max_model_len = 4
 
     try:
-        worker.Reserve([[[True, "AB"], [False, "xyz"]]])
+        worker.Reserve([[[True, [1, 2]], [False, [3, 4, 5]]]])
     except ValueError as exc:
         assert "exceeds max_model_len" in str(exc)
     else:

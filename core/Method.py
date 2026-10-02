@@ -127,18 +127,19 @@ class Method(ABC):
         self.gpuIds = ids
 
     @abstractmethod
-    def Prepare(self, data: List[List[str]]) -> None:
+    def Prepare(self, data: List[List[List[int]]]) -> None:
         """Build reusable state for a batch of PREPARE actions.
 
-        ``data[i]`` is the list of text segments for PREPARE action ``i`` (KV
-        prefill, index build, ...). An empty inner list means there is nothing
-        to warm up for that action. Called once for each PREPARE action step.
+        ``data[i]`` is the list of token-ID segments for PREPARE action ``i``
+        (KV prefill, index build, ...). Each segment was tokenized independently
+        by the owning Task. An empty inner list means there is nothing to warm
+        up for that action. Called once for each PREPARE action step.
         """
 
     @abstractmethod
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -150,7 +151,9 @@ class Method(ABC):
         repair, and fresh prefill—is included.  Initialization and reusable
         state construction in ``Prepare`` are excluded.
 
-        ``data[i]`` is the complete prompt for RUN action ``i``.
+        ``data[i]`` is the complete prompt token sequence for RUN action ``i``.
+        It is assembled from independently tokenized reusable and fresh text
+        pieces by the owning Task.
         ``retainOutput[i]`` is a future-reuse/lifetime hint for that generated
         output; methods may preserve backend-specific reusable state or ignore
         it. Returns a list of :class:`Result` objects in input order.

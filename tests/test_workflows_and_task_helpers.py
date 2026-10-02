@@ -5,6 +5,11 @@ import pytest
 from core.Result import Result
 from core.Workflow import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
+from helpers.backends.Tokenization import (
+    EncodeText,
+    EncodePrompt,
+    OutputFragmentIds,
+)
 from tasks.bases.KBBase import (
     NormalizeAnswer,
     ParagraphChunks,
@@ -34,6 +39,11 @@ from workflow import (
 def modelPath(monkeypatch):
     """Use a deterministic chat-template double without downloading a model."""
     class FakeTokenizer:
+        all_special_ids = [999]
+
+        def encode(self, text, add_special_tokens=False):
+            return [ord(character) for character in text]
+
         def apply_chat_template(
             self,
             messages,
@@ -61,19 +71,19 @@ def modelPath(monkeypatch):
     ModelAdapter.set_arch_for_testing(None)
 
 
-def test_rag_workflow_prepare_run_and_final_result():
-    workflow = RAGWorkflow(7, RAGInput(["a", "b"], "prompt"))
+def test_rag_workflow_prepare_run_and_final_result(modelPath):
+    workflow = RAGWorkflow(7, RAGInput(["a", "b"], "prompt", modelPath))
 
     prepare = workflow.next()[0]
     assert prepare.kind == ActionKind.PREPARE
     assert prepare.case_id == 7
-    assert prepare.data == ["a", "b"]
+    assert prepare.data == [[ord("a")], [ord("b")]]
     workflow.observe([ActionResult(7, Result(), prepare.tag)])
     assert workflow.final_result is None
 
     run = workflow.next()[0]
     assert run.kind == ActionKind.RUN
-    assert run.data == "prompt"
+    assert run.data == [ord(character) for character in "prompt"]
     assert not run.retainOutput
     workflow.observe([ActionResult(7, Result(output="answer"), run.tag)])
 
@@ -82,14 +92,14 @@ def test_rag_workflow_prepare_run_and_final_result():
     assert workflow.final_result.output == "answer"
 
 
-def test_rag_workflow_skips_empty_prepare():
-    workflow = RAGWorkflow(1, RAGInput([], "prompt"))
+def test_rag_workflow_skips_empty_prepare(modelPath):
+    workflow = RAGWorkflow(1, RAGInput([], "prompt", modelPath))
 
     assert workflow.next()[0].kind == ActionKind.RUN
 
 
-def test_rag_workflow_keeps_a_final_result_with_none_output():
-    workflow = RAGWorkflow(1, RAGInput([], "prompt"))
+def test_rag_workflow_keeps_a_final_result_with_none_output(modelPath):
+    workflow = RAGWorkflow(1, RAGInput([], "prompt", modelPath))
     run = workflow.next()[0]
     result = Result(output=None, metadata={"diagnostic": True})
 
@@ -98,15 +108,39 @@ def test_rag_workflow_keeps_a_final_result_with_none_output():
     assert workflow.final_result is result
 
 
-def test_rag_workflow_observe_requires_one_result():
-    workflow = RAGWorkflow(1, RAGInput([], "prompt"))
+def test_rag_workflow_observe_requires_one_result(modelPath):
+    workflow = RAGWorkflow(1, RAGInput([], "prompt", modelPath))
     workflow.next()
 
     with pytest.raises(ValueError, match="exactly one"):
         workflow.observe([])
 
 
-def test_multiagent_plain_prompts_without_shared_prepare():
+def test_task_tokenization_encodes_reusable_and_fresh_pieces_independently(
+    monkeypatch,
+):
+    class BoundaryTokenizer:
+        all_special_ids = []
+
+        def encode(self, text, add_special_tokens=False):
+            if text == "ab":
+                return [900]
+            return [ord(character) for character in text]
+
+    monkeypatch.setattr(ModelAdapter, "_tokenizer", lambda _path: BoundaryTokenizer())
+    prepareIds, runIds = EncodePrompt(["a"], "ab", "synthetic")
+
+    assert prepareIds == [[ord("a")]]
+    assert runIds == [ord("a"), ord("b")]
+    assert runIds != [900]
+
+
+def test_output_fragment_keeps_interior_specials_and_removes_terminal_stops():
+    assert OutputFragmentIds([1, 99, 2, 99, 99], [99]) == [1, 99, 2]
+    assert OutputFragmentIds([1, 99, 2]) == [1, 99, 2]
+
+
+def test_multiagent_plain_prompts_without_shared_prepare(modelPath):
     workflow = MultiAgentFullConnectionWorkflow(
         3,
         MultiAgentFullConnectionInput(
@@ -114,20 +148,31 @@ def test_multiagent_plain_prompts_without_shared_prepare():
             agents=[AgentSpec("A", "A says {task}"), AgentSpec("B", "B says {task}")],
             prepareSharedTask=False,
             chatTemplate=False,
+            modelPath=modelPath,
         ),
     )
 
     first = workflow.next()[0]
     assert first.kind == ActionKind.RUN
-    assert first.data == "A says TASK"
+    assert first.data == [ord(character) for character in "A says TASK"]
     assert first.retainOutput
-    workflow.observe([ActionResult(3, Result(output="first answer"), first.tag)])
+    workflow.observe([
+        ActionResult(
+            3,
+            Result(output="first answer", output_ids=[900, 999, 901]),
+            first.tag,
+        )
+    ])
 
     second = workflow.next()[0]
     assert second.kind == ActionKind.RUN
-    assert second.data.startswith("B says TASK")
-    assert "Agent 0, role is A" in second.data
-    assert "first answer" in second.data
+    prompt = "".join(chr(token) for token in second.data)
+    assert prompt.startswith("B says TASK")
+    assert "Agent 0, role is A" in prompt
+    assert any(
+        second.data[index : index + 3] == [900, 999, 901]
+        for index in range(len(second.data) - 2)
+    )
     assert not second.retainOutput
     workflow.observe([ActionResult(3, Result(output="final answer"), second.tag)])
 
@@ -135,12 +180,38 @@ def test_multiagent_plain_prompts_without_shared_prepare():
     assert workflow.final_result.output == "final answer"
 
 
-def test_multiagent_observe_requires_one_result():
+@pytest.mark.parametrize(("userContent", "systemContent"), [("same", "same"), ("", "system")])
+def test_multiagent_chat_boundaries_accept_repeated_or_empty_content(
+    modelPath, userContent, systemContent
+):
+    workflow = MultiAgentFullConnectionWorkflow(
+        3,
+        MultiAgentFullConnectionInput(
+            task="unused",
+            agents=[AgentSpec("A", userContent, systemContent)],
+            prepareSharedTask=False,
+            chatTemplate=True,
+            modelPath=modelPath,
+        ),
+    )
+
+    action = workflow.next()[0]
+    rendered = ModelAdapter.render_chat(
+        [{"role": "user", "content": userContent}],
+        modelPath=modelPath,
+        system_prefix=systemContent,
+        thinking=False,
+    )
+    assert action.data == [ord(character) for character in rendered]
+
+
+def test_multiagent_observe_requires_one_result(modelPath):
     workflow = MultiAgentFullConnectionWorkflow(
         1,
         MultiAgentFullConnectionInput(
             "task", [AgentSpec("A", "{task}")],
             chatTemplate=False,
+            modelPath=modelPath,
         ),
     )
     workflow.next()
@@ -232,7 +303,14 @@ def test_govreport_max_sample_length_filters_complete_prompts(tmp_path, monkeypa
 
     class FakeTokenizer:
         def encode(self, text, add_special_tokens=False):
-            return [0] * (2 if "short report" in text else 5)
+            if "Report:" in text and "Summary:" in text:
+                # Whole-prompt encoding would undercount both examples.
+                return [0]
+            if "oversized report" in text:
+                return [0] * 5
+            if "Write a one-page" in text:
+                return [0] * 2
+            return [0]
 
     monkeypatch.setattr(
         ModelAdapter, "_tokenizer", lambda modelPath: FakeTokenizer()

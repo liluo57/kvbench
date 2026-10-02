@@ -177,7 +177,7 @@ def test_terminal_packet_match_is_forwarded_as_fresh_generation_prompt(tiny_runt
     assert mixed_result.matched_chunk_ids == ["chunk_alpha"]
 
 
-def test_kvbench_prepare_skips_whitespace_only_packet_sources(tiny_runtime):
+def test_kvbench_prepare_stores_authoritative_token_chunks(tiny_runtime):
     backend, tokenizer, _store = tiny_runtime
     method = KVPacket(allowUntrainedWrapper=True, headerLen=1, trailerLen=1)
     method._kv = importlib.import_module("methods.KVPacket.backend.kvpacket")
@@ -191,16 +191,23 @@ def test_kvbench_prepare_skips_whitespace_only_packet_sources(tiny_runtime):
         device="cpu",
         requires_grad=False,
     ).eval()
-    method.Prepare([["   \n\t", "alpha ", " alpha "]])
+    alpha_ids = tokenizer("alpha ")["input_ids"]
+    spaced_ids = tokenizer(" alpha ")["input_ids"]
+    method.Prepare([[[ ], alpha_ids, spaced_ids]])
 
     assert len(method._states) == 1
-    assert method._states[0].chunks == ["alpha ", " alpha "]
+    assert method._states[0].chunks == [alpha_ids, spaced_ids]
     assert len(method._states[0].store.ids()) == 2
 
-    prompt = "alpha beta"
-    result = method.Run([prompt], maxNewTokens=2)[0]
-    assert result.metadata["n_input"] == len(tokenizer(prompt)["input_ids"])
-    assert result.metadata["cached_tokens"] == len(tokenizer("alpha ")["input_ids"])
+    prompt_ids = tokenizer("alpha beta")["input_ids"]
+    result = method.Run([prompt_ids], maxNewTokens=2)[0]
+    assert result.metadata["n_input"] == len(prompt_ids)
+    assert result.metadata["cached_tokens"] == len(alpha_ids)
+
+
+def test_kvbench_rejects_string_matching_without_task_text_and_offsets():
+    with pytest.raises(ValueError, match="supports Match='token'"):
+        KVPacket(match="string", allowUntrainedWrapper=True)
 
 
 def test_packet_store_is_immutable_and_rope_shift_changes_only_returned_cache(tiny_runtime):

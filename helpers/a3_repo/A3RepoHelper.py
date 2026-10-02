@@ -308,7 +308,7 @@ class A3Worker:
             "other_config": {"decode": False},
         }
 
-    def full(self, text):
+    def full(self, text=None, input_ids=None):
         """Run a complete prefill through the same patched A3 runtime.
 
         This is the worker's fallback for prompts without reusable chunks; it
@@ -318,7 +318,7 @@ class A3Worker:
         dedicated ``OfficialVanillaHelper`` uses the same runtime for a clean
         baseline process and calls ragkv's ``vanilla()`` entry point.
         """
-        ids = self._encode(text)
+        ids = list(input_ids) if input_ids is not None else self._encode(text or "")
         output, ttft, total, n_tokens, generationStart = self._decode(
             ids, self._full_config()
         )
@@ -431,7 +431,9 @@ class A3Worker:
                         request.get("suffix_ids"),
                     )
                 elif op == "full":
-                    response = self.full(request.get("text", ""))
+                    response = self.full(
+                        request.get("text", ""), request.get("input_ids")
+                    )
                 elif op == "reset":
                     response = self.reset()
                 elif op == "close":

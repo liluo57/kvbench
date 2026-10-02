@@ -85,7 +85,7 @@ def test_stderr_tail_uses_already_drained_lines():
 
 def test_run_reserves_gpu_assembly_buffer_before_fusing_batch():
     method = CacheblendRepo()
-    method._chunks = [["A"], ["B"]]
+    method._chunks = [[[1]], [[2]]]
     requests = []
 
     def request(payload):
@@ -103,11 +103,11 @@ def test_run_reserves_gpu_assembly_buffer_before_fusing_batch():
         }
 
     method._Request = request
-    results = method.Run(["A?", "B?"])
+    results = method.Run([[1, 3], [2, 4]])
 
     assert [item["op"] for item in requests] == ["reserve", "fuse", "fuse"]
     assert requests[0]["parts_batch"] == [
-        [[True, "A"], [False, "?"]],
-        [[True, "B"], [False, "?"]],
+        [[True, [1]], [False, [3]]],
+        [[True, [2]], [False, [4]]],
     ]
     assert [result.output for result in results] == ["answer", "answer"]

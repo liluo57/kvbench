@@ -33,7 +33,10 @@ class FakeTask(Task):
         self.prompt = prompt
 
     def Cases(self):
-        data = RAGInput(prepare_input=[], run_input=self.prompt)
+        data = RAGInput(
+            prepare_input=[],
+            run_input=[ord(character) for character in self.prompt],
+        )
         yield Case(data, RAGWorkflow(0, data), {"expected": self.prompt})
 
     def Evaluate(self, result, metadata):
@@ -49,7 +52,9 @@ class FakeMultiCaseTask(Task):
     def Cases(self):
         for caseId in range(self.count):
             prompt = f"case-{caseId}"
-            data = RAGInput(prepare_input=[], run_input=prompt)
+            data = RAGInput(
+                prepare_input=[], run_input=[ord(character) for character in prompt]
+            )
             yield Case(data, RAGWorkflow(caseId, data), {"expected": prompt})
 
     def Evaluate(self, result, metadata):
@@ -76,7 +81,7 @@ class FakeMethod(Method):
         pass
 
     def Run(self, data, retainOutput=None):
-        prompt = data[0]
+        prompt = "".join(chr(token) for token in data[0])
         print(f"running {prompt}", flush=True)
         if self.failMode == "always" or (
             self.failMode == "once" and prompt not in self.seen

@@ -18,91 +18,107 @@ from methods.Cacheblend.Worker import CacheBlendWorker
 
 
 class _EncodingDelayGenerator:
-    def Encode(self, text, **_kwargs):
-        time.sleep(0.02)
-        return [1]
+    tokenizer = SimpleNamespace(all_special_ids=[99])
 
-    def Generate(self, _ids, **_kwargs):
+    def Encode(self, text, **_kwargs):
+        raise AssertionError("Method inputs must already be token IDs")
+
+    def OutputTokenIds(self, token_ids):
+        return [token for token in token_ids if token != 99]
+
+    def Generate(self, ids, **kwargs):
+        assert all(isinstance(token, int) for token in ids)
+        time.sleep(0.03)
+        if kwargs.get("returnCache"):
+            return "answer", 0.03, 0.04, 1, object(), [2]
+        if kwargs.get("returnTokenIds"):
+            return "answer", 0.03, 0.04, 1, [2]
         return "answer", 0.03, 0.04, 1
 
 
-def test_full_prefill_ttft_includes_request_tokenization():
+def test_full_prefill_consumes_token_ids_without_encoding():
     method = object.__new__(FullPrefillTransformer)
     method._gen = _EncodingDelayGenerator()
 
-    result = method.Run(["prompt"])[0]
+    result = method.Run([[41, 42]])[0]
 
-    # The fake backend contributes 30 ms and Encode contributes about 20 ms.
-    assert result.performance["ttft"] >= 0.045
+    assert result.performance["ttft"] >= 0.025
+    assert result.output_ids == [2]
 
 
-def test_naive_miss_includes_request_tokenization():
+def test_naive_miss_consumes_token_ids_without_encoding():
     method = object.__new__(NaiveTransformer)
     method._gen = _EncodingDelayGenerator()
     method._states = [{"segments": [], "caches": [], "ids": []}]
 
-    result = method.Run(["prompt"])[0]
+    result = method.Run([[41, 42]])[0]
 
-    assert result.performance["ttft"] >= 0.045
+    assert result.performance["ttft"] >= 0.025
+    assert result.output_ids == [2]
 
 
-def test_dependency_analysis_generation_keeps_tokenization_in_ttft():
+def test_dependency_analysis_generation_consumes_token_ids():
     method = object.__new__(DependencyAnalysisMethod)
     method._gen = SimpleNamespace(
-        Encode=_EncodingDelayGenerator().Encode,
-        Generate=lambda *args, **kwargs: (
-            "answer",
-            0.03,
-            0.04,
-            1,
-            None,
-            [],
-        ),
+        Generate=lambda ids, *args, **kwargs: (
+            "answer", 0.03, 0.04, 1, None, [2]
+        ) if all(isinstance(token, int) for token in ids) else None,
+        OutputTokenIds=lambda token_ids: list(token_ids),
     )
     method._chunks = [[]]
     method._Analyze = lambda *args: {}
 
-    result = method.Run(["prompt"])[0]
+    result = method.Run([[41, 42]])[0]
 
-    assert result.performance["ttft"] >= 0.045
+    assert result.performance["ttft"] >= 0.025
+    assert result.output_ids == [2]
 
 
-def test_prophet_fallback_keeps_request_encoding_in_ttft():
+def test_prophet_fallback_consumes_token_ids_without_encoding():
     class Runtime:
         layers = []
 
         @staticmethod
         def encode(_text, **_kwargs):
-            time.sleep(0.02)
-            return [1]
+            raise AssertionError("Method inputs must already be token IDs")
 
         @staticmethod
-        def full_generate(_ids):
-            return "answer", 0.03, 0.04, 1
+        def full_generate(ids):
+            assert ids == [41, 42]
+            return "answer", 0.03, 0.04, 1, [2]
 
     method = object.__new__(ProphetKV)
     method._runtime = Runtime()
     method._states = [SimpleNamespace(chunks=[], caches=[])]
     method.debug = False
 
-    result = method.Run(["prompt"])[0]
+    result = method.Run([[41, 42]])[0]
 
-    assert result.performance["ttft"] >= 0.045
+    assert result.performance["ttft"] >= 0.025
+    assert result.output_ids == [2]
 
 
-def test_cacheclip_fallback_includes_matching_path_and_prompt_encoding():
-    class Generator(_EncodingDelayGenerator):
+def test_cacheclip_zero_match_ttft_includes_full_id_generation():
+    class Generator:
         model = SimpleNamespace(device="cpu")
+
+        @staticmethod
+        def Generate(ids, pastKeyValues=None, **kwargs):
+            assert ids == [41, 42]
+            assert pastKeyValues is None
+            time.sleep(0.02)
+            return "answer", 0.03, 0.04, 1, [2]
 
     method = object.__new__(CacheClip)
     method._gen = Generator()
     method._auxiliary = object()
-    method._states = [{"chunks": ["cached"]}]
+    method._states = [{"document_ids": [[7, 8]], "primary": []}]
     method.requireReuse = False
 
-    result = method.Run(["no match"])[0]
+    result = method.Run([[41, 42]])[0]
 
-    assert result.performance["ttft"] >= 0.045
+    assert result.performance["ttft"] >= 0.025
+    assert result.output_ids == [2]
 
 
 class _HypicTimingEngine:
@@ -164,6 +180,7 @@ def test_subprocess_adapter_adds_parent_interval_once():
 def test_cacheblend_worker_uses_submission_to_first_token_interval():
     worker = object.__new__(CacheBlendWorker)
     worker.args = SimpleNamespace(max_new_tokens=1)
+    worker.terminalStopIds = []
     worker._SamplingParams = lambda _count: object()
     worker._endRetainOutput = lambda: None
 
@@ -245,11 +262,14 @@ def test_vllm_backend_ttft_is_not_divided_by_batch_size(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "vllm", types.SimpleNamespace(SamplingParams=SamplingParams))
     engine = Engine()
-    llm = SimpleNamespace(llm_engine=engine)
+    llm = SimpleNamespace(
+        llm_engine=engine,
+        get_tokenizer=lambda: SimpleNamespace(eos_token_id=2),
+    )
 
     results = GenerateBatch(
         llm,
-        ["a", "b"],
+        [[101], [102]],
         maxNewTokens=1,
         onlineStart=time.perf_counter() - 0.02,
     )

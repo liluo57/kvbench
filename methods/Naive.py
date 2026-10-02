@@ -88,11 +88,11 @@ class NaiveTransformer(Method):
             pass
 
     # ---------------------------------------------------------------- Method
-    def Prepare(self, data: List[List[str]]) -> None:
+    def Prepare(self, data: List[List[List[int]]]) -> None:
         self._states = []
 
         for chunks in data:
-            prepare = list(chunks or [])
+            prepare = [list(chunk) for chunk in (chunks or [])]
             caches, ids = self._prefillChunks(prepare)
 
             self._states.append(
@@ -105,7 +105,7 @@ class NaiveTransformer(Method):
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -118,11 +118,14 @@ class NaiveTransformer(Method):
             self._states = [{"segments": [], "caches": [], "ids": []} for _ in data]
         results = []
 
-        for i, runInput in enumerate(data):
+        for i, runTokens in enumerate(data):
+            runInput = list(runTokens)
             state = self._states[i]
+            outputIds = None
+            outputCacheTime = 0.0
 
             retain = bool(retainOutput[i]) if retainOutput is not None and i < len(retainOutput) else False
-            prepare: List[str] = state["segments"]
+            prepare: List[List[int]] = state["segments"]
             caches: List[Any] = state["caches"]
             preparedIds: List[List[int]] = state["ids"]
 
@@ -133,19 +136,25 @@ class NaiveTransformer(Method):
                 for prepareIndex, _ in parts
             ):
                 # Nothing reusable appears in this prompt.
-                ids = self._gen.Encode(runInput)
+                ids = runInput
                 generationStart = time.perf_counter()
                 generated = self._gen.Generate(
-                    ids, maxNewTokens=maxNewTokens, returnCache=retain
+                    ids,
+                    maxNewTokens=maxNewTokens,
+                    returnCache=retain,
+                    returnTokenIds=True,
                 )
                 if retain:
-                    text, backendTtft, total, nTokens, fullCache, outputIds = generated
-                    self._registerOutput(state, text, outputIds, fullCache)
+                    text, backendTtft, total, nTokens, fullCache, rawOutputIds = generated
+                    outputIds = self._gen.OutputTokenIds(rawOutputIds)
+                    outputCacheTime = self._registerOutput(
+                        state, outputIds, fullCache, len(ids)
+                    )
                 else:
-                    text, backendTtft, total, nTokens = generated
+                    text, backendTtft, total, nTokens, outputIds = generated
 
                 ttft = generationStart - runStart + backendTtft
-                total = generationStart - runStart + total
+                total = generationStart - runStart + total + outputCacheTime
 
                 nInput = len(ids)
                 reuseRatio = 0.0
@@ -161,10 +170,7 @@ class NaiveTransformer(Method):
                     if prepareIndex is None:
                         # Fresh span: compute it against everything assembled
                         # before it.
-                        ids = self._gen.Encode(
-                            span,
-                            addSpecialTokens=False,
-                        )
+                        ids = list(span)
 
                         if not ids:
                             continue
@@ -199,19 +205,25 @@ class NaiveTransformer(Method):
 
                 nInput = past.get_seq_length()
                 if nInput == 0 or lastId is None:
-                    ids = self._gen.Encode(runInput)
+                    ids = runInput
                     generationStart = time.perf_counter()
                     generated = self._gen.Generate(
-                        ids, maxNewTokens=maxNewTokens, returnCache=retain
+                        ids,
+                        maxNewTokens=maxNewTokens,
+                        returnCache=retain,
+                        returnTokenIds=True,
                     )
                     if retain:
-                        text, backendTtft, total, nTokens, fullCache, outputIds = generated
-                        self._registerOutput(state, text, outputIds, fullCache)
+                        text, backendTtft, total, nTokens, fullCache, rawOutputIds = generated
+                        outputIds = self._gen.OutputTokenIds(rawOutputIds)
+                        outputCacheTime = self._registerOutput(
+                            state, outputIds, fullCache, len(ids)
+                        )
                     else:
-                        text, backendTtft, total, nTokens = generated
+                        text, backendTtft, total, nTokens, outputIds = generated
 
                     ttft = generationStart - runStart + backendTtft
-                    total = generationStart - runStart + total
+                    total = generationStart - runStart + total + outputCacheTime
 
                     nInput = len(ids)
                     reuseRatio = 0.0
@@ -226,15 +238,18 @@ class NaiveTransformer(Method):
                         maxNewTokens=maxNewTokens,
                     )
                     if retain:
-                        text, decodeTtft, decodeTotal, nTokens, fullCache, outputIds = decoded
-                        self._registerOutput(state, text, outputIds, fullCache)
+                        text, decodeTtft, decodeTotal, nTokens, fullCache, rawOutputIds = decoded
+                        outputIds = self._gen.OutputTokenIds(rawOutputIds)
+                        outputCacheTime = self._registerOutput(
+                            state, outputIds, fullCache, nInput
+                        )
                     else:
-                        text, decodeTtft, decodeTotal, nTokens = decoded
+                        text, decodeTtft, decodeTotal, nTokens, outputIds = decoded
 
                     # Fresh intermediate prefill happens before Generate(), so
                     # include it in both TTFT and total time.
                     ttft = generationStart - runStart + decodeTtft
-                    total = generationStart - runStart + decodeTotal
+                    total = generationStart - runStart + decodeTotal + outputCacheTime
 
                     reuseRatio = (
                         reusedTokens / nInput
@@ -252,12 +267,13 @@ class NaiveTransformer(Method):
                         "reuse_ratio": reuseRatio,
                         "n_input": nInput,
                     },
+                    output_ids=outputIds,
                 )
             )
 
         return results
 
-    def _Result(self, text, ttft, total, nTokens, *, metadata) -> Result:
+    def _Result(self, text, ttft, total, nTokens, *, metadata, output_ids=None) -> Result:
         return Result(
             output=text,
             performance={
@@ -269,6 +285,7 @@ class NaiveTransformer(Method):
                 "backend": self.backend,
                 **metadata,
             },
+            output_ids=output_ids,
         )
 
     def Reset(self) -> None:
@@ -279,7 +296,7 @@ class NaiveTransformer(Method):
         self,
         past: Any,
         lastId: Optional[int],
-        fallbackPrompt: str,
+        fallbackPrompt: List[int],
         retainOutput: bool = False,
         maxNewTokens: Optional[int] = None,
     ):
@@ -297,29 +314,51 @@ class NaiveTransformer(Method):
                 pastKeyValues=past,
                 maxNewTokens=ResolveMaxNewTokens(maxNewTokens),
                 returnCache=retainOutput,
+                returnTokenIds=True,
             )
 
-        ids = self._gen.Encode(fallbackPrompt)
         return self._gen.Generate(
-            ids,
+            fallbackPrompt,
             maxNewTokens=ResolveMaxNewTokens(maxNewTokens),
             returnCache=retainOutput,
+            returnTokenIds=True,
         )
 
-    def _registerOutput(self, state: Dict[str, Any], text: str, outputIds: List[int], fullCache: Any) -> None:
-        """Register generated tokens as a reusable segment when cache is available."""
-        if not outputIds or fullCache is None:
-            return
+    def _registerOutput(
+        self,
+        state: Dict[str, Any],
+        outputIds: List[int],
+        fullCache: Any,
+        promptLength: int,
+    ) -> float:
+        """Register the native output fragment with its exact generated KV.
+
+        The helper completes the final sampled non-stop token before return.
+        A terminal stop EOS is excluded from both the retained IDs and cache.
+        Every other token, including internal special IDs, remains verbatim.
+        """
+        started = time.perf_counter()
+        if not outputIds:
+            return time.perf_counter() - started
+        tokenIds = list(outputIds)
+        cache = fullCache
+        cacheStart = int(promptLength)
+        expectedLength = cacheStart + len(tokenIds)
+        if cache is None or int(cache.get_seq_length()) != expectedLength:
+            raise AssertionError("native output KV length differs from retained token IDs")
         pairs = []
-        for k, v in CacheLayerPairs(fullCache):
-            pairs.append((k[:, :, -len(outputIds):, :].detach(), v[:, :, -len(outputIds):, :].detach()))
-        state["segments"].append(text)
-        state["ids"].append(outputIds)
+        for k, v in CacheLayerPairs(cache):
+            if k.shape[-2] != expectedLength or v.shape[-2] != expectedLength:
+                raise AssertionError("native output KV layer length differs from retained token IDs")
+            pairs.append((k[:, :, cacheStart:expectedLength, :].detach(), v[:, :, cacheStart:expectedLength, :].detach()))
+        state["segments"].append(tokenIds)
+        state["ids"].append(tokenIds)
         state["caches"].append(pairs)
+        return time.perf_counter() - started
 
     def _prefillChunks(
         self,
-        chunks: List[str],
+        chunks: List[List[int]],
     ) -> Tuple[List[Any], List[List[int]]]:
         """Prefill each prepared chunk independently.
 
@@ -331,10 +370,7 @@ class NaiveTransformer(Method):
         idsList: List[List[int]] = []
 
         for chunk in chunks:
-            ids = self._gen.Encode(
-                chunk,
-                addSpecialTokens=False,
-            )
+            ids = list(chunk)
 
             idsList.append(ids)
 

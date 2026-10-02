@@ -18,7 +18,10 @@ Modules:
 - :mod:`helpers.backends.Prompt` — splitting a case's complete prompt into
   the shared context and the fresh suffix for the reuse methods.
 
-These five modules are unrelated to :mod:`helpers.benchflow` and
+- :mod:`helpers.backends.Tokenization` — Task-side encoding of prompt chunks
+  into token IDs.
+
+These modules are unrelated to :mod:`helpers.benchflow` and
 :mod:`methods.Cacheblend`; they live together only because they share
 the same audience (Methods / Tasks) and the same dependency direction (→
 :mod:`core` only).

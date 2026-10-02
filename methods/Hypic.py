@@ -308,6 +308,9 @@ class HypicMethod(Method):
         self._states: List[Dict[str, Any]] = []
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
+        raise NotImplementedError(
+            "HYPIC token ID interface pending; method is temporarily deferred"
+        )
         super().Initialize(gpuIds)
         if not self.modelPath:
             raise ValueError("ModelPath is empty; set it in config.yaml")

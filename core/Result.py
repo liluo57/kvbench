@@ -6,7 +6,7 @@ metrics (TTFT, throughput, ...) can be computed.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 #: End-to-end online time to the first output token, in seconds.
 #:
@@ -15,7 +15,8 @@ from typing import Any, Dict, List
 #: dependent lookup, composition, cache assembly/transformation, selection,
 #: repair, fresh prefill, transfers, IPC, and backend queueing are included.
 #: ``Method.Initialize`` and reusable state built by ``Method.Prepare`` are
-#: outside this measurement.
+#: outside this measurement. Task-side prompt tokenization is performed before
+#: the Method call and is also outside this measurement.
 TtftKey = "ttft"
 #: Number of generated (output) tokens.
 NumOutputTokensKey = "num_output_tokens"
@@ -40,6 +41,12 @@ class Result:
     output: Any = None
     performance: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    #: Authoritative generated token fragment when a backend exposes it.
+    #: Terminal stop IDs are outside the fragment; interior special IDs stay
+    #: in it. Multi-turn workflows pass this sequence through unchanged for
+    #: retained-KV identity. Decoded ``output`` remains for display/scoring
+    #: and must not be re-encoded as a substitute for these IDs.
+    output_ids: Optional[List[int]] = None
 
 
 # ---------------------------------------------------------------------------

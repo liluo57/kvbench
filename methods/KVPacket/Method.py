@@ -12,13 +12,14 @@ from core.Config import DefaultConfigPath, Get, ModelPath as DefaultModelPath
 from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import IsGreedy, ResolveSamplingConfig
+from helpers.backends.Tokenization import OutputFragmentIds, TerminalStopIdsFromTokenizer
 
 
 @dataclass
 class _CaseState:
-    """Prepared packet store and source texts for one KVBench case."""
+    """Prepared packet store and source token sequences for one case."""
 
-    chunks: List[str]
+    chunks: List[List[int]]
     store: Any
 
 
@@ -88,8 +89,11 @@ class KVPacket(Method):
             trailerLen if trailerLen is not None else cfg.get("TrailerLen", 8)
         )
         self.match = str(match or cfg.get("Match", "token"))
-        if self.match not in ("token", "string"):
-            raise ValueError("KVPacket match must be 'token' or 'string'")
+        if self.match != "token":
+            raise ValueError(
+                "KVPacket token-native input supports Match='token'; string matching "
+                "requires source text and offsets"
+            )
         configured_untrained = (
             allowUntrainedWrapper
             if allowUntrainedWrapper is not None
@@ -106,6 +110,7 @@ class KVPacket(Method):
         self._torch = None
         self._model = None
         self._tokenizer = None
+        self._terminalStopIds: List[int] = []
         self._backend = None
         self._kv = None
         self._wrapper = None
@@ -141,6 +146,9 @@ class KVPacket(Method):
             device = "cpu"
 
         self._tokenizer = AutoTokenizer.from_pretrained(self.modelPath)
+        self._terminalStopIds = TerminalStopIdsFromTokenizer(
+            self._tokenizer, self.samplingConfig
+        )
         model_dtype = getattr(torch, self.dtype)
         try:
             self._model = AutoModelForCausalLM.from_pretrained(
@@ -273,15 +281,14 @@ class KVPacket(Method):
         self._wrapper_format = "legacy_tensor_checkpoint"
         return wrapper
 
-    def Prepare(self, data: List[List[str]]) -> None:
-        """Materialize one packet store per case from the reusable chunks."""
+    def Prepare(self, data: List[List[List[int]]]) -> None:
+        """Materialize one packet store per case from prepared token chunks."""
 
         assert self._kv is not None and self._backend is not None and self._tokenizer is not None
         from .backend.kvpacket import (
             PacketPreprocessor,
             PacketStore,
             RawText,
-            TextSourceEncoder,
             WrapperEntry,
             WrapperRegistry,
         )
@@ -292,17 +299,14 @@ class KVPacket(Method):
             # ambiguous. Preserve first occurrence order like CacheBlend does.
             raw_chunks = list(raw_chunks or [])
 
-            chunks: list[str] = []
-            seen: set[str] = set()
-            for chunk in raw_chunks:
-                text = str(chunk)
-                # Whitespace-only segments (often emitted by sentence splitters)
-                # are not useful reusable packets and can match many unrelated
-                # token positions. Keep them in the original Run prompt, where
-                # they are forwarded as part of the fresh request text.
-                if text.strip() and text not in seen:
-                    seen.add(text)
-                    chunks.append(text)
+            chunks: list[list[int]] = []
+            seen: set[tuple[int, ...]] = set()
+            for raw_chunk in raw_chunks or []:
+                ids = [int(token) for token in raw_chunk]
+                key = tuple(ids)
+                if ids and key not in seen:
+                    seen.add(key)
+                    chunks.append(ids)
 
             store = PacketStore(backend=self._backend)
             if chunks:
@@ -314,19 +318,25 @@ class KVPacket(Method):
                     backend=self._backend,
                     wrapper_registry=registry,
                     store=store,
-                    source_encoder=TextSourceEncoder(self._tokenizer),
                 )
-                assignments = {}
-                for chunk_index, text in enumerate(chunks):
-                    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+                for chunk_index, ids in enumerate(chunks):
+                    digest = hashlib.sha256(
+                        b"".join(
+                            token.to_bytes(4, "little", signed=True)
+                            for token in ids
+                        )
+                    ).hexdigest()[:16]
                     source_id = f"case{case_index}_chunk{chunk_index}_{digest}"
-                    assignments[RawText(text, source_id=source_id)] = self.wrapperId
-                preprocessor.preprocess(assignments)
+                    preprocessor.preprocess_pretokenized(
+                        RawText("", source_id=source_id),
+                        ids,
+                        wrapper_id=self.wrapperId,
+                    )
             self._states.append(_CaseState(chunks=chunks, store=store))
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -369,13 +379,17 @@ class KVPacket(Method):
             session = PacketSession(
                 backend=self._backend,
                 mode=Mode.SERVE,
-                match=self.match,
+                match="token",
                 store=state.store,
-                tokenizer=self._tokenizer,
+                # IDs are authoritative. Omitting the tokenizer here also
+                # avoids a hidden re-encode while validating prepared packets;
+                # output text is decoded from the native generated IDs below.
+                tokenizer=None,
             )
             if state.store.ids():
                 session.register_store_chunks()
-            session.push(prompt)
+            input_ids = [int(token) for token in prompt]
+            session.push(input_ids)
             generated = session.generate(
                 max_new_tokens=generation_limit,
                 started_at=request_started,
@@ -386,16 +400,19 @@ class KVPacket(Method):
                 # latency; TTFT was already captured at the first visible token.
                 self._torch.cuda.synchronize(self._backend.device)
 
-            input_ids = self._tokenizer(
-                prompt,
-                add_special_tokens=False,
-            )["input_ids"]
             n_input = len(input_ids)
             cached_tokens = int(generated.cached_tokens)
             reuse_ratio = cached_tokens / n_input if n_input else 0.0
+            output_ids = OutputFragmentIds(
+                generated.token_ids,
+                self._terminalStopIds,
+            )
             results.append(
                 Result(
-                    output=generated.text,
+                    output=self._tokenizer.decode(
+                        generated.token_ids, skip_special_tokens=True
+                    ),
+                    output_ids=output_ids,
                     performance={
                         # The start time covers registration, matching, prefill,
                         # and generation through the first visible token.

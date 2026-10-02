@@ -30,7 +30,7 @@ from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig
 
 from helpers.backends.TransformersHelper import TransformersGenerator
-from helpers.backends.VllmHelper import CreateLlm, EncodeIds, GenerateBatch
+from helpers.backends.VllmHelper import CreateLlm, GenerateBatch
 
 
 def _ConfiguredMaxNumSeqs() -> Optional[int]:
@@ -84,18 +84,18 @@ class _FullPrefillBase(Method):
         self.dtype = dtype
 
     # ---------------------------------------------------------------- Method
-    def Prepare(self, data: List[List[str]]) -> None:
+    def Prepare(self, data: List[List[List[int]]]) -> None:
         pass  # FullPrefill recomputes everything; warm-up is irrelevant
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
         raise NotImplementedError
 
-    def _Result(self, text, ttft, total, nTokens, *, metadata) -> Result:
+    def _Result(self, text, ttft, total, nTokens, *, metadata, outputIds=None) -> Result:
         return Result(
             output=text,
             performance={
@@ -104,6 +104,7 @@ class _FullPrefillBase(Method):
                 TotalTimeKey: total,
             },
             metadata={"backend": self.backend, **metadata},
+            output_ids=outputIds,
         )
 
     def Close(self) -> None:
@@ -152,36 +153,41 @@ class FullPrefillTransformer(_FullPrefillBase):
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
         runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
-        idsList = [self._gen.Encode(d) for d in data]
+        # Task supplies the canonical segmented-token sequence.  Keep all
+        # prompt tokenization outside the online Method boundary.
+        idsList = [list(ids) for ids in data]
         # The KVCOMM protocol is request-sequential (batch size 1). Generate()
         # exposes the real first-token boundary; GenerateBatch() can only
         # approximate TTFT from total generation time and must not be used for
         # latency comparisons.
         batchOut = []
-        for ids in idsList:
+        for index, ids in enumerate(idsList):
             generationStart = time.perf_counter()
-            text, backendTtft, total, nTokens = self._gen.Generate(
-                ids, maxNewTokens=maxNewTokens
+            generated = self._gen.Generate(
+                ids, maxNewTokens=maxNewTokens, returnTokenIds=True
             )
+            text, backendTtft, total, nTokens, outputIds = generated
             batchOut.append(
                 (
                     text,
                     generationStart - runStart + backendTtft,
                     generationStart - runStart + total,
                     nTokens,
+                    outputIds,
                 )
             )
         return [
             self._Result(
-                text, ttft, total, nTokens, metadata={"n_input": len(ids)}
+                text, ttft, total, nTokens, metadata={"n_input": len(ids)},
+                outputIds=outputIds,
             )
-            for (text, ttft, total, nTokens), ids in zip(batchOut, idsList)
+            for (text, ttft, total, nTokens, outputIds), ids in zip(batchOut, idsList)
         ]
 
 
@@ -243,7 +249,7 @@ class FullPrefillVllm(_FullPrefillBase):
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -251,14 +257,14 @@ class FullPrefillVllm(_FullPrefillBase):
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         batchOut = GenerateBatch(
             self.llm,
-            data,
+            [list(ids) for ids in data],
             maxNewTokens,
             self.samplingConfig,
             onlineStart=runStart,
         )
         results = []
-        for generation, prompt in zip(batchOut, data):
-            nInput = len(EncodeIds(self.llm, prompt))
+        for generation, ids in zip(batchOut, data):
+            nInput = len(ids)
             results.append(
                 self._Result(
                     generation.text,
@@ -274,6 +280,7 @@ class FullPrefillVllm(_FullPrefillBase):
                         "finish_reason": generation.finishReason,
                         "stop_reason": generation.stopReason,
                     },
+                    outputIds=generation.outputIds,
                 )
             )
         return results

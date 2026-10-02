@@ -23,6 +23,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Union
 
 from core.Sampling import VllmSamplingParams
+from helpers.backends.Tokenization import (
+    OutputFragmentIds,
+    TerminalStopIdsFromTokenizer,
+)
 
 _VllmProbeCache: Dict[str, bool] = {}
 
@@ -180,11 +184,12 @@ class VllmGeneration:
     # tool call to ``tool_calls`` and otherwise default to ``stop``.
     finishReason: Optional[str]
     stopReason: Optional[Union[int, str]]
+    outputIds: List[int]
 
 
 def Generate(
     llm,
-    promptText: str,
+    promptTokenIds: List[int],
     maxNewTokens: int,
     samplingConfig: Optional[Mapping[str, Any]] = None,
 ) -> VllmGeneration:
@@ -205,12 +210,12 @@ def Generate(
     - ``finishReason`` / ``stopReason`` — copied from the final vLLM
       :class:`CompletionOutput`, without going through the OpenAI endpoint.
     """
-    return GenerateBatch(llm, [promptText], maxNewTokens, samplingConfig)[0]
+    return GenerateBatch(llm, [promptTokenIds], maxNewTokens, samplingConfig)[0]
 
 
 def GenerateBatch(
     llm,
-    promptTexts: List[str],
+    promptTokenIds: List[List[int]],
     maxNewTokens: int,
     samplingConfig: Optional[Mapping[str, Any]] = None,
     onlineStart: Optional[float] = None,
@@ -243,11 +248,11 @@ def GenerateBatch(
     # enclosing Method.Run boundary so request-dependent adapter work is added
     # without counting any backend interval twice.
     onlineOffset = 0.0 if onlineStart is None else t0 - onlineStart
-    for i, prompt in enumerate(promptTexts):
+    for i, tokenIds in enumerate(promptTokenIds):
         requestId = f"kvbench-{time.time_ns()}-{i}"
         engine.add_request(
             requestId,
-            prompt,
+            {"prompt_token_ids": list(tokenIds)},
             SamplingParams(
                 **VllmSamplingParams(samplingConfig, maxNewTokens)
             ),
@@ -260,6 +265,8 @@ def GenerateBatch(
     tokenLens: Dict[str, int] = {}
     finishReasons: Dict[str, Optional[str]] = {}
     stopReasons: Dict[str, Optional[Union[int, str]]] = {}
+    outputIdsByRequest: Dict[str, List[int]] = {}
+    tokenizer = llm.get_tokenizer()
     while engine.has_unfinished_requests():
         for out in engine.step():
             if out.request_id not in requestIds:
@@ -284,6 +291,19 @@ def GenerateBatch(
                         completion, "finish_reason", None
                     )
                     stopReasons[rid] = getattr(completion, "stop_reason", None)
+                    terminalStopIds = TerminalStopIdsFromTokenizer(
+                        tokenizer,
+                        samplingConfig,
+                        explicitStopIds=(
+                            [stopReasons[rid]]
+                            if isinstance(stopReasons[rid], int)
+                            and not isinstance(stopReasons[rid], bool)
+                            else ()
+                        ),
+                    )
+                    outputIdsByRequest[rid] = OutputFragmentIds(
+                        completion.token_ids, terminalStopIds
+                    )
     totalTime = time.perf_counter() - t0
     n = len(requestIds) or 1
     amortized = totalTime / n
@@ -297,6 +317,7 @@ def GenerateBatch(
             numCached=numCached.get(rid, 0),
             finishReason=finishReasons.get(rid),
             stopReason=stopReasons.get(rid),
+            outputIds=outputIdsByRequest.get(rid, []),
         )
         for rid in requestIds
     ]

@@ -1,10 +1,12 @@
 """RAG workflow: Prepare → Run execution policy."""
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Union
 
+from core.Config import ModelPath
 from core.Result import Result
 from core.Workflow import Action, ActionKind, ActionResult, Workflow
+from helpers.backends.Tokenization import EncodePrompt
 
 
 @dataclass
@@ -15,13 +17,42 @@ class RAGInput:
     The Task computes prepare_input and run_input during Cases() construction.
 
     Attributes:
-        prepare_input: Text segments fed to Method.Prepare as warmup
+        prepare_input: Independently tokenized segments fed to Method.Prepare as warmup
             (e.g. the document whose KV cache is prefilled).
             Empty list means no warmup.
-        run_input: The complete prompt fed to Method.Run.
+        run_input: The complete token prompt fed to Method.Run.
     """
-    prepare_input: List[str] = field(default_factory=list)
-    run_input: str = ""
+    prepare_input: Union[List[str], List[List[int]]] = field(default_factory=list)
+    run_input: Union[str, List[int]] = field(default_factory=list)
+    modelPath: str = field(default_factory=ModelPath, repr=False)
+
+    def __post_init__(self) -> None:
+        """Compile legacy text inputs into the public token-ID shape."""
+        if isinstance(self.run_input, str):
+            if not all(isinstance(chunk, str) for chunk in self.prepare_input):
+                raise TypeError(
+                    "RAGInput must receive text prepare chunks with a text run prompt"
+                )
+            prepare_ids, run_ids = EncodePrompt(
+                self.prepare_input, self.run_input, self.modelPath
+            )
+            self.prepare_input = prepare_ids
+            self.run_input = run_ids
+            return
+
+        if not isinstance(self.run_input, list) or not all(
+            isinstance(token, int) and not isinstance(token, bool)
+            for token in self.run_input
+        ):
+            raise TypeError("RAGInput.run_input must be prompt text or token IDs")
+        if not isinstance(self.prepare_input, list) or not all(
+            isinstance(chunk, list)
+            and all(isinstance(token, int) and not isinstance(token, bool) for token in chunk)
+            for chunk in self.prepare_input
+        ):
+            raise TypeError(
+                "RAGInput.prepare_input must contain text chunks or token-ID chunks"
+            )
 
 
 class RAGWorkflow(Workflow):

@@ -1,12 +1,17 @@
 from types import SimpleNamespace
 
 import torch
+import pytest
 
 from methods.Cacheblend.backend.cacheblend_ops import (
     RetainedOutputCollector,
     capture_kv,
     indexed_causal_mask,
+    register_retained_output,
 )
+from helpers.backends.Prompt import ComposeInterleavedReuse
+from helpers.backends.Tokenization import OutputFragmentIds
+from methods.Cacheblend.Worker import CacheBlendWorker
 
 
 def test_native_capture_retains_decode_tokens_without_collecting_prefill():
@@ -45,6 +50,57 @@ def test_native_collect_owns_kv_and_does_not_capture_ordinary_decode():
     metadata["collect"] = False
     capture_kv(attention, key, value, -1, metadata)
     assert attention.hack_kv[0].item() == 1
+
+
+def test_retained_fragment_preserves_interior_specials_and_hits_exact_cache_key():
+    output_ids = OutputFragmentIds([31, 99, 32, 2], terminalStopIds=[2])
+    attention = SimpleNamespace(hack_kv=None)
+    collector = RetainedOutputCollector([SimpleNamespace(self_attn=attention)])
+    metadata = {"collect": False, "retain_collector": collector}
+    for value in (1.0, 2.0, 3.0):
+        capture_kv(
+            attention,
+            torch.tensor([[value]]),
+            torch.tensor([[value + 10]]),
+            -1,
+            metadata,
+        )
+    retained = collector.finish()
+    chunk_ids = {}
+    chunk_kv = {}
+
+    retained_tokens = register_retained_output(
+        chunk_ids, chunk_kv, output_ids, retained
+    )
+
+    assert retained_tokens == len(output_ids) == 3
+    assert chunk_ids[tuple(output_ids)] == [31, 99, 32]
+    assert chunk_kv[tuple(output_ids)][0][0].flatten().tolist() == [1.0, 2.0, 3.0]
+    parts = ComposeInterleavedReuse([output_ids], [7, *output_ids, 8])
+    matched = [piece for index, piece in parts if index is not None]
+    assert matched == [output_ids]
+    assert tuple(matched[0]) in chunk_kv
+    worker = object.__new__(CacheBlendWorker)
+    worker._chunkIds = chunk_ids
+    worker._chunkKv = chunk_kv
+    segments, full_ids, sample_kv = worker._ResolveSegments(
+        [[True, output_ids], [False, [77]]]
+    )
+    assert full_ids == [31, 99, 32, 77]
+    assert [segment[0] for segment in segments] == [True, False]
+    assert sample_kv is chunk_kv[tuple(output_ids)]
+
+
+def test_retained_fragment_rejects_incomplete_kv_capture_without_truncating_ids():
+    chunk_ids = {}
+    chunk_kv = {}
+    incomplete = [[torch.ones((2, 1)), torch.ones((2, 1))]]
+
+    with pytest.raises(RuntimeError, match="fewer KV rows than native output IDs"):
+        register_retained_output(chunk_ids, chunk_kv, [31, 32, 33], incomplete)
+
+    assert chunk_ids == {}
+    assert chunk_kv == {}
 
 
 def test_sparse_mask_uses_absolute_positions_for_interleaved_repair():

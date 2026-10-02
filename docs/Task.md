@@ -15,7 +15,7 @@ The `Task` constructor accepts optional `tag` and `maxNewTokens` arguments. A ta
 
 Each `Case` has three parts:
 
-- `input`: task payload, with a type defined by the selected Workflow.
+- `input`: task payload, with a type defined by the selected Workflow. Task and Workflow compile model-visible text into token IDs before Method execution.
 - `workflow`: stateful execution policy that turns the input into Method actions.
 - `metadata`: information needed for scoring, such as reference answers, sample IDs, or other evaluation data.
 
@@ -51,7 +51,9 @@ GovReportTask(maxSamples=64, nChunks=4, maxSampleLength=32768)
 
 Data locations, model paths, and dataset preparation are configured in the root `config.yaml` and `scripts/PrepareDataset.py`.
 
-Most RAG tasks use `workflow.RAGWorkflow.RAGInput`: `prepare_input` contains reusable segments and `run_input` is the complete target prompt. With no warm-up, set `prepare_input=[]`; the Workflow will issue only a RUN action.
+Most RAG tasks use `workflow.RAGWorkflow.RAGInput`: construct it with text `prepare_input` chunks and the complete rendered text `run_input`. The input compiles each reusable chunk independently, locates its occurrences in the final prompt, and concatenates token IDs for reusable and fresh pieces. After construction, `prepare_input` is `list[list[int]]` and `run_input` is `list[int]`. With no warm-up, set `prepare_input=[]`; the Workflow will issue only a RUN action. Chat templates must be applied to the complete prompt before constructing `RAGInput`.
+
+The selected model tokenizer is passed explicitly when compiling inputs. Each reusable chunk and each fresh text gap is tokenized independently, then the resulting token IDs are concatenated in prompt order. Methods receive ordinary `List[int]` prompts and compare reusable chunks against those IDs directly. Generated output IDs stay attached to `Result.output_ids` so multi-turn workflows can reuse native IDs without decoding and re-encoding them.
 
 ## Adding a task
 
@@ -65,6 +67,6 @@ Most RAG tasks use `workflow.RAGWorkflow.RAGInput`: `prepare_input` contains reu
 ## Design checks
 
 - The same Task Case should work with different Methods; scoring must not rely on method-private fields.
-- Prompt construction, chat templates, and segment boundaries affect reuse results. Define them consistently in the task and record the settings.
+- Prompt construction, chat templates, tokenization, and segment boundaries affect reuse results. Define them consistently in the task and record the settings. Reusable chunks are tokenized independently, then joined with independently tokenized fresh spans.
 - Keep task-quality scoring separate from system-efficiency measurement; do not time inference in `Evaluate()`.
 - Task labels and sampling/generation settings should distinguish experimental configurations.

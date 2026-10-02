@@ -11,6 +11,7 @@ from core.Result import Result, TtftKey
 from core.Workflow import Action, ActionKind, ActionResult, Workflow
 
 from helpers.backends import ModelAdapter
+from helpers.backends.Tokenization import EncodeChunks, EncodePrompt
 from helpers.benchflow import BenchflowRunner, RemoteBenchflowRunner
 from helpers.benchflow.SkillMode import (
     NormalizeSkillMode,
@@ -291,10 +292,17 @@ class AgentBenchFlowWorkflow(Workflow):
         if not self._firstRunPromptBuilt:
             self._firstRunPromptBuilt = True
             prompt = self._BuildFirstRunPrompt(request)
+        _, promptIds = EncodePrompt(
+            self._skillDocuments
+            if self._data.skill_mode == SKILL_MODE_WITH_SKILL
+            else [],
+            prompt,
+            ModelPath(),
+        )
         return Action(
             kind=ActionKind.RUN,
             case_id=self.case_id,
-            data=prompt,
+            data=promptIds,
             tag="agent_turn",
             retainOutput=False,
         )
@@ -435,7 +443,7 @@ class AgentBenchFlowWorkflow(Workflow):
                 Action(
                     kind=ActionKind.PREPARE,
                     case_id=self.case_id,
-                    data=list(self._skillDocuments),
+                    data=EncodeChunks(self._skillDocuments, ModelPath()),
                     tag="skill_documents",
                 )
             ]

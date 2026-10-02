@@ -15,8 +15,18 @@ import time
 
 if __package__:
     from .backend.cacheblend_ops import RetainedOutputCollector
+    from .backend.cacheblend_ops import register_retained_output
 else:
     from backend.cacheblend_ops import RetainedOutputCollector
+    from backend.cacheblend_ops import register_retained_output
+
+# The helper process is launched from its script path with PYTHONPATH cleared.
+# Add the repository root so its output-fragment contract stays identical to
+# the parent Method and Workflow without importing model-serving code there.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+from helpers.backends.Tokenization import OutputFragmentIds, TerminalStopIdsFromTokenizer
 
 
 def _load_backend():
@@ -131,6 +141,7 @@ class CacheBlendWorker:
         self._torch = __import__("torch")
         print(f"[cacheblend-helper] loading model {args.model} ...", flush=True)
         modelPath = _prepare_model_for_cacheblend(args.model)
+        self.modelPath = modelPath
         if modelPath != args.model:
             print(
                 "[cacheblend-helper] using HF sharded checkpoint view "
@@ -165,6 +176,9 @@ class CacheBlendWorker:
         self.tokenizer = AutoTokenizer.from_pretrained(
             modelPath, **({"use_fast": False} if self._isQwen3 else {}))
         self.llm.set_tokenizer(self.tokenizer)
+        self.terminalStopIds = TerminalStopIdsFromTokenizer(
+            self.tokenizer, self.samplingConfig
+        )
         self.sampling_params = SamplingParams
 
         engine = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
@@ -175,13 +189,13 @@ class CacheBlendWorker:
         self.cfm["recomp_ratio"] = args.recomp_ratio
         self.cfm["_base_recomp_ratio"] = float(args.recomp_ratio)
 
-        #: Per-chunk cached KV, keyed by the chunk's exact text: chunk text ->
+        #: Per-chunk cached KV, keyed by the exact token sequence: tuple(ids) ->
         #: per-layer ``[[k, v], ...]``. Collected once per batch in ``collect``,
         #: consumed in ``fuse`` in whatever (run) order the method needs. The
         #: tensors stay on the worker GPU so serving never stages KV through
         #: host memory.
         self._chunkKv = {}
-        #: Per-chunk token ids, keyed the same way.
+        #: Per-chunk token ids, keyed by the exact token sequence.
         self._chunkIds = {}
         #: Per-layer dense K/V buffers used to assemble reordered/interleaved
         #: prompts. They grow before a run batch, then are overwritten in-place
@@ -276,8 +290,8 @@ class CacheBlendWorker:
             out.append([k.clone(), v.clone()])
         return out
 
-    def _CollectGroup(self, texts: list, idsList: list, depth: int = 0) -> None:
-        """Collect a batch of chunk sequences; store per-chunk KV keyed by text.
+    def _CollectGroup(self, idsList: list, depth: int = 0) -> None:
+        """Collect a batch of chunk sequences; store per-chunk KV by token IDs.
 
         All chunk sequences go in one ``llm.generate`` call — each chunk is its
         own sequence, so attention stays chunk-isolated. vLLM concatenates the
@@ -312,11 +326,11 @@ class CacheBlendWorker:
             # collection allocates owned chunks for both halves.
             del kvBatch
             self._ClearHackKv()
-            self._CollectGroup(texts[:mid], idsList[:mid], depth + 1)
-            self._CollectGroup(texts[mid:], idsList[mid:], depth + 1)
+            self._CollectGroup(idsList[:mid], depth + 1)
+            self._CollectGroup(idsList[mid:], depth + 1)
             return
         off = 0
-        for text, ids in zip(texts, idsList):
+        for ids in idsList:
             n = len(ids)
             # Keep owned slices on GPU. The benchmark now uses batch=4; the
             # previous CPU staging existed for the old batch=32 configuration
@@ -328,46 +342,46 @@ class CacheBlendWorker:
                 ]
                 for j in range(len(self.layers))
             ]
-            self._chunkIds[text] = ids
-            self._chunkKv[text] = kv
+            key = tuple(ids)
+            self._chunkIds[key] = ids
+            self._chunkKv[key] = kv
             off += n
         self._ClearHackKv()
 
     def Collect(self, chunks: list):
-        """Cache every chunk's KV in isolation, batched across the input list.
+        """Cache every token chunk in isolation, batched across the input list.
 
-        Chunks already collected (same text, e.g. two cases sharing the RULER
-        head) are skipped — the isolated KV is content-deterministic and the
+        Chunks already collected (same token IDs, e.g. two cases sharing the
+        RULER head) are skipped — the isolated KV is content-deterministic and the
         fuse re-rotates it to each run's positions, so sharing is safe.
         """
-        encoded = []
+        idsList = []
         seen = set()
-        for text in chunks:
-            if text in self._chunkIds or text in seen:
+        for rawIds in chunks:
+            ids = [int(token) for token in rawIds]
+            key = tuple(ids)
+            if not ids or key in self._chunkIds or key in seen:
                 continue
-            seen.add(text)
-            ids = self.tokenizer.encode(text, add_special_tokens=False)
-            if not ids:
-                continue
-            encoded.append((text, ids))
+            seen.add(key)
+            idsList.append(ids)
         budget = self.args.max_collect_tokens
         groups = []
         cur, curLen = [], 0
-        for text, ids in encoded:
+        for ids in idsList:
             if cur and curLen + len(ids) > budget:
                 groups.append(cur)
                 cur, curLen = [], 0
-            cur.append((text, ids))
+            cur.append(ids)
             curLen += len(ids)
         if cur:
             groups.append(cur)
         for group in groups:
-            self._CollectGroup([t for t, _ in group], [ids for _, ids in group])
+            self._CollectGroup(group)
         self.cfm["collect"] = False
         return {
             "ok": True,
-            "n_chunks": len(encoded),
-            "n_tokens": sum(len(ids) for _, ids in encoded),
+            "n_chunks": len(idsList),
+            "n_tokens": sum(len(ids) for ids in idsList),
         }
 
     # ---------------------------------------------------------------- fuse
@@ -405,26 +419,35 @@ class CacheBlendWorker:
         ttft = r.metrics.first_token_time - backendWallStart
         resp = r.outputs[0]
         token_ids = list(resp.token_ids)
-        visible_ids = token_ids[:maxNewTokens]
+        raw_visible_ids = token_ids[:maxNewTokens]
+        stop_reason = getattr(resp, "stop_reason", None)
+        explicit_stop_ids = (
+            [int(stop_reason)]
+            if isinstance(stop_reason, int) and not isinstance(stop_reason, bool)
+            else []
+        )
+        terminal_stop_ids = [*self.terminalStopIds, *explicit_stop_ids]
+        output_ids = OutputFragmentIds(raw_visible_ids, terminal_stop_ids)
         retained = self._endRetainOutput() if retain_output else None
         retained_tokens = 0
-        if retain_output and retained is not None:
-            n = min(len(visible_ids), retained[0][0].shape[0])
-            retained_tokens = n
-            if n:
-                text = self.tokenizer.decode(visible_ids, skip_special_tokens=True)
-                self._chunkIds[text] = visible_ids[:n]
-                self._chunkKv[text] = [[kv[0][:n], kv[1][:n]] for kv in retained]
-            else:
-                text = self.tokenizer.decode(visible_ids, skip_special_tokens=True)
+        if retain_output:
+            retained_tokens = register_retained_output(
+                self._chunkIds,
+                self._chunkKv,
+                output_ids,
+                retained,
+                expected_layers=len(self.layers),
+            )
+            text = self.tokenizer.decode(output_ids, skip_special_tokens=True)
         else:
             text = resp.text
         return {
             "ok": True,
             "text": text,
+            "output_token_ids": output_ids,
             "ttft": round(float(ttft), 6),
             "generation_start": t0,
-            "num_tokens": len(visible_ids),
+            "num_tokens": len(raw_visible_ids),
             "retained_tokens": retained_tokens,
             "total_time": round(float(time.perf_counter() - t0), 6),
             "n_input": len(fullIds),
@@ -445,16 +468,19 @@ class CacheBlendWorker:
             if not isinstance(part, (list, tuple)) or len(part) != 2:
                 raise ValueError(f"fuse: invalid part {part!r}")
 
-            cached, text = bool(part[0]), part[1]
+            cached, rawIds = bool(part[0]), part[1]
+            ids = [int(token) for token in rawIds]
             if cached:
-                if text not in self._chunkKv:
-                    raise ValueError(f"fuse: chunk not collected: {text[:60]!r}")
-                ids = self._chunkIds[text]
-                kv = self._chunkKv[text]
+                key = tuple(ids)
+                if key not in self._chunkKv:
+                    raise ValueError(
+                        f"fuse: chunk not collected: token_ids={ids[:16]!r}"
+                    )
+                ids = self._chunkIds[key]
+                kv = self._chunkKv[key]
                 if sampleKv is None:
                     sampleKv = kv
             else:
-                ids = self.tokenizer.encode(text, add_special_tokens=False)
                 kv = None
 
             if not ids:
@@ -526,10 +552,10 @@ class CacheBlendWorker:
         ``parts`` has the form::
 
             [
-                [True,  cachedText],
-                [False, freshText],
-                [True,  cachedText],
-                [False, freshText],
+                [True,  cached_token_ids],
+                [False, fresh_token_ids],
+                [True,  cached_token_ids],
+                [False, fresh_token_ids],
             ]
 
         Cached spans use KV collected by :meth:`Collect`.
@@ -642,7 +668,7 @@ class CacheBlendWorker:
     def FuseSuffix(
         self,
         chunks: list,
-        suffix: str,
+        suffix: list,
         retain_output: bool = False,
         max_new_tokens=None,
     ):
@@ -652,21 +678,19 @@ class CacheBlendWorker:
 
         ctxIds = []
         ctxKv = []
-        for text in chunks:
-            if text not in self._chunkIds:
+        for rawIds in chunks:
+            ids = [int(token) for token in rawIds]
+            key = tuple(ids)
+            if key not in self._chunkIds:
                 return {
                     "ok": False,
-                    "error": f"fuse: chunk not collected: {text[:60]!r}",
+                    "error": f"fuse: chunk not collected: token_ids={ids[:16]!r}",
                 }
-            ctxIds.append(self._chunkIds[text])
-            ctxKv.append(self._chunkKv[text])
+            ctxIds.append(self._chunkIds[key])
+            ctxKv.append(self._chunkKv[key])
 
         nLayers = len(self.layers)
-        sufIds = (
-            self.tokenizer.encode(suffix, add_special_tokens=False)
-            if suffix
-            else []
-        )
+        sufIds = [int(token) for token in suffix]
 
         fullIds = [i for ids in ctxIds for i in ids]
         ctxGpu = [
@@ -706,9 +730,9 @@ class CacheBlendWorker:
         resp["reuse_ratio"] = self._reuseRatio(len(fullIds), reusedTokens)
         return resp
 
-    def Full(self, text: str, retain_output: bool = False, max_new_tokens=None):
+    def Full(self, ids: list, retain_output: bool = False, max_new_tokens=None):
         """Generate the whole prompt from scratch (no reuse of cached KVs)."""
-        ids = self.tokenizer.encode(text, add_special_tokens=False)
+        ids = [int(token) for token in ids]
         if not ids:
             return {"ok": False, "error": "empty prompt"}
         self.cfm["collect"] = False
@@ -739,7 +763,7 @@ class CacheBlendWorker:
                 req = json.loads(line)
                 op = req.get("op")
                 if op == "collect":
-                    _stdout(self.Collect(req["chunks"]))
+                    _stdout(self.Collect(req["chunk_ids"]))
                 elif op == "reserve":
                     _stdout(self.Reserve(req.get("parts_batch", [])))
                 elif op == "fuse":
@@ -755,7 +779,7 @@ class CacheBlendWorker:
                         _stdout(
                             self.FuseSuffix(
                                 req["chunks"],
-                                req.get("suffix", ""),
+                                req.get("suffix_ids", []),
                                 bool(req.get("retain_output", False)),
                                 req.get("max_new_tokens"),
                             )
@@ -763,7 +787,7 @@ class CacheBlendWorker:
                 elif op == "full":
                     _stdout(
                         self.Full(
-                            req["text"],
+                            req["input_ids"],
                             bool(req.get("retain_output", False)),
                             req.get("max_new_tokens"),
                         )

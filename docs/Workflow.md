@@ -7,7 +7,7 @@ A Workflow defines the order of requests and how reusable state is shared across
 The main types in `core.Workflow` are:
 
 - `ActionKind.PREPARE` / `ActionKind.RUN`: distinguish cache preparation from inference.
-- `Action(kind, case_id, data, tag="", retainOutput=False)`: one request action. PREPARE `data` is a `list[str]`; RUN `data` is a complete prompt string. `tag` identifies an agent or step. `retainOutput` hints that a later request may reuse this generated state.
+- `Action(kind, case_id, data, tag="", retainOutput=False)`: one request action. PREPARE `data` is a `list[list[int]]` of independently tokenized chunks; RUN `data` is the complete prompt as `list[int]`. `tag` identifies an agent or step. `retainOutput` hints that a later request may reuse this generated state.
 - `ActionResult(case_id, result, tag="")`: result returned by the Engine after executing an Action.
 - `Workflow.next()`: returns the next list of Actions, or `None` when the workflow is complete.
 - `Workflow.observe(results)`: receives results from the previous step and updates workflow state.
@@ -19,7 +19,7 @@ Every call to `next()` must return Actions of a single kind; PREPARE and RUN act
 
 ### `RAGWorkflow`
 
-Driven by `RAGInput(prepare_input, run_input)`. If `prepare_input` is non-empty, it issues one PREPARE followed by one RUN. Otherwise it issues only a RUN. This workflow is used for static requests such as RULER, knowledge-base QA, and summarization.
+Driven by `RAGInput(prepare_input, run_input)`. Tasks commonly provide rendered text to `RAGInput`, which compiles reusable chunks and fresh prompt spans into token IDs before the workflow emits actions. After construction, `prepare_input` is a `list[list[int]]` and `run_input` is a `list[int]`. If `prepare_input` is non-empty, it issues one PREPARE followed by one RUN. Otherwise it issues only a RUN. This workflow is used for static requests such as RULER, knowledge-base QA, and summarization.
 
 ```python
 data = RAGInput(prepare_input=[document_a, document_b], run_input=full_prompt)

@@ -14,7 +14,7 @@ Key constraint:
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from .Result import Result
 
@@ -39,15 +39,15 @@ class Action:
     Attributes:
         kind: PREPARE or RUN
         case_id: Identifies which Case this Action belongs to (for batch distinction)
-        data: PREPARE → List[str] (warmup segments)
-              RUN → str (complete prompt)
+        data: PREPARE → List[List[int]] (independently tokenized warmup chunks)
+              RUN → List[int] (complete token prompt)
         tag: Optional step label, e.g. "agent_A", "agent_B"
         retainOutput: For RUN actions, whether generated output may be reused
             by later requests of the same case. This is a hint, not a guarantee.
     """
     kind: ActionKind
     case_id: int
-    data: Any  # List[str] for PREPARE, str for RUN
+    data: Union[List[List[int]], List[int]]
     tag: str = ""
     retainOutput: bool = False
 

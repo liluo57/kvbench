@@ -39,6 +39,7 @@ from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import IsGreedy, ResolveSamplingConfig
 
 from helpers.backends.Prompt import ComposeInterleavedReuse
+from helpers.backends.Tokenization import OutputFragmentIds
 
 
 def _rotate_half(x):
@@ -77,7 +78,6 @@ def _fuse_layer_scores(layer_scores):
 
 @dataclass
 class _ChunkCache:
-    text: str
     ids: List[int]
     # One (unrotated K, V) pair per decoder layer.
     layers: List[Tuple[Any, Any]]
@@ -85,7 +85,7 @@ class _ChunkCache:
 
 @dataclass
 class _CaseState:
-    chunks: List[str]
+    chunks: List[List[int]]
     caches: List[_ChunkCache]
 
 
@@ -557,9 +557,9 @@ class _DenseProphetRuntime:
         return output_hidden, full_k, full_v
 
     # ------------------------------------------------------------- cache build
-    def prefill_isolated(self, ids: Sequence[int], text: str) -> _ChunkCache:
+    def prefill_isolated(self, ids: Sequence[int]) -> _ChunkCache:
         if not ids:
-            return _ChunkCache(text=text, ids=[], layers=[])
+            return _ChunkCache(ids=[], layers=[])
         torch = self.torch
         # All positions are active in an isolated chunk, so use one batched
         # tensor per layer instead of the quadratic Python token loop.
@@ -580,7 +580,7 @@ class _DenseProphetRuntime:
                 # Store unrotated K: runtime position is applied at scoring and
                 # recomputation time, which makes chunks position-independent.
                 layer_caches.append((k_raw.detach(), value.detach()))
-        return _ChunkCache(text=text, ids=list(ids), layers=layer_caches)
+        return _ChunkCache(ids=list(ids), layers=layer_caches)
 
     # -------------------------------------------------------------- Stage I
     def independent_query_q(self, query_ids: Sequence[int], offset: int):
@@ -922,12 +922,19 @@ class _DenseProphetRuntime:
                     )
             layers_cache = new_layers
             logits = self.lm_head(self.final_norm(hidden))[0, -1]
-        return self.decode(generated), float(ttft or 0.0), time.perf_counter() - t0, len(generated)
+        output_fragment = OutputFragmentIds(generated, self.eos_ids)
+        return (
+            self.decode(generated),
+            float(ttft or 0.0),
+            time.perf_counter() - t0,
+            len(generated),
+            output_fragment,
+        )
 
     def full_generate(self, ids: Sequence[int]):
         """Reference full-prefill path used when reuse cannot be established."""
         if not ids:
-            return "", 0.0, 0.0, 0
+            return "", 0.0, 0.0, 0, []
         full_start = time.perf_counter()
         context_ids = list(ids)
         empty = []
@@ -949,7 +956,7 @@ class _DenseProphetRuntime:
             [],
         )
         prefill_ttft = time.perf_counter() - full_start
-        text, decode_ttft, decode_total, n_tokens = self.decode_from_cache(
+        text, decode_ttft, decode_total, n_tokens, output_ids = self.decode_from_cache(
             cache, logits, list(context_ids)
         )
         return (
@@ -957,6 +964,7 @@ class _DenseProphetRuntime:
             prefill_ttft + decode_ttft,
             decode_total,
             n_tokens,
+            output_ids,
         )
 
 
@@ -1007,17 +1015,16 @@ class ProphetKV(Method):
             sampling_config=self.samplingConfig,
         )
 
-    def Prepare(self, data: List[List[str]]) -> None:
+    def Prepare(self, data: List[List[List[int]]]) -> None:
         if self._runtime is None:
             raise RuntimeError("ProphetKV.Initialize must run before Prepare")
         self._states = []
         for case_index, chunks in enumerate(data):
-            texts = list(chunks or [])
+            token_chunks = [list(chunk) for chunk in (chunks or [])]
             caches = []
-            for chunk_index, text in enumerate(texts):
-                ids = self._runtime.encode(text, add_special_tokens=False)
+            for chunk_index, ids in enumerate(token_chunks):
                 t_chunk = time.perf_counter()
-                cache = self._runtime.prefill_isolated(ids, text)
+                cache = self._runtime.prefill_isolated(ids)
                 caches.append(cache)
                 if self.debug:
                     print(
@@ -1025,11 +1032,11 @@ class ProphetKV(Method):
                         f"tokens={len(ids)} seconds={time.perf_counter() - t_chunk:.3f}",
                         flush=True,
                     )
-            self._states.append(_CaseState(chunks=texts, caches=caches))
+            self._states.append(_CaseState(chunks=token_chunks, caches=caches))
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
     ) -> List[Result]:
         request_start = time.perf_counter()
@@ -1042,24 +1049,25 @@ class ProphetKV(Method):
         # reconstruction, scoring, stitching, and recomputation are query-time
         # work and are all measured from the Run boundary above.
         for index, prompt in enumerate(data):
+            prompt_ids = list(prompt)
             state = self._states[index]
             t_match = time.perf_counter()
-            parts = ComposeInterleavedReuse(state.chunks, prompt)
+            parts = ComposeInterleavedReuse(state.chunks, prompt_ids)
             reused_positions = [
                 i for i, (chunk_index, _) in enumerate(parts) if chunk_index is not None
             ]
             if self.debug:
                 print(
-                    f"[ProphetKV] match case={index} prompt_chars={len(prompt)} "
+                    f"[ProphetKV] match case={index} prompt_tokens={len(prompt_ids)} "
                     f"parts={len(parts)} reused_parts={len(reused_positions)} "
                     f"seconds={time.perf_counter() - t_match:.3f}",
                     flush=True,
                 )
             if not reused_positions:
                 t0 = time.perf_counter()
-                ids = self._runtime.encode(prompt)
+                ids = prompt_ids
                 generation_start = time.perf_counter()
-                text, backend_ttft, total, n_tokens = self._runtime.full_generate(ids)
+                text, backend_ttft, total, n_tokens, output_ids = self._runtime.full_generate(ids)
                 ttft = generation_start - request_start + backend_ttft
                 results.append(
                     self._result(
@@ -1078,6 +1086,7 @@ class ProphetKV(Method):
                             "stage2_select_time": 0.0,
                             "stage2_recompute_time": time.perf_counter() - t0,
                         },
+                        outputIds=output_ids,
                     )
                 )
                 continue
@@ -1102,7 +1111,7 @@ class ProphetKV(Method):
 
             for part_index, (chunk_index, span) in enumerate(parts):
                 if chunk_index is None and span:
-                    ids = self._runtime.encode(span, add_special_tokens=False)
+                    ids = list(span)
                     start = len(full_ids)
                     full_ids.extend(ids)
                     positions = list(range(start, start + len(ids)))
@@ -1214,7 +1223,7 @@ class ProphetKV(Method):
             recompute_only_time = time.perf_counter() - t_recompute
             history = list(full_ids)
             t_decode = time.perf_counter()
-            text, decode_ttft, total, n_tokens = self._runtime.decode_from_cache(
+            text, decode_ttft, total, n_tokens, output_ids = self._runtime.decode_from_cache(
                 updated, logits, history
             )
             decode_wall_time = time.perf_counter() - t_decode
@@ -1256,20 +1265,21 @@ class ProphetKV(Method):
                         "fallback_reason": None,
                         "fallback_rate": 0.0,
                     },
+                    outputIds=output_ids,
                 )
             )
         return results
 
     def _fallback(
-        self, prompt: str, reason: str, request_start: Optional[float] = None
+        self, prompt: List[int], reason: str, request_start: Optional[float] = None
     ) -> Result:
         if self._runtime is None:
             raise RuntimeError("ProphetKV.Initialize must run before fallback")
         if request_start is None:
             request_start = time.perf_counter()
-        ids = self._runtime.encode(prompt)
+        ids = list(prompt)
         generation_start = time.perf_counter()
-        text, backend_ttft, total, n_tokens = self._runtime.full_generate(ids)
+        text, backend_ttft, total, n_tokens, output_ids = self._runtime.full_generate(ids)
         ttft = generation_start - request_start + backend_ttft
         return self._result(
             text,
@@ -1288,9 +1298,10 @@ class ProphetKV(Method):
                 "stage2_recompute_time": 0.0,
                 "fallback_rate": 1.0,
             },
+            outputIds=output_ids,
         )
 
-    def _result(self, text, ttft, total, n_tokens, metadata) -> Result:
+    def _result(self, text, ttft, total, n_tokens, metadata, outputIds=None) -> Result:
         return Result(
             output=text,
             performance={
@@ -1299,6 +1310,7 @@ class ProphetKV(Method):
                 TotalTimeKey: float(total),
             },
             metadata={"backend": "prophetkv", **metadata},
+            output_ids=outputIds,
         )
 
     def Reset(self) -> None:

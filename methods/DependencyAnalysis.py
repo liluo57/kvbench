@@ -1,8 +1,8 @@
 """Dependency analysis over the existing transformer FullPrefill path.
 
-The method treats the strings received by ``Prepare`` as the reusable units.
-``Prompt.ComposeInterleavedReuseSpans`` locates those exact units in the RUN
-prompt; no document boundaries are guessed from prompt delimiters.
+The method treats the token-ID lists received by ``Prepare`` as reusable
+units. ``Prompt.ComposeInterleavedReuse`` locates those exact sequences in the
+RUN prompt; no document boundaries are guessed from prompt delimiters.
 
 Generation is deliberately performed by the unmodified
 ``TransformersGenerator.Generate`` path.  Attention instrumentation runs in a
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 import importlib
 import math
 import os
@@ -25,7 +24,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from core.Method import ResolveMaxNewTokens
 from core.Result import Result
-from helpers.backends.Prompt import ComposeInterleavedReuseSpans
+from helpers.backends.Prompt import ComposeInterleavedReuse
 from helpers.backends.TransformersHelper import CacheLayerPairs
 from methods.FullPrefill import FullPrefillTransformer
 
@@ -65,77 +64,10 @@ def _UnavailableCciValues() -> Dict[str, Any]:
 @dataclass(frozen=True)
 class _DocumentOccurrence:
     prepareIndex: int
-    text: str
-    charStart: int
-    charEnd: int
     tokenStart: int
     tokenEnd: int
-    # (full-prompt token index, independent-chunk token index).  A tokenizer
-    # may merge text across a character boundary, so these sequences are not
-    # always identical at the first/last token of a chunk.
     tokenPairs: Tuple[Tuple[int, int], ...]
     independentIds: Tuple[int, ...]
-
-
-def _AlignTokenPairs(
-    fullTokenIndices: Sequence[int],
-    fullTokenIds: Sequence[int],
-    independentIds: Sequence[int],
-) -> List[Tuple[int, int]]:
-    """Align equal token IDs while keeping boundary mismatches out.
-
-    Isolated tokenization normally differs from full-prompt tokenization only
-    at the two chunk edges.  Strip equal edges first so long documents do not
-    needlessly pass their entire token sequence through ``SequenceMatcher``.
-    The matcher remains as a fallback for a tokenizer that changes more than
-    one edge token.
-    """
-    prefix = 0
-    while (
-        prefix < len(fullTokenIds)
-        and prefix < len(independentIds)
-        and fullTokenIds[prefix] == independentIds[prefix]
-    ):
-        prefix += 1
-
-    fullEnd = len(fullTokenIds)
-    independentEnd = len(independentIds)
-    while (
-        fullEnd > prefix
-        and independentEnd > prefix
-        and fullTokenIds[fullEnd - 1] == independentIds[independentEnd - 1]
-    ):
-        fullEnd -= 1
-        independentEnd -= 1
-
-    pairs = [
-        (fullTokenIndices[index], index)
-        for index in range(prefix)
-    ]
-    middleFull = fullTokenIds[prefix:fullEnd]
-    middleIndependent = independentIds[prefix:independentEnd]
-    for fullOffset, independentOffset, size in SequenceMatcher(
-        a=middleFull,
-        b=middleIndependent,
-        autojunk=False,
-    ).get_matching_blocks():
-        pairs.extend(
-            (
-                fullTokenIndices[prefix + fullOffset + delta],
-                prefix + independentOffset + delta,
-            )
-            for delta in range(size)
-        )
-
-    suffixLength = len(fullTokenIds) - fullEnd
-    pairs.extend(
-        (
-            fullTokenIndices[fullEnd + delta],
-            independentEnd + delta,
-        )
-        for delta in range(suffixLength)
-    )
-    return pairs
 
 
 class _DependencyStats:
@@ -598,14 +530,14 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
         if skipK < 0:
             raise ValueError("skipK must not be negative")
         self.skipK = skipK
-        self._chunks: List[List[str]] = []
+        self._chunks: List[List[List[int]]] = []
 
-    def Prepare(self, data: List[List[str]]) -> None:
-        self._chunks = [list(chunks or []) for chunks in data]
+    def Prepare(self, data: List[List[List[int]]]) -> None:
+        self._chunks = [[list(chunk) for chunk in (chunks or [])] for chunks in data]
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -616,7 +548,7 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
 
         results: List[Result] = []
         for index, prompt in enumerate(data):
-            ids = self._gen.Encode(prompt)
+            ids = list(prompt)
             chunks = self._chunks[index]
             start = run_start
 
@@ -625,11 +557,12 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
             # ``kv_deviation`` but must not overlap with the second, full
             # prefill used for attention dependency measurements.
             generation_start = time.perf_counter()
-            text, backend_ttft, _, nTokens, fullCache, _ = self._gen.Generate(
+            text, backend_ttft, _, nTokens, fullCache, rawOutputIds = self._gen.Generate(
                 ids,
                 maxNewTokens=maxNewTokens,
                 returnCache=True,
             )
+            outputIds = self._gen.OutputTokenIds(rawOutputIds)
             ttft = generation_start - run_start + backend_ttft
             # Pass ownership through a mutable holder so _Analyze can clear
             # the only caller-side reference before the attention prefill.
@@ -654,6 +587,7 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
                     total,
                     nTokens,
                     metadata=metadata,
+                    outputIds=outputIds,
                 )
             )
 
@@ -664,9 +598,9 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
 
     def _Analyze(
         self,
-        prompt: str,
+        prompt: Sequence[int],
         ids: List[int],
-        chunks: List[str],
+        chunks: List[List[int]],
         fullCacheHolder: List[Any],
     ) -> Dict[str, Any]:
         occurrences, tokenInfo = self._Occurrences(prompt, ids, chunks)
@@ -725,99 +659,33 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
 
     def _Occurrences(
         self,
-        prompt: str,
+        prompt: Sequence[int],
         ids: List[int],
-        chunks: List[str],
+        chunks: List[List[int]],
     ) -> Tuple[List[_DocumentOccurrence], Dict[int, Tuple[int, int]]]:
         if not chunks:
             return [], {}
 
-        tokenizer = self._gen.tokenizer
-        try:
-            encoded = tokenizer(
-                prompt,
-                add_special_tokens=False,
-                return_offsets_mapping=True,
-            )
-        except (TypeError, NotImplementedError) as exc:
-            raise RuntimeError(
-                "DependencyAnalysisMethod requires a fast tokenizer with "
-                "offset mappings"
-            ) from exc
-
-        tokenIds = encoded["input_ids"]
-        offsets = encoded.get("offset_mapping")
-        if tokenIds and isinstance(tokenIds[0], list):
-            tokenIds = tokenIds[0]
-            if offsets is not None:
-                offsets = offsets[0]
-        if list(tokenIds) != list(ids):
-            raise RuntimeError(
-                "tokenizer IDs differ between Encode() and offset mapping"
-            )
-        if offsets is None:
-            raise RuntimeError("tokenizer did not return offset mappings")
-
         occurrences: List[_DocumentOccurrence] = []
         tokenInfo: Dict[int, Tuple[int, int]] = {}
-        usedTokens = set()
 
-        for prepareIndex, text, charStart, charEnd in ComposeInterleavedReuseSpans(
-            chunks,
-            prompt,
-        ):
-            if prepareIndex is None or not text:
+        cursor = 0
+        for prepareIndex, span in ComposeInterleavedReuse(chunks, list(prompt)):
+            span_ids = list(span)
+            span_start = cursor
+            cursor += len(span_ids)
+            if prepareIndex is None or not span_ids:
                 continue
-
-            overlapping = []
-            for tokenIndex, offset in enumerate(offsets):
-                if offset is None or len(offset) != 2:
-                    continue
-                tokenStart, tokenEnd = offset
-                if tokenEnd > charStart and tokenStart < charEnd:
-                    overlapping.append((tokenIndex, tokenStart, tokenEnd))
-
-            if not overlapping:
-                continue
-
-            tokenStart = overlapping[0][0]
-            tokenEnd = overlapping[-1][0] + 1
-            if [index for index, _, _ in overlapping] != list(
-                range(tokenStart, tokenEnd)
-            ):
-                raise RuntimeError("reusable chunk token span is not contiguous")
-            independentIds = list(
-                self._gen.Encode(text, addSpecialTokens=False)
-            )
-
-            # The full prompt and the isolated chunk have different tokenizer
-            # boundaries.  BPEs can therefore produce e.g. ``'.One'`` in the
-            # former and ``'.'``, ``'One'`` in the latter.  Align by exact
-            # token ID instead of comparing rows by offset; unmatched edge
-            # tokens are intentionally excluded from both measurements.
-            fullTokenIndices = [index for index, _, _ in overlapping]
-            fullTokenIds = [ids[index] for index in fullTokenIndices]
-            tokenPairs = _AlignTokenPairs(
-                fullTokenIndices,
-                fullTokenIds,
-                independentIds,
-            )
-
-            # A crossing token can occur in the offset span of both adjacent
-            # reusable chunks.  Attribute an exact match only once in the
-            # full prompt, avoiding duplicate query rows and KV samples.
+            independentIds = span_ids
+            tokenStart = span_start
+            tokenEnd = span_start + len(span_ids)
             tokenPairs = [
-                (fullIndex, independentIndex)
-                for fullIndex, independentIndex in tokenPairs
-                if fullIndex not in usedTokens
+                (tokenStart + local_index, local_index)
+                for local_index in range(len(span_ids))
             ]
-            usedTokens.update(fullIndex for fullIndex, _ in tokenPairs)
 
             occurrence = _DocumentOccurrence(
                 prepareIndex=prepareIndex,
-                text=text,
-                charStart=charStart,
-                charEnd=charEnd,
                 tokenStart=tokenStart,
                 tokenEnd=tokenEnd,
                 tokenPairs=tuple(tokenPairs),

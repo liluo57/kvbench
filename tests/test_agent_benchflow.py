@@ -11,7 +11,7 @@ import pytest
 from core.Result import Result, TtftKey
 from core.Workflow import ActionKind, ActionResult
 from helpers.backends import ModelAdapter
-from helpers.backends.Prompt import ComposeInterleavedReuse
+from helpers.backends.Prompt import ComposeInterleavedReuseText
 from helpers.benchflow import BenchflowRunner
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
 from tasks.AgentBenchFlowTask import AgentBenchFlowTask
@@ -34,6 +34,21 @@ def fakeSkillsbench(tmp_path):
         taskDir.mkdir(parents=True)
         (taskDir / "task.md").write_text(f"# {taskId}\n", encoding="utf-8")
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def fakeTaskTokenizer(monkeypatch):
+    class FakeTokenizer:
+        all_special_ids = []
+
+        def encode(self, text, add_special_tokens=False):
+            return [ord(character) for character in text]
+
+    monkeypatch.setattr(ModelAdapter, "_tokenizer", lambda _path: FakeTokenizer())
+
+
+def _decodeTokenPrompt(prompt):
+    return "".join(chr(token) for token in prompt)
 
 
 @pytest.fixture
@@ -532,11 +547,11 @@ def test_workflow_bridges_multiple_turns_and_retains_output():
     action = workflow.next()[0]
     assert runner.started
     assert action.kind.value == "run"
-    assert action.data == "first rendered prompt"
+    assert _decodeTokenPrompt(action.data) == "first rendered prompt"
     assert action.retainOutput is False
     workflow.observe([ActionResult(3, Result(output="first output"))])
     assert runner.responses == [(first, "first output")]
-    assert workflow.next()[0].data == "second rendered prompt"
+    assert _decodeTokenPrompt(workflow.next()[0].data) == "second rendered prompt"
     workflow.observe([ActionResult(3, Result(output="second output"))])
     assert workflow.next() is None
     assert workflow.finished
@@ -593,14 +608,16 @@ def test_workflow_prepares_only_skill_documents_before_the_original_run_prompt()
 
     prepare = workflow.next()[0]
     assert prepare.kind == ActionKind.PREPARE
-    assert prepare.data == [_CanonicalSkillDocument(skill)]
-    assert "available skills" not in prepare.data[0]
-    assert "TASK:" not in prepare.data[0]
+    assert [_decodeTokenPrompt(chunk) for chunk in prepare.data] == [
+        _CanonicalSkillDocument(skill)
+    ]
+    assert "available skills" not in _decodeTokenPrompt(prepare.data[0])
+    assert "TASK:" not in _decodeTokenPrompt(prepare.data[0])
 
     workflow.observe([ActionResult(3, Result())])
     secondAction = workflow.next()[0]
     assert secondAction.kind == ActionKind.RUN
-    assert secondAction.data == "second rendered prompt"
+    assert _decodeTokenPrompt(secondAction.data) == "second rendered prompt"
     workflow.observe([ActionResult(3, Result(output="second output"))])
 
     assert runner.responses == [
@@ -631,7 +648,7 @@ def test_without_skill_does_not_read_or_prepare_skill_documents():
 
     secondAction = workflow.next()[0]
     assert secondAction.kind == ActionKind.RUN
-    assert secondAction.data == "second rendered prompt"
+    assert _decodeTokenPrompt(secondAction.data) == "second rendered prompt"
     assert workflow._skillDocuments == []
 
 
@@ -663,12 +680,15 @@ def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
 
     prepare = workflow.next()[0]
     assert prepare.kind == ActionKind.PREPARE
-    assert prepare.data == [_CanonicalSkillDocument(skill)]
+    assert [_decodeTokenPrompt(chunk) for chunk in prepare.data] == [
+        _CanonicalSkillDocument(skill)
+    ]
     workflow.observe([ActionResult(3, Result())])
     run = workflow.next()[0]
     assert run.kind == ActionKind.RUN
-    assert _CanonicalSkillDocument(skill) in run.data
-    assert run.data.endswith("rendered prompt without a skill tool result")
+    runText = _decodeTokenPrompt(run.data)
+    assert _CanonicalSkillDocument(skill) in runText
+    assert runText.endswith("rendered prompt without a skill tool result")
 
 
 def test_first_run_skill_injection_uses_chat_template_when_request_has_metadata(
@@ -712,10 +732,10 @@ def test_first_run_skill_injection_uses_chat_template_when_request_has_metadata(
     workflow.observe([ActionResult(3, Result())])
     run = workflow.next()[0]
 
-    assert run.data.startswith("rendered with")
+    assert _decodeTokenPrompt(run.data).startswith("rendered with")
     assert _CanonicalSkillDocument(skill) in renderCalls[0][0][0]["content"]
     assert renderCalls[0][1:] == ("/models/test", None, True)
-    assert "original rendered prompt" not in run.data
+    assert "original rendered prompt" not in _decodeTokenPrompt(run.data)
 
 
 def test_first_run_skill_segment_matches_after_chat_template_moves_terminal_newline(
@@ -756,12 +776,13 @@ def test_first_run_skill_segment_matches_after_chat_template_moves_terminal_newl
     )
 
     prepare = workflow.next()[0]
-    assert prepare.data == [canonicalSkill]
+    assert [_decodeTokenPrompt(chunk) for chunk in prepare.data] == [canonicalSkill]
     workflow.observe([ActionResult(3, Result())])
     run = workflow.next()[0]
 
-    assert (0, canonicalSkill) in ComposeInterleavedReuse(
-        prepare.data, run.data
+    assert (0, canonicalSkill) in ComposeInterleavedReuseText(
+        [_decodeTokenPrompt(chunk) for chunk in prepare.data],
+        _decodeTokenPrompt(run.data),
     )
 
 

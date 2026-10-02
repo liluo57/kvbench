@@ -89,6 +89,9 @@ class _KVPacketRecompute(Method):
         self._states: list[dict[str, Any]] = []
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
+        raise NotImplementedError(
+            "KVPacket recompute token ID interface pending; method is temporarily deferred"
+        )
         super().Initialize(gpuIds)
         _import_kvpacket_modules()
         import torch

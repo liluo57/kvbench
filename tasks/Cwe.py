@@ -70,9 +70,10 @@ class CWETask(RulerBase):
         for i, s in enumerate(self._LoadSamples()):
             body, answerPrefix = self._StripTemplate(s)
             fullPrompt = self._FullChat(body, answerPrefix)
+            data = RAGInput(prepare_input=[], run_input=fullPrompt)
             yield Case(
-                input=RAGInput(prepare_input=[], run_input=fullPrompt),
-                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=[], run_input=fullPrompt)),
+                input=data,
+                workflow=RAGWorkflow(case_id=i, data=data),
                 metadata=self._Metadata(i, s, fullPrompt),
             )
 
@@ -137,8 +138,9 @@ class CWEShuffleTask(CWETask):
             fullPrompt = "".join(segments)
             chunks = self._Shuffled(segments[1:-1], seed=int(s.get("index", i)))
             run_input = segments[0] + "".join(chunks) + segments[-1]
+            data = RAGInput(prepare_input=segments, run_input=run_input)
             yield Case(
-                input=RAGInput(prepare_input=segments, run_input=run_input),
-                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=segments, run_input=run_input)),
+                input=data,
+                workflow=RAGWorkflow(case_id=i, data=data),
                 metadata=self._Metadata(i, s, fullPrompt),
             )

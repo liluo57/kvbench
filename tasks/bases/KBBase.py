@@ -296,12 +296,13 @@ class KBBase(Task):
         return samples
 
     # ---------------------------------------------------------------- cases
-    def _ShouldSkipPrompt(self, fullPrompt: str, modelPath: str) -> bool:
+    def _ShouldSkipPrompt(self, ragInput: RAGInput, modelPath: str) -> bool:
         """Return whether a rendered prompt should be excluded.
 
         Most tasks have no prompt-length restriction.  Long-context tasks can
-        override this hook after the model-specific chat template has been
-        applied, which keeps the filter aligned with what the backend sees.
+        override this hook after the model-specific chat template and Task-side
+        token compilation, which keeps filtering aligned with the token IDs
+        that the Method will actually receive.
         """
         return False
 
@@ -317,7 +318,8 @@ class KBBase(Task):
                 "".join(chunks) + suffix,
                 modelPath=modelPath, thinking=False,
             )
-            if self._ShouldSkipPrompt(fullPrompt, modelPath):
+            ragInput = RAGInput(prepare_input=chunks, run_input=fullPrompt)
+            if self._ShouldSkipPrompt(ragInput, modelPath):
                 continue
             metadata = {
                 "case_id": i,
@@ -331,8 +333,8 @@ class KBBase(Task):
             if "_id" in s:
                 metadata["sample_id"] = s["_id"]
             yield Case(
-                input=RAGInput(prepare_input=chunks, run_input=fullPrompt),
-                workflow=RAGWorkflow(case_id=i, data=RAGInput(prepare_input=chunks, run_input=fullPrompt)),
+                input=ragInput,
+                workflow=RAGWorkflow(case_id=i, data=ragInput),
                 metadata=metadata,
             )
 

@@ -14,13 +14,14 @@ and an explicit ``device_map=f"cuda:<n>"``.
 import os
 import time
 from collections import Counter
-from typing import Any, List, Mapping, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from core.Sampling import (
     IsGreedy,
     ResolveSamplingConfig,
     TransformersGenerationKwargs,
 )
+from helpers.backends.Tokenization import OutputFragmentIds
 
 
 def CacheLayerPairs(cache):
@@ -123,6 +124,16 @@ class TransformersGenerator:
             return self.tokenizer(
                 text, add_special_tokens=addSpecialTokens
             )["input_ids"]
+
+    def OutputTokenIds(self, tokenIds: Sequence[int]) -> List[int]:
+        """Return the retained native output fragment, excluding a terminal EOS.
+
+        Special IDs inside the generated fragment are ordinary native tokens
+        and must remain identical across Result.output_ids, retained KV, and
+        future prompt composition. The terminal stop EOS is excluded because
+        the generation contract never feeds it into the returned KV cache.
+        """
+        return OutputFragmentIds(tokenIds, self.eosIds)
 
     def _toTensor(self, ids: List[int]) -> Any:
         return self._torch.tensor([ids], device=self.device, dtype=self._torch.long)
@@ -290,6 +301,7 @@ class TransformersGenerator:
         *,
         maxNewTokens: Optional[int] = None,
         returnCache: bool = False,
+        returnTokenIds: bool = False,
     ) -> Tuple[Any, ...]:
         """Decode ``inputIds`` according to the resolved ModelConfig.
 
@@ -325,10 +337,23 @@ class TransformersGenerator:
                 inputIds = [nxt]
 
         total = time.perf_counter() - t0
+        # A sampled final non-stop token is not in ``past`` yet: each loop
+        # iteration first feeds the previous sample, then samples the next.
+        # When a caller retains KV, complete exactly that final row so its
+        # cache is aligned with the native retained fragment. Token-only calls
+        # avoid this extra forward because they do not retain generated KV.
+        if returnCache and generated and generated[-1] not in self.eosIds:
+            past = self.Forward([generated[-1]], past, useCache=True).past_key_values
+            total = time.perf_counter() - t0
         text = self.tokenizer.decode(generated, skip_special_tokens=True)
+        outputIds = self.OutputTokenIds(generated)
         result = (text, float(ttft or 0.0), total, len(generated))
         if returnCache:
+            # Preserve the original returnCache contract for helper clients
+            # that need to reason about cache rows, including special tokens.
             return (*result, past, generated)
+        if returnTokenIds:
+            return (*result, outputIds)
         return result
 
     def GenerateBatch(

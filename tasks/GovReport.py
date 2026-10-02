@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Tuple
 
 from core.Result import Result
+from workflow.RAGWorkflow import RAGInput
 
 from .bases.KBBase import KBBase, ParagraphChunks, RougeL
 
@@ -38,8 +39,9 @@ class GovReportTask(KBBase):
         Larger values split at paragraph boundaries when available, with a
         sentence-boundary fallback for the flattened GovReport snapshot.
 
-        ``maxSampleLength`` is measured in tokens after rendering the complete
-        model-specific chat prompt.  ``0`` disables filtering; a positive
+        ``maxSampleLength`` is measured using the Task-compiled token IDs for
+        the complete model-specific chat prompt, including independently
+        tokenized reusable/fresh pieces. ``0`` disables filtering; a positive
         value excludes samples longer than that limit.
         """
         if not isinstance(nChunks, int) or isinstance(nChunks, bool) or nChunks < 1:
@@ -61,16 +63,13 @@ class GovReportTask(KBBase):
         self.nChunks = nChunks
         self.maxSampleLength = maxSampleLength
 
-    def _ShouldSkipPrompt(self, fullPrompt: str, modelPath: str) -> bool:
+    def _ShouldSkipPrompt(self, ragInput: RAGInput, modelPath: str) -> bool:
         if self.maxSampleLength == 0:
             return False
-        # Reuse the adapter's cached tokenizer so the count uses the same
-        # tokenizer as render_user_prompt, rather than a character heuristic.
-        from helpers.backends.ModelAdapter import _tokenizer
-
-        tokenCount = len(
-            _tokenizer(modelPath).encode(fullPrompt, add_special_tokens=False)
-        )
+        # RAGInput already compiled the rendered prompt using the benchmark's
+        # chunked token contract; count those exact IDs instead of encoding the
+        # whole string and potentially crossing reusable/fresh boundaries.
+        tokenCount = len(ragInput.run_input)
         return tokenCount > self.maxSampleLength
 
     def _Build(self, sample: Dict[str, Any]) -> Tuple[List[str], str]:

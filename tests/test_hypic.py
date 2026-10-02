@@ -16,6 +16,8 @@ from methods.Hypic import (
     _WARMUP_TAIL,
     _WARMUP_MAX_NEW_TOKENS,
 )
+from methods.CacheClip import CacheClip
+from methods.KVPacketRecompute import EPIC
 from tasks.FreshGap import FreshGapTask
 
 
@@ -152,6 +154,13 @@ def test_qwen35_prepare_uses_independent_priming_for_all_pic_modes(monkeypatch):
 
 def test_fresh_gap_keeps_a_fresh_query_tail_after_final_prepared_chunk(monkeypatch):
     from tasks import FreshGap as FreshGapModule
+    from helpers.backends import ModelAdapter
+
+    class FakeTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return [ord(character) for character in text]
+
+    monkeypatch.setattr(ModelAdapter, "_tokenizer", lambda _path: FakeTokenizer())
 
     monkeypatch.setattr(
         FreshGapModule,
@@ -165,12 +174,33 @@ def test_fresh_gap_keeps_a_fresh_query_tail_after_final_prepared_chunk(monkeypat
     )
     task = FreshGapTask(nCases=1, linesPerChunk=1)
     case = next(task.Cases())
+    encode = lambda text: [ord(character) for character in text]
 
-    assert case.input.prepare_input == [task._a, task._c]
+    assert case.input.prepare_input == [encode(task._a), encode(task._c)]
     assert case.input.run_input == (
-        task._a + case.metadata["fresh"] + task._c + task._query_tail
+        encode(task._a + case.metadata["fresh"] + task._c + task._query_tail)
     )
-    assert case.input.run_input.endswith(task._c + task._query_tail)
+    query_tail_ids = encode(task._query_tail)
+    assert case.input.run_input[-len(query_tail_ids):] == query_tail_ids
+
+
+@pytest.mark.parametrize(
+    ("method_factory", "message"),
+    [
+        pytest.param(HypicMethod, "HYPIC token ID interface pending", id="hypic"),
+        pytest.param(EPIC, "KVPacket recompute token ID interface pending", id="kvpacket-recompute"),
+    ],
+)
+def test_deferred_methods_reject_initialization_until_token_id_interface_is_ready(
+    method_factory, message
+):
+    with pytest.raises(NotImplementedError, match=message):
+        method_factory().Initialize([])
+
+
+def test_cacheclip_initialize_uses_base_gpu_validation_not_deferred_guard():
+    with pytest.raises(ValueError, match="requires exactly 1 GPU"):
+        CacheClip(auxiliaryModelPath="/unused").Initialize([])
 
 
 def test_run_without_a_match_preserves_the_original_prompt():

@@ -1,151 +1,37 @@
 """Prompt helpers shared by tasks and reuse methods.
 
-``ComposeReuse`` supports suffix-style reuse: prepared chunks must form a
-contiguous prefix of ``run``, followed by at most one fresh suffix.
+``ComposeReuse`` and ``ComposeInterleavedReuse`` operate on token-ID lists.
+Their ``*Text`` counterparts locate source chunks in rendered text while a
+Task compiles the public token inputs.
 
-``ComposeInterleavedReuse`` supports interleaved reuse: prepared chunks may
-appear anywhere in ``run``, with fresh text before, between, or after reused
-chunks.
+Suffix-style reuse requires prepared chunks to form a contiguous prefix of
+``run``, followed by at most one fresh suffix.
+
+Interleaved reuse allows prepared chunks anywhere in ``run``, with fresh
+tokens before, between, or after reused chunks.
 """
 
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
-def ContextText(prepare: List[str]) -> str:
-    """Join the warm-up text segments into the one shared context string."""
-    return "".join(prepare or [])
-
-
-def ComposeReuse(
-    prepare: List[str], run: str
-) -> Tuple[Optional[List[str]], str]:
-    """Find the longest prefix of ``run`` explainable by ``prepare`` chunks.
-
-    Returns ``(order, suffix)`` where:
-    - ``order`` is the list of prepare chunks (each used at most once) whose
-      concatenation equals the matched prefix of ``run``, in the order they
-      appear in ``run``. Prefer the original prepare order when possible.
-    - ``suffix`` is the remaining text after the matched prefix (empty if the
-      entire ``run`` is covered).
-
-    Returns ``(None, run)`` when no prepare chunk matches the start of ``run``.
-
-    The algorithm:
-    1. First try matching prepare chunks in their original order (greedy).
-    2. If that fails to consume any chunk, fall back to DFS search over all
-       permutations (still each chunk used at most once).
-    3. Return the longest match found (original order wins on ties).
-
-    This supports suffix-only reuse: cached blocks form a contiguous prefix,
-    and fresh text is always a trailing suffix.
-    """
-    if not prepare:
-        return None, run
-
-    n = len(prepare)
-
-    # Strategy 1: Try original order first (fast path for typical cases)
-    originalOrder: List[str] = []
-    pos = 0
-
-    for chunk in prepare:
-        if run.startswith(chunk, pos):
-            originalOrder.append(chunk)
-            pos += len(chunk)
-        else:
-            break
-
-    if originalOrder:
-        bestLen = pos
-        bestOrder: List[str] = originalOrder
-
-        used = [False] * n
-
-        for chunk in originalOrder:
-            for i, preparedChunk in enumerate(prepare):
-                if preparedChunk == chunk and not used[i]:
-                    used[i] = True
-                    break
-
-        def DfsExtend(curPos: int, currentOrder: List[str]) -> None:
-            nonlocal bestLen, bestOrder
-
-            if curPos > bestLen:
-                bestLen = curPos
-                bestOrder = list(currentOrder)
-
-            for i in range(n):
-                if used[i]:
-                    continue
-
-                chunk = prepare[i]
-
-                if run.startswith(chunk, curPos):
-                    used[i] = True
-                    currentOrder.append(chunk)
-
-                    DfsExtend(curPos + len(chunk), currentOrder)
-
-                    currentOrder.pop()
-                    used[i] = False
-
-        DfsExtend(pos, list(originalOrder))
-
-        if bestLen > 0:
-            return bestOrder, run[bestLen:]
-
-    # Strategy 2: Full DFS search
-    used = [False] * n
-    order: List[str] = []
-    best: Tuple[int, List[str]] = (0, [])
-
-    def Dfs(curPos: int) -> None:
-        nonlocal best
-
-        if curPos > best[0]:
-            best = (curPos, list(order))
-
-        for i in range(n):
-            if used[i]:
-                continue
-
-            chunk = prepare[i]
-
-            if run.startswith(chunk, curPos):
-                used[i] = True
-                order.append(chunk)
-
-                Dfs(curPos + len(chunk))
-
-                order.pop()
-                used[i] = False
-
-    Dfs(0)
-
-    if best[0] > 0:
-        return best[1], run[best[0]:]
-
-    return None, run
-
-
-def ComposeInterleavedReuse(
-    prepare: List[str],
-    run: str,
-) -> List[Tuple[Optional[int], str]]:
+def _ComposeInterleavedReuse(
+    prepare,
+    run,
+):
     """
     Find non-overlapping occurrences of prepare chunks inside run.
 
     Ranking rules:
 
-    1. Maximize the total number of covered characters.
+    1. Maximize the total number of covered sequence elements.
     2. Prefer fewer selected chunks when coverage is equal.
     3. Prefer transitions that preserve prepare order.
 
     A chunk may be reused multiple times.
 
     The matcher uses a short prefix of every chunk as an Aho-Corasick
-    pattern. Full chunks are checked with str.startswith after a prefix hit.
+    pattern. Full chunks are checked after a prefix hit.
     This keeps the automaton small even when chunks themselves are very long.
     """
     if not run:
@@ -172,9 +58,9 @@ def ComposeInterleavedReuse(
     #   transitions[node]: character -> next node
     #   failure[node]: Aho-Corasick failure link
     #   terminal[node]: patterns ending at this node
-    transitions: List[Dict[str, int]] = [{}]
+    transitions: List[Dict[object, int]] = [{}]
     failure: List[int] = [0]
-    terminal: List[List[Tuple[int, str, int]]] = [[]]
+    terminal: List[List[Tuple[int, object, int]]] = [[]]
 
     for index, chunk in patterns:
         anchor_length = min(anchor_size, len(chunk))
@@ -261,7 +147,7 @@ def ComposeInterleavedReuse(
 
                 # The anchor is only a prefilter. This check guarantees
                 # exact matching of the complete chunk.
-                if run.startswith(chunk, start):
+                if run[start:start + len(chunk)] == chunk:
                     candidates.append(
                         (
                             index,
@@ -365,17 +251,16 @@ def ComposeInterleavedReuse(
     # Build final result
     # ---------------------------------------------------------
 
-    result: List[Tuple[Optional[int], str]] = []
+    result = []
 
-    def append_fresh(text: str) -> None:
-        if not text:
+    def append_fresh(piece) -> None:
+        if not piece:
             return
 
         if result and result[-1][0] is None:
-            previous_text = result[-1][1]
-            result[-1] = (None, previous_text + text)
+            result[-1] = (None, result[-1][1] + piece)
         else:
-            result.append((None, text))
+            result.append((None, piece))
 
     position = 0
 
@@ -398,35 +283,100 @@ def ComposeInterleavedReuse(
     return result
 
 
-def ComposeInterleavedReuseSpans(
-    prepare: List[str],
-    run: str,
-) -> List[Tuple[Optional[int], str, int, int]]:
-    """Return :func:`ComposeInterleavedReuse` parts with run-text offsets.
+def ComposeInterleavedReuseText(
+    prepare: List[str], run: str
+) -> List[Tuple[Optional[int], str]]:
+    """Locate reusable text chunks with the shared interleaved matcher."""
+    return _ComposeInterleavedReuse(prepare, run)
 
-    The prepared segments remain the source of truth: this helper does not
-    infer document boundaries from delimiters or from the prompt text.  It
-    only annotates the exact composition selected by
-    :func:`ComposeInterleavedReuse` with ``[start, end)`` character offsets in
-    ``run``.  ``prepare_index`` is ``None`` for fresh text.
+
+def ComposeReuse(
+    prepare: List[List[int]], run: List[int]
+) -> Tuple[Optional[List[List[int]]], List[int]]:
+    """Find the longest prefix of a token prompt covered by prepared chunks.
+
+    ``order`` contains the selected prepared chunks in prompt order. Each
+    chunk is used at most once; the returned suffix is a copy of the fresh
+    trailing token IDs. The original prepare order wins ties.
     """
-    parts = ComposeInterleavedReuse(prepare, run)
-    spans: List[Tuple[Optional[int], str, int, int]] = []
-    cursor = 0
+    if not prepare:
+        return None, run[0:]
 
-    for prepareIndex, text in parts:
-        end = cursor + len(text)
-        if run[cursor:end] != text:
-            raise RuntimeError(
-                "ComposeInterleavedReuse returned text that does not form "
-                f"a contiguous run at offset {cursor}"
-            )
-        spans.append((prepareIndex, text, cursor, end))
-        cursor = end
+    candidateIndices = [index for index, chunk in enumerate(prepare) if chunk]
+    if not candidateIndices:
+        return None, run[0:]
+    n = len(prepare)
 
-    if cursor != len(run):
-        raise RuntimeError(
-            "ComposeInterleavedReuse did not cover the complete run prompt"
-        )
+    def matches(pos: int, chunk: List[int]) -> bool:
+        end = pos + len(chunk)
+        return end <= len(run) and list.__getitem__(run, slice(pos, end)) == chunk
 
-    return spans
+    originalOrder: List[List[int]] = []
+    originalIndices: List[int] = []
+    pos = 0
+    for index in candidateIndices:
+        chunk = prepare[index]
+        if matches(pos, chunk):
+            originalOrder.append(chunk)
+            originalIndices.append(index)
+            pos += len(chunk)
+        else:
+            break
+
+    if originalOrder:
+        bestLen = pos
+        bestIndices = list(originalIndices)
+        used = [False] * n
+        for index in originalIndices:
+            used[index] = True
+
+        def extend(curPos: int, current: List[int]) -> None:
+            nonlocal bestLen, bestIndices
+            if curPos > bestLen:
+                bestLen = curPos
+                bestIndices = list(current)
+            for index in candidateIndices:
+                chunk = prepare[index]
+                if used[index] or not matches(curPos, chunk):
+                    continue
+                used[index] = True
+                current.append(index)
+                extend(curPos + len(chunk), current)
+                current.pop()
+                used[index] = False
+
+        extend(pos, list(originalIndices))
+        if bestLen > 0:
+            return [prepare[index] for index in bestIndices], run[bestLen:]
+
+    used = [False] * n
+    order: List[int] = []
+    bestLen = 0
+    bestOrder: List[int] = []
+
+    def search(curPos: int) -> None:
+        nonlocal bestLen, bestOrder
+        if curPos > bestLen:
+            bestLen = curPos
+            bestOrder = list(order)
+        for index in candidateIndices:
+            chunk = prepare[index]
+            if used[index] or not matches(curPos, chunk):
+                continue
+            used[index] = True
+            order.append(index)
+            search(curPos + len(chunk))
+            order.pop()
+            used[index] = False
+
+    search(0)
+    if bestLen > 0:
+        return [prepare[index] for index in bestOrder], run[bestLen:]
+    return None, run[0:]
+
+
+def ComposeInterleavedReuse(
+    prepare: List[List[int]], run: List[int]
+) -> List[Tuple[Optional[int], List[int]]]:
+    """Select reusable token-ID spans with the same matcher as text chunks."""
+    return _ComposeInterleavedReuse(prepare, run)

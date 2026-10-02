@@ -1,8 +1,10 @@
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
 from core.Result import Result
 from core.Workflow import ActionKind, ActionResult
+from helpers.backends import ModelAdapter
 from tasks.KVCommTasks import _extract_choice, _extract_number, _extract_python
 from workflow import AgentSpec, MultiAgentFullConnectionInput, MultiAgentFullConnectionWorkflow
 
@@ -21,6 +23,17 @@ def _BuildExpectedPrompt(spec, task, priorOutputs, priorAgents):
 
 
 class MultiAgentWorkflowTest(unittest.TestCase):
+    def setUp(self):
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return [ord(character) for character in text]
+
+        self.tokenizerPatch = patch.object(
+            ModelAdapter, "_tokenizer", lambda _path: FakeTokenizer()
+        )
+        self.tokenizerPatch.start()
+        self.addCleanup(self.tokenizerPatch.stop)
+
     def _run(self, decision):
         agents = [
             AgentSpec("A", "a {task}"),
@@ -31,13 +44,14 @@ class MultiAgentWorkflowTest(unittest.TestCase):
             1, MultiAgentFullConnectionInput(
                 "TASK", agents, decision,
                 chatTemplate=False,
+                modelPath="synthetic",
             ),
         )
         prompts, retains, agentOutputs = [], [], []
         while not w.finished:
             action = w.next()[0]
             if action.kind == ActionKind.PREPARE:
-                self.assertEqual(action.data, ["TASK"])
+                self.assertEqual(action.data, [[ord(character) for character in "TASK"]])
                 w.observe([ActionResult(1, Result(), action.tag)])
                 continue
 
@@ -52,12 +66,21 @@ class MultiAgentWorkflowTest(unittest.TestCase):
             expectedPrompt = _BuildExpectedPrompt(
                 spec, "TASK", priorOutputs, agents,
             )
-            self.assertEqual(action.data, expectedPrompt)
+            self.assertEqual(
+                action.data, [ord(character) for character in expectedPrompt]
+            )
 
             agentOutputs.append("OUT" + str(len(agentOutputs) + 1))
-            prompts.append(action.data)
+            prompts.append(expectedPrompt)
             retains.append(action.retainOutput)
-            w.observe([ActionResult(1, Result(agentOutputs[-1]), action.tag)])
+            w.observe([ActionResult(
+                1,
+                Result(
+                    agentOutputs[-1],
+                    output_ids=[ord(character) for character in agentOutputs[-1]],
+                ),
+                action.tag,
+            )])
         return prompts, retains, w.final_result.output
 
     def test_decision_and_retain(self):
@@ -68,6 +91,49 @@ class MultiAgentWorkflowTest(unittest.TestCase):
     def test_no_decision_last_not_retained(self):
         prompts, retains, final = self._run(None)
         self.assertEqual(retains, [True, True, False]); self.assertEqual(final, "OUT3")
+
+    def test_native_output_pieces_do_not_match_by_display_text(self):
+        agents = [
+            AgentSpec("A", "A {task}"),
+            AgentSpec("B", "B {task}"),
+            AgentSpec("C", "C {task}"),
+        ]
+        workflow = MultiAgentFullConnectionWorkflow(
+            7,
+            MultiAgentFullConnectionInput(
+                "TASK", agents, AgentSpec("D", "D {task}"),
+                chatTemplate=False, modelPath="synthetic",
+            ),
+        )
+        prepare = workflow.next()[0]
+        preparedTask = prepare.data[0]
+        workflow.observe([ActionResult(7, Result(), prepare.tag)])
+
+        fragments = ([900, 999], [901, 999], [902, 999])
+        displays = ("same", "same", "")
+        for index, (display, fragment) in enumerate(zip(displays, fragments)):
+            action = workflow.next()[0]
+            self.assertEqual(action.data.count(preparedTask[0]), 1)
+            workflow.observe([
+                ActionResult(
+                    7,
+                    Result(output=display, output_ids=list(fragment)),
+                    action.tag,
+                )
+            ])
+
+        decision = workflow.next()[0]
+        for fragment in fragments:
+            self.assertTrue(any(
+                decision.data[index : index + len(fragment)] == list(fragment)
+                for index in range(len(decision.data) - len(fragment) + 1)
+            ))
+        # Distinct native IDs for equal display text remain distinct, and the
+        # empty display fragment still occupies its native token position.
+        self.assertEqual(
+            [decision.data.index(fragment[0]) for fragment in fragments],
+            sorted(decision.data.index(fragment[0]) for fragment in fragments),
+        )
 
     def test_mmlu_does_not_match_letters_inside_prose(self):
         self.assertIsNone(_extract_choice("A detailed analysis without a final choice"))

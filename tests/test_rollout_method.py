@@ -59,7 +59,7 @@ def test_rollout_uses_population_statistics_and_keeps_one_result_per_input():
     base = SequenceMethod([[1], [2], [3]])
     method = RolloutMethod(base, num_rollouts=3)
 
-    results = method.Run(["sample"])
+    results = method.Run([[101, 102]])
 
     assert len(results) == 1
     result = results[0]
@@ -110,7 +110,7 @@ def test_keep_individual_results_false_keeps_aggregate_and_serializes_without_ra
         keep_individual_results=False,
     )
 
-    result = method.Run(["sample"])[0]
+    result = method.Run([[101, 102]])[0]
 
     assert result.output == pytest.approx(2.0)
     assert result.metadata["rollout"]["num_rollouts"] == 3
@@ -136,7 +136,7 @@ def test_keep_individual_results_false_keeps_aggregate_and_serializes_without_ra
 
 def test_single_rollout_has_zero_variance_and_invalid_count_is_rejected():
     base = SequenceMethod([[7]])
-    result = RolloutMethod(base, num_rollouts=1).Run(["sample"])[0]
+    result = RolloutMethod(base, num_rollouts=1).Run([[101, 102]])[0]
 
     assert result.output == 7
     assert result.metadata["rollout"]["mean"] == pytest.approx(7)

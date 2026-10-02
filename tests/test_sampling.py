@@ -1,6 +1,9 @@
 import json
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
+import torch
 
 from core.Sampling import (
     ResolveSamplingConfig,
@@ -8,6 +11,9 @@ from core.Sampling import (
     TransformersGenerationKwargs,
     VllmSamplingParams,
 )
+from methods.Naive import NaiveTransformer
+from methods.KVComm import KVCommTransformer
+from helpers.backends.TransformersHelper import TransformersGenerator
 
 
 def _model_dir(tmp_path, *, config=None, generation=None):
@@ -114,3 +120,231 @@ def test_backend_translations_keep_greedy_and_override_consistent():
 def test_sampling_mode_is_validated():
     with pytest.raises(ValueError, match="ModelConfig.mode"):
         ResolveSamplingConfig(config={"ModelConfig": {"mode": "random"}})
+
+
+class _OutputCache:
+    def __init__(self, length):
+        self.layers = [(
+            torch.zeros((1, 1, length, 2)),
+            torch.zeros((1, 1, length, 2)),
+        )]
+
+    def get_seq_length(self):
+        return self.layers[0][0].shape[-2]
+
+    def update(self, key, value, _layer_index):
+        old_key, old_value = self.layers[0]
+        self.layers[0] = (
+            torch.cat([old_key, key], dim=-2),
+            torch.cat([old_value, value], dim=-2),
+        )
+
+    def crop(self, length):
+        key, value = self.layers[0]
+        self.layers[0] = (key[..., :length, :], value[..., :length, :])
+
+
+def _naive_cache_registrar():
+    method = object.__new__(NaiveTransformer)
+
+    class Generator:
+        tokenizer = SimpleNamespace(all_special_ids=[99])
+        _torch = SimpleNamespace(no_grad=nullcontext)
+
+        def __init__(self):
+            self.prefill_calls = []
+            self.generate_calls = []
+
+        @staticmethod
+        def OutputTokenIds(token_ids):
+            values = list(token_ids)
+            return values[:-1] if values and values[-1] == 99 else values
+
+        @staticmethod
+        def Forward(token_ids, cache):
+            assert token_ids == [8]
+            key, value = cache.layers[0]
+            cache.layers[0] = (
+                torch.cat([key, torch.ones((1, 1, 1, 2))], dim=-2),
+                torch.cat([value, torch.ones((1, 1, 1, 2))], dim=-2),
+            )
+            return SimpleNamespace(past_key_values=cache)
+
+        def Prefill(self, token_ids, pastKeyValues=None):
+            self.prefill_calls.append(list(token_ids))
+            cache = _OutputCache(0) if pastKeyValues is None else pastKeyValues
+            token_count = len(token_ids)
+            key = torch.zeros((1, 1, token_count, 2))
+            value = torch.zeros((1, 1, token_count, 2))
+            cache.update(key, value, 0)
+            return SimpleNamespace(past_key_values=cache)
+
+        def Generate(self, token_ids, *, pastKeyValues=None, returnTokenIds=False, **_kwargs):
+            self.generate_calls.append((list(token_ids), pastKeyValues))
+            return ("answer", 0.01, 0.02, 1, [10]) if returnTokenIds else ("answer", 0.01, 0.02, 1)
+
+    method._gen = Generator()
+    return method
+
+
+def test_naive_retains_internal_special_with_exact_native_cache_rows():
+    method = _naive_cache_registrar()
+    state = {"segments": [], "ids": [], "caches": []}
+
+    method._registerOutput(
+        state,
+        [7, 99, 8],
+        _OutputCache(6),
+        promptLength=3,
+    )
+
+    assert state["ids"] == [[7, 99, 8]]
+    assert state["caches"][0][0][0].shape[-2] == 3
+    assert method._gen.prefill_calls == []
+
+
+def test_naive_requires_completed_native_cache_and_excludes_terminal_eos():
+    method = _naive_cache_registrar()
+    state = {"segments": [], "ids": [], "caches": []}
+
+    method._registerOutput(
+        state,
+        [7, 8],
+        _OutputCache(5),
+        promptLength=3,
+    )
+
+    assert state["ids"] == [[7, 8]]
+    assert state["caches"][0][0][0].shape[-2] == 2
+
+    eos_state = {"segments": [], "ids": [], "caches": []}
+    method._registerOutput(
+        eos_state,
+        [7, 8],
+        _OutputCache(5),
+        promptLength=3,
+    )
+    assert eos_state["ids"] == [[7, 8]]
+    assert eos_state["caches"][0][0][0].shape[-2] == 2
+
+
+def test_naive_native_output_cache_hits_next_prompt_without_full_prefill():
+    method = _naive_cache_registrar()
+    state = {"segments": [], "ids": [], "caches": []}
+    method._registerOutput(
+        state,
+        [7, 99, 8],
+        _OutputCache(6),
+        promptLength=3,
+    )
+    assert state["ids"] == [[7, 99, 8]]
+    method._gen.prefill_calls.clear()
+    method._states = [state]
+
+    result = method.Run([[1, 7, 99, 8, 9]])[0]
+
+    assert result.metadata["reuse_ratio"] == pytest.approx(0.6)
+    assert method._gen.prefill_calls == [[1], [9]]
+    assert method._gen.generate_calls[0][0] == [9]
+
+
+def test_kvcomm_retains_internal_special_and_reuses_native_cache(monkeypatch):
+    method = object.__new__(KVCommTransformer)
+
+    class Generator:
+        tokenizer = SimpleNamespace(all_special_ids=[99])
+        _torch = SimpleNamespace(no_grad=nullcontext)
+        prefill_calls = []
+
+        @staticmethod
+        def OutputTokenIds(token_ids):
+            values = list(token_ids)
+            return values[:-1] if values and values[-1] == 99 else values
+
+        @staticmethod
+        def Forward(*_args):
+            raise AssertionError("already aligned native cache needs no completion")
+
+        @staticmethod
+        def Prefill(token_ids, pastKeyValues=None):
+            Generator.prefill_calls.append(list(token_ids))
+            cache = _OutputCache(0) if pastKeyValues is None else pastKeyValues
+            count = len(token_ids)
+            cache.update(
+                torch.zeros((1, 1, count, 2)),
+                torch.zeros((1, 1, count, 2)),
+                0,
+            )
+            return SimpleNamespace(past_key_values=cache)
+
+    method._gen = Generator()
+    method._runIndex = 2
+    method._ShiftCache = lambda cache, _offset: cache
+    state = {"segments": []}
+    monkeypatch.setattr("methods.KVComm._SliceCache", lambda cache, _start, _end: cache)
+
+    method._RegisterOutput(
+        state,
+        [7, 99, 8],
+        fullCache=_OutputCache(6),
+        promptLength=3,
+    )
+
+    assert state["segments"][0]["base_ids"] == (7, 99, 8)
+    assert state["segments"][0]["base_cache"] is not None
+    assert Generator.prefill_calls == []
+
+    from helpers.backends.Prompt import ComposeInterleavedReuse
+
+    segment = state["segments"][0]
+    matches = ComposeInterleavedReuse([list(segment["base_ids"])], [1, 7, 99, 8, 9])
+    assert matches == [(None, [1]), (0, [7, 99, 8]), (None, [9])]
+    parts = method._MakeParts(state["segments"], matches)
+    method._GetPrefixTemplate = lambda _parts: None
+    method._GetIsolatedBase = lambda _ids: pytest.fail(
+        "retained visible output should reuse its rebuilt KV"
+    )
+
+    method._BuildBase(parts, [[1], [7, 99, 8], [9]])
+
+    assert parts[1]["raw_cache"] is segment["base_cache"]
+
+
+def test_transformers_returncache_keeps_raw_ids_and_token_return_keeps_internal_special():
+    generator = object.__new__(TransformersGenerator)
+    generator._torch = SimpleNamespace(no_grad=nullcontext)
+    generator._Generator = lambda: object()
+    forwarded = []
+    generated = iter([7, 99, 8])
+    generator._SampleNextToken = lambda *_args: next(generated)
+    generator.Prefill = lambda _ids: SimpleNamespace(
+        logits=torch.zeros((1, 1, 1)), past_key_values=object()
+    )
+    def forward(ids, *_args, **_kwargs):
+        forwarded.append(list(ids))
+        return SimpleNamespace(logits=torch.zeros((1, 1, 1)), past_key_values=object())
+
+    generator.Forward = forward
+    generator.tokenizer = SimpleNamespace(
+        all_special_ids=[99],
+        decode=lambda ids, skip_special_tokens: "visible",
+    )
+    generator.eosIds = {88}
+
+    cached = generator.Generate(
+        [1], maxNewTokens=3, returnCache=True, returnTokenIds=True
+    )
+    assert cached[-1] == [7, 99, 8]
+    assert forwarded[-1] == [8]  # final budget token receives its cache row
+
+    forwarded.clear()
+    generated = iter([7, 99, 8])
+    visible = generator.Generate([1], maxNewTokens=3, returnTokenIds=True)
+    assert visible[-1] == [7, 99, 8]
+    assert forwarded[-1] == [99]  # no generated KV is retained on this call
+
+    generator.eosIds = {88}
+    generated = iter([7, 99, 88])
+    stopped = generator.Generate([1], maxNewTokens=3, returnCache=True)
+    assert stopped[-1] == [7, 99, 88]
+    assert forwarded[-1] == [99]  # terminal EOS remains outside the KV fragment

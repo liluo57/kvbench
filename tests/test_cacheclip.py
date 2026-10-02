@@ -7,30 +7,37 @@ import pytest
 import torch
 
 from methods.CacheClip import CacheClip
-from methods.CacheClipBackend import (
-    AuxiliaryDocumentCache,
-    AuxiliaryRuntime,
-    _bucket_indices,
+from methods.CacheClip.Cache import (
+    PrimaryAssembly,
+    _cache_layer_pairs,
+    _new_dynamic_cache,
+    append_cached_primary_segment,
+    assemble_primary_cache,
+    select_cache_sequence,
+)
+from methods.CacheClip.Recompute import (
+    recompute_selected_tokens,
     _flashinfer_attention_forward,
     _flashinfer_single_attention_forward,
     _flashinfer_causal_bsr_metadata,
     _local_eager_attention_forward,
-    _cache_layer_pairs,
-    _new_dynamic_cache,
     _resolve_attention_backend,
-    assemble_primary_cache,
-    append_cached_primary_segment,
-    PrimaryAssembly,
-    recompute_selected_tokens,
+)
+from methods.CacheClip.Selector import (
+    AuxiliaryDocumentCache,
+    AuxiliaryRuntime,
+    _bucket_indices,
+    _cached_query_attention_kwargs,
     group_candidate_windows,
     map_auxiliary_to_primary_indices,
-    select_cache_sequence,
     select_top_k_candidates,
-    shared_prefix_token_length,
+    token_text_and_offsets,
 )
 
-_cacheclip_module = importlib.import_module("methods.CacheClip")
-_cacheclip_backend_module = importlib.import_module("methods.CacheClipBackend")
+_cacheclip_module = importlib.import_module("methods.CacheClip.Method")
+_cache_module = importlib.import_module("methods.CacheClip.Cache")
+_selector_module = importlib.import_module("methods.CacheClip.Selector")
+_recompute_module = importlib.import_module("methods.CacheClip.Recompute")
 
 
 def _flashinfer_importable():
@@ -41,42 +48,68 @@ def _flashinfer_importable():
     return True
 
 
+class _FakeCache:
+    def __init__(self, ids=()):
+        self.ids = list(ids)
+
+
+class _FakeTokenizer:
+    @staticmethod
+    def decode(ids, **kwargs):
+        assert isinstance(ids, list)
+        assert all(isinstance(token, int) for token in ids)
+        return "|".join(str(int(token)) for token in ids)
+
+
 class _FakeGenerator:
     def __init__(self):
         self.model = SimpleNamespace(device=torch.device("cpu"))
+        self.tokenizer = _FakeTokenizer()
         self.generate_calls = []
+        self.prefill_calls = []
+        self.encode_calls = []
 
-    @staticmethod
-    def Encode(text, addSpecialTokens=True):
-        return [1] if text else []
+    def Encode(self, text, addSpecialTokens=False):
+        self.encode_calls.append(text)
+        return [999] if text else []
+
+    def Prefill(self, input_ids, pastKeyValues=None):
+        ids = list(input_ids)
+        self.prefill_calls.append((ids, pastKeyValues))
+        merged = (pastKeyValues.ids if pastKeyValues is not None else []) + ids
+        return SimpleNamespace(past_key_values=_FakeCache(merged))
 
     def Generate(self, input_ids, pastKeyValues=None, **kwargs):
-        self.generate_calls.append(kwargs)
-        return "generated", 0.01, 0.02, 1
+        self.generate_calls.append((list(input_ids), pastKeyValues, kwargs))
+        return "generated", 0.01, 0.02, 1, [901]
 
 
 def _fake_method():
     method = object.__new__(CacheClip)
     method._gen = _FakeGenerator()
-    method._auxiliary = object()
+    method._auxiliary = SimpleNamespace()
     method._states = []
+    method.requireReuse = False
+    method.candidateRatio = 0.2
+    method.windowSize = 8
+    method.densityThreshold = 1
     return method
 
 
 def _prepared_state():
     return {
-        "chunks": ["document"],
-        "primary": [object()],
-        "primary_ids": [torch.tensor([[7, 8]], dtype=torch.long)],
-        "primary_offsets": [[]],
-        "auxiliary": [object()],
-        "prefix_length": 0,
+        "document_ids": [[7, 8]],
+        "primary_id_tensors": [torch.tensor([[7, 8]], dtype=torch.long)],
+        "primary": [_FakeCache([7, 8])],
+        "primary_offsets": [[(0, 1), (1, 2)]],
+        "auxiliary": [AuxiliaryDocumentCache(_FakeCache([7, 8]), [(0, 1), (1, 2)], 0)],
+        "old_start": 0,
     }
 
 
 def _fake_assembly():
     return SimpleNamespace(
-        cache=object(),
+        cache=_FakeCache([7, 8]),
         context_ids=torch.tensor([[7, 8]], dtype=torch.long),
     )
 
@@ -94,40 +127,61 @@ def _patch_fake_repair(monkeypatch):
     )
 
 
-def test_cacheclip_prepare_uses_tokenizer_offset_helper_signature(monkeypatch):
+def test_cacheclip_prepare_prefills_authoritative_ids_with_optional_warmup_prefix(monkeypatch):
     class FakeGenerator:
         tokenizer = object()
         model = SimpleNamespace(device=torch.device("cpu"))
+        encode_calls = []
+        prefill_calls = []
 
-        @staticmethod
-        def Prefill(input_ids):
+        @classmethod
+        def Encode(cls, text, addSpecialTokens=False):
+            cls.encode_calls.append(text)
+            return [999] if text else []
+
+        @classmethod
+        def Prefill(cls, input_ids):
+            cls.prefill_calls.append(list(input_ids))
             return SimpleNamespace(past_key_values=object())
 
     class FakeAuxiliary:
-        @staticmethod
-        def prefill_documents(prefix, documents):
+        def __init__(self):
+            self.calls = []
+
+        def prefill_documents(self, prefix, documents):
+            self.calls.append((prefix, list(documents)))
             return [object() for _ in documents]
 
     calls = []
 
-    def tokenize_with_offsets(tokenizer, text):
-        calls.append((tokenizer, text))
-        return torch.tensor([[7, 8]], dtype=torch.long), [(0, 1), (1, 2)]
+    def token_text_and_offsets(tokenizer, ids):
+        calls.append((tokenizer, list(ids)))
+        return "document", [(0, 1), (1, 2)]
 
     method = object.__new__(CacheClip)
     method._gen = FakeGenerator()
     method._auxiliary = FakeAuxiliary()
     method._states = []
+    method.sharedPrefixText = "warm "
     monkeypatch.setattr(
         _cacheclip_module,
-        "tokenize_with_offsets",
-        tokenize_with_offsets,
+        "token_text_and_offsets",
+        token_text_and_offsets,
+    )
+    monkeypatch.setattr(
+        _cacheclip_module,
+        "select_cache_sequence",
+        lambda cache, start, end: (cache, start, end),
     )
 
-    method.Prepare([["document"]])
+    method.Prepare([[[7, 8]]])
 
-    assert calls == [(method._gen.tokenizer, "document")]
-    assert method._states[0]["chunks"] == ["document"]
+    assert calls == [(method._gen.tokenizer, [7, 8])]
+    assert method._gen.encode_calls == ["warm "]
+    assert method._gen.prefill_calls[0] == [999, 7, 8]
+    assert method._states[0]["document_ids"] == [[7, 8]]
+    assert method._states[0]["primary"][0][1:] == (1, 3)
+    assert method._auxiliary.calls == [("warm ", ["document"])]
 
 
 def test_cacheclip_buckets_legacy_tuple_auxiliary_caches():
@@ -287,12 +341,12 @@ def test_cacheclip_assembly_moves_context_ids_to_cache_device(monkeypatch):
             self.layers.append(SimpleNamespace(keys=key, values=value))
 
     monkeypatch.setattr(
-        _cacheclip_backend_module,
+        _cache_module,
         "_new_dynamic_cache",
         lambda config: FakeCache(),
     )
     monkeypatch.setattr(
-        _cacheclip_backend_module,
+        _cache_module,
         "_rotate_key",
         lambda key, *args: key,
     )
@@ -307,9 +361,6 @@ def test_cacheclip_assembly_moves_context_ids_to_cache_device(monkeypatch):
         model,
         None,
         torch.empty((1, 0), dtype=torch.long),
-        None,
-        torch.empty((1, 0), dtype=torch.long),
-        0,
         [((key, value),)],
         [torch.tensor([[7, 8]], dtype=torch.long)],
     )
@@ -326,7 +377,7 @@ def test_cacheclip_append_cached_primary_segment_realigns_and_appends(monkeypatc
             self.layers.append(SimpleNamespace(keys=key, values=value))
 
     monkeypatch.setattr(
-        _cacheclip_backend_module,
+        _cache_module,
         "_new_dynamic_cache",
         lambda config: FakeCache(),
     )
@@ -336,7 +387,7 @@ def test_cacheclip_append_cached_primary_segment_realigns_and_appends(monkeypatc
         seen.append((old.tolist(), new.tolist()))
         return key + 10
 
-    monkeypatch.setattr(_cacheclip_backend_module, "_rotate_key", rotate)
+    monkeypatch.setattr(_cache_module, "_rotate_key", rotate)
     old_key = torch.zeros((1, 1, 2, 2))
     old_value = torch.ones((1, 1, 2, 2))
     new_key = torch.full((1, 1, 3, 2), 2.0)
@@ -368,15 +419,9 @@ def test_cacheclip_append_cached_primary_segment_realigns_and_appends(monkeypatc
 
 def test_cacheclip_dispatches_noncontiguous_matches_to_interleaved_runner(monkeypatch):
     method = _fake_method()
-    method._run_interleaved = lambda state, prompt, parts, positions: "interleaved"
-    method._run_contiguous = lambda state, prompt, parts, positions: "contiguous"
-    monkeypatch.setattr(
-        _cacheclip_module,
-        "ComposeInterleavedReuse",
-        lambda chunks, prompt: [(0, "A"), (None, "fresh"), (1, "C")],
-    )
-
-    assert method._run_one({"chunks": ["A", "C"]}, "A fresh C") == "interleaved"
+    monkeypatch.setattr(method, "_run_interleaved", lambda *args: "interleaved")
+    assert method._is_contiguous_match([(0, [1]), (None, [8]), (1, [2])], [0, 2]) is False
+    assert method._is_contiguous_match([(None, [8]), (0, [1]), (1, [2])], [1, 2]) is True
 
 
 def test_cacheclip_select_cache_sequence_supports_legacy_dynamic_cache(monkeypatch):
@@ -398,7 +443,7 @@ def test_cacheclip_select_cache_sequence_supports_legacy_dynamic_cache(monkeypat
     key = torch.arange(12, dtype=torch.float32).reshape(1, 1, 3, 4)
     value = key + 100
     monkeypatch.setattr(
-        _cacheclip_backend_module,
+        _cache_module,
         "_new_dynamic_cache",
         lambda config: FakeDynamicCache(),
     )
@@ -502,7 +547,7 @@ def test_cacheclip_score_documents_normalizes_legacy_tuple_before_forward(docume
                 range(cache_length, cache_length + input_ids.size(1))
             )
             assert kwargs["use_cache"] is False
-            first_key, first_value = next(iter(_cacheclip_backend_module._cache_layer_pairs(past_key_values)))
+            first_key, first_value = next(iter(_cache_layer_pairs(past_key_values)))
             past_key_values.update(
                 torch.zeros((input_ids.size(0), 1, input_ids.size(1), first_key.size(-1))),
                 torch.zeros((input_ids.size(0), 1, input_ids.size(1), first_value.size(-1))),
@@ -543,21 +588,8 @@ def test_cacheclip_score_documents_normalizes_legacy_tuple_before_forward(docume
     assert all(
         key.shape[-2] == 3
         for cache in caches
-        for key, _ in _cacheclip_backend_module._cache_layer_pairs(cache.cache)
+        for key, _ in _cache_layer_pairs(cache.cache)
     )
-
-
-def test_cacheclip_cached_attention_positions_start_after_past():
-    from methods.CacheClipBackend import _cached_query_attention_kwargs
-
-    input_ids = torch.tensor([[3, 4]], dtype=torch.long)
-
-    kwargs = _cached_query_attention_kwargs(
-        input_ids, SimpleNamespace(get_seq_length=lambda: 7)
-    )
-
-    assert kwargs["attention_mask"].shape == (1, 9)
-    assert kwargs["cache_position"].tolist() == [7, 8]
 
 
 def test_cacheclip_qwen2_rope_assembly_and_sparse_recompute(monkeypatch):
@@ -585,65 +617,7 @@ def test_cacheclip_qwen2_rope_assembly_and_sparse_recompute(monkeypatch):
         model,
         None,
         torch.empty((1, 0), dtype=torch.long),
-        None,
-        torch.empty((1, 0), dtype=torch.long),
-        0,
-        [list(CacheLayerPairs(first_cache)), list(CacheLayerPairs(second_cache))],
-        [first_ids, second_ids],
-    )
-
-    assert assembly.context_ids.tolist() == [[1, 2, 3, 4, 5, 6, 7]]
-    recompute_selected_tokens(model, assembly, [2, 5])
-    assert all(torch.isfinite(key).all() for key, _ in CacheLayerPairs(assembly.cache))
-    assert all(
-        key.shape[-2] == 3
-        for cache in caches
-        for key, _ in _cacheclip_backend_module._cache_layer_pairs(cache.cache)
-    )
-
-
-def test_cacheclip_cached_attention_positions_start_after_past():
-    from methods.CacheClipBackend import _cached_query_attention_kwargs
-
-    input_ids = torch.tensor([[3, 4]], dtype=torch.long)
-
-    kwargs = _cached_query_attention_kwargs(
-        input_ids, SimpleNamespace(get_seq_length=lambda: 7)
-    )
-
-    assert kwargs["attention_mask"].shape == (1, 9)
-    assert kwargs["cache_position"].tolist() == [7, 8]
-
-
-def test_cacheclip_qwen2_rope_assembly_and_sparse_recompute(monkeypatch):
-    from transformers import Qwen2Config, Qwen2ForCausalLM
-    from helpers.backends.TransformersHelper import CacheLayerPairs
-
-    monkeypatch.setenv("CACHECLIP_ATTENTION_BACKEND", "torch")
-    config = Qwen2Config(
-        vocab_size=64,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        max_position_embeddings=32,
-    )
-    model = Qwen2ForCausalLM(config).eval()
-    first_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
-    second_ids = torch.tensor([[5, 6, 7]], dtype=torch.long)
-    with torch.no_grad():
-        first_cache = model(input_ids=first_ids, use_cache=True).past_key_values
-        second_cache = model(input_ids=second_ids, use_cache=True).past_key_values
-
-    assembly = assemble_primary_cache(
-        model,
-        None,
-        torch.empty((1, 0), dtype=torch.long),
-        None,
-        torch.empty((1, 0), dtype=torch.long),
-        0,
-        [list(CacheLayerPairs(first_cache)), list(CacheLayerPairs(second_cache))],
+        [first_cache, second_cache],
         [first_ids, second_ids],
     )
 
@@ -696,43 +670,157 @@ def test_cacheclip_maps_overlapping_tokenizer_spans():
     assert map_auxiliary_to_primary_indices(auxiliary, primary, [1]) == [0, 1]
 
 
-def test_cacheclip_shared_prefix_excludes_boundary_token():
-    ids = [[10, 11, 20], [10, 11, 21]]
-    offsets = [[(0, 1), (1, 2), (2, 4)], [(0, 1), (1, 2), (2, 4)]]
-    assert shared_prefix_token_length(ids, offsets, 2) == 2
+def _state_for_documents(documents):
+    return {
+        "document_ids": [list(ids) for ids in documents],
+        "primary_id_tensors": [torch.tensor([ids], dtype=torch.long) for ids in documents],
+        "primary": [_FakeCache(ids) for ids in documents],
+        "primary_offsets": [[(i, i + 1) for i in range(len(ids))] for ids in documents],
+        "auxiliary": [
+            AuxiliaryDocumentCache(_FakeCache(ids), [(i, i + 1) for i in range(len(ids))], 0)
+            for ids in documents
+        ],
+        "old_start": 0,
+    }
 
 
-def test_cacheclip_run_hit_does_not_use_full_fallback(monkeypatch):
+def _patch_fake_assembly(monkeypatch, *, context_override=None):
+    def assemble(_model, _prefix_cache, prefix_ids, _document_caches, document_ids, *, old_start=0):
+        ids = prefix_ids.tolist()[0] + [token for item in document_ids for token in item.tolist()[0]]
+        if context_override is not None:
+            ids = context_override(ids)
+        return PrimaryAssembly(_FakeCache(ids), torch.tensor([ids], dtype=torch.long))
+
+    def append(_model, assembly, _document_cache, document_ids, *, old_start=0):
+        ids = assembly.context_ids.tolist()[0] + document_ids.tolist()[0]
+        return PrimaryAssembly(_FakeCache(ids), torch.tensor([ids], dtype=torch.long))
+
+    monkeypatch.setattr(_cacheclip_module, "assemble_primary_cache", assemble)
+    monkeypatch.setattr(_cacheclip_module, "append_cached_primary_segment", append)
+    monkeypatch.setattr(_cacheclip_module, "select_cache_sequence", lambda cache, start, end=None: (cache, start, end))
+    monkeypatch.setattr(_cacheclip_module, "recompute_selected_tokens", lambda *args: None)
+
+
+def test_cacheclip_run_hit_preserves_chunk_and_fresh_ids_and_output_ids(monkeypatch):
     method = _fake_method()
+    method._states = [_state_for_documents([[7, 8]])]
     method._select = lambda *args: []
-    _patch_fake_repair(monkeypatch)
-    fallback_calls = []
-    monkeypatch.setattr(
-        method,
-        "_full_fallback",
-        lambda prompt: fallback_calls.append(prompt),
-    )
+    _patch_fake_assembly(monkeypatch)
 
-    result = method._run_one(_prepared_state(), "document question")
+    result = method.Run([[7, 8, 42]], retainOutput=[False])[0]
 
-    assert result.output == "generated"
-    assert fallback_calls == []
+    assert method._gen.encode_calls == []
+    assert method._gen.generate_calls[0][0] == [42]
+    assert method._gen.generate_calls[0][2]["returnTokenIds"] is True
+    assert result.output_ids == [901]
+    assert result.metadata["n_input"] == 3
+    assert result.metadata["n_cached_tokens"] == 2
 
 
-def test_cacheclip_run_miss_uses_explicit_full_fallback(monkeypatch):
+def test_cacheclip_composes_abc1abc2_without_reencoding(monkeypatch):
     method = _fake_method()
-    fallback_calls = []
-    fallback_result = object()
-    monkeypatch.setattr(
-        method,
-        "_full_fallback",
-        lambda prompt: fallback_calls.append(prompt) or fallback_result,
-    )
+    method._states = [_state_for_documents([[10, 11], [12, 13]])]
+    method._select = lambda *args: []
+    _patch_fake_assembly(monkeypatch)
 
-    result = method._run_one(_prepared_state(), "other question")
+    result = method.Run([[10, 11, 12, 13, 99]])[0]
 
-    assert result is fallback_result
-    assert fallback_calls == ["other question"]
+    assert method._gen.encode_calls == []
+    assert method._gen.generate_calls[0][0] == [99]
+    assert result.metadata["n_input"] == 5
+    assert result.output_ids == [901]
+
+
+def test_cacheclip_interleaved_reorders_and_repeats_prepared_chunks(monkeypatch):
+    method = _fake_method()
+    method._states = [_state_for_documents([[1, 2], [3, 4]])]
+    selected_queries = []
+    method._select_occurrences = lambda text, occurrences: selected_queries.append((text, len(occurrences))) or []
+    _patch_fake_assembly(monkeypatch)
+
+    result = method.Run([[3, 4, 9, 1, 2, 8, 3, 4, 7]])[0]
+
+    assert selected_queries == [("9|8|7", 3)]
+    assert method._gen.encode_calls == []
+    assert method._gen.generate_calls[0][0] == [7]
+    assert result.metadata["n_cached_tokens"] == 6
+    assert result.metadata["n_input"] == 9
+
+
+def test_cacheclip_interleaved_tail_replay_uses_original_last_id(monkeypatch):
+    method = _fake_method()
+    method._states = [_state_for_documents([[7, 8], [3, 4]])]
+    queries = []
+    method._select_occurrences = lambda text, occurrences: queries.append(text) or []
+    _patch_fake_assembly(monkeypatch)
+
+    result = method.Run([[7, 8, 55, 3, 4]])[0]
+
+    assert queries == ["55"]
+    assert method._gen.generate_calls[0][0] == [4]
+    assert method._gen.generate_calls[0][1][0].ids == [7, 8, 55, 3, 4]
+    assert method._gen.generate_calls[0][1][1:] == (0, -1)
+    assert result.metadata["n_cached_tokens"] == 3
+    assert result.metadata["n_input"] == 5
+
+
+def test_cacheclip_replay_at_contiguous_cached_tail_drops_one_cached_row(monkeypatch):
+    method = _fake_method()
+    method._states = [_state_for_documents([[7, 8]])]
+    method._select = lambda *args: []
+    _patch_fake_assembly(monkeypatch)
+
+    result = method.Run([[7, 8]])[0]
+
+    assert method._gen.generate_calls[0][0] == [8]
+    assert result.metadata["n_cached_tokens"] == 1
+    assert result.metadata["n_input"] == 2
+
+
+def test_cacheclip_zero_match_is_the_only_full_prefill_and_is_strict_when_requested():
+    method = _fake_method()
+    method._states = [_prepared_state()]
+    result = method.Run([[42, 43]])[0]
+    assert method._gen.generate_calls[0][0] == [42, 43]
+    assert method._gen.generate_calls[0][1] is None
+    assert method._gen.encode_calls == []
+    assert result.metadata["n_input"] == 2
+
+    method.requireReuse = True
+    with pytest.raises(RuntimeError, match="no matching prepared token IDs"):
+        method.Run([[42, 43]])
+
+
+def test_cacheclip_run_budget_prefers_explicit_value_then_constructor_default():
+    method = _fake_method()
+    method._states = [_prepared_state()]
+    method.maxNewTokens = 32
+
+    method.Run([[42, 43]], maxNewTokens=None)
+    assert method._gen.generate_calls[-1][2]["maxNewTokens"] == 32
+
+    method.Run([[42, 43]], maxNewTokens=7)
+    assert method._gen.generate_calls[-1][2]["maxNewTokens"] == 7
+
+
+def test_cacheclip_run_without_constructor_budget_uses_common_default():
+    method = _fake_method()
+    method._states = [_prepared_state()]
+
+    method.Run([[42, 43]], maxNewTokens=None)
+
+    assert method._gen.generate_calls[-1][2]["maxNewTokens"] == 64
+
+
+def test_cacheclip_raises_if_assembly_changes_ids_without_full_prefill(monkeypatch):
+    method = _fake_method()
+    method._states = [_state_for_documents([[7, 8]])]
+    method._select = lambda *args: []
+    _patch_fake_assembly(monkeypatch, context_override=lambda ids: ids + [123])
+
+    with pytest.raises(RuntimeError, match="do not equal the input prompt"):
+        method.Run([[7, 8, 42]])
+    assert method._gen.generate_calls == []
 
 
 def test_cacheclip_selector_and_primary_assembly_futures_start_together(monkeypatch):
@@ -742,56 +830,43 @@ def test_cacheclip_selector_and_primary_assembly_futures_start_together(monkeypa
 
     def selector(*args):
         started.append("cpu_selector")
-        barrier.wait()
+        barrier.wait(timeout=2)
         return []
 
-    def primary_assembly(*args):
+    def primary_assembly(*args, **kwargs):
         started.append("primary_assembly")
-        barrier.wait()
-        return _fake_assembly()
+        barrier.wait(timeout=2)
+        return PrimaryAssembly(_FakeCache([7, 8]), torch.tensor([[7, 8]]))
 
+    method._states = [_state_for_documents([[7, 8]])]
     method._select = selector
     monkeypatch.setattr(_cacheclip_module, "assemble_primary_cache", primary_assembly)
-    monkeypatch.setattr(
-        _cacheclip_module,
-        "recompute_selected_tokens",
-        lambda *args: None,
-    )
+    monkeypatch.setattr(_cacheclip_module, "recompute_selected_tokens", lambda *args: None)
 
-    result = method._run_one(_prepared_state(), "document question")
+    result = method.Run([[7, 8, 9]])[0]
 
     assert result.output == "generated"
     assert sorted(started) == ["cpu_selector", "primary_assembly"]
 
 
-def test_cacheclip_constructor_has_no_method_metrics_and_unified_performance(monkeypatch):
+def test_cacheclip_constructor_uses_common_performance_contract(monkeypatch):
     monkeypatch.setattr(_cacheclip_module, "DefaultModelPath", lambda: "/model")
     monkeypatch.setattr(_cacheclip_module, "ResolveSamplingConfig", lambda _: {})
     method = CacheClip(auxiliaryModelPath="/unused")
-    result = method._result("answer", 0.1, 0.2, 3, 7)
     assert method.method_metrics == ("actual_recompute_ratio",)
-    assert set(result.performance) == {"ttft", "num_output_tokens", "total_time"}
-    assert result.performance["ttft"] <= result.performance["total_time"]
 
 
-def test_cacheclip_retain_output_is_accepted_without_output_kv_registration(monkeypatch):
+def test_cacheclip_accepts_retain_output_and_returns_native_ids(monkeypatch):
     method = _fake_method()
     method._states = [_prepared_state()]
     method._select = lambda *args: []
-    _patch_fake_repair(monkeypatch)
+    _patch_fake_assembly(monkeypatch)
 
-    # KVCOMM can complete this action because retainOutput is a hint that a
-    # Method may ignore, but generated output KV is not registered for reuse.
-    results = method.Run(["document question"], retainOutput=[True])
+    results = method.Run([[7, 8, 9]], retainOutput=[True])
 
     assert len(results) == 1
-    assert set(results[0].performance) == {
-        "ttft",
-        "num_output_tokens",
-        "total_time",
-    }
-    assert method._states[0]["chunks"] == ["document"]
-    assert method._gen.generate_calls == [{}]
+    assert set(results[0].performance) == {"ttft", "num_output_tokens", "total_time"}
+    assert results[0].output_ids == [901]
 
 
 def test_cacheclip_rejects_unsupported_sparse_model_without_full_forward():
@@ -803,6 +878,6 @@ def test_cacheclip_rejects_unsupported_sparse_model_without_full_forward():
         "context_ids": torch.zeros((1, 2), dtype=torch.long),
         "cache": type("Cache", (), {"layers": []})(),
     })()
-    from methods.CacheClipBackend import recompute_selected_tokens
+    from methods.CacheClip.Recompute import recompute_selected_tokens
     with pytest.raises(RuntimeError, match="model-specific decoder-layer adapter"):
         recompute_selected_tokens(Unsupported(), assembly, [0])

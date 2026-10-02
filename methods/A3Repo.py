@@ -27,6 +27,7 @@ silently changing the algorithm.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -44,6 +45,7 @@ from core.Sampling import ResolveSamplingConfig
 
 from helpers.backends.Prompt import ComposeReuse
 from helpers.backends.ModelAdapter import user_turn_prefix
+from helpers.backends.Tokenization import EncodeText
 
 
 _ReadyLine = "[a3-repo-helper] ready"
@@ -105,13 +107,13 @@ class A3Repo(Method):
         self._proc: Optional[subprocess.Popen[str]] = None
         self._drainThread: Optional[threading.Thread] = None
         self._stderrTail = deque(maxlen=200)
-        self._chunks: List[List[str]] = []
+        self._chunks: List[List[List[int]]] = []
         # A KVBench KB task renders the complete user message through the
         # model chat template.  Keep a second, prepared representation whose
         # first chunk includes that literal user-turn prefix, so the official
         # reuse path can match the rendered Run prompt without changing the
         # raw-chunk path used by non-chat callers.
-        self._wire_chunks: List[List[str]] = []
+        self._wire_chunks: List[List[List[int]]] = []
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
         super().Initialize(gpuIds)
@@ -207,31 +209,36 @@ class A3Repo(Method):
             raise RuntimeError(f"A3 official worker error: {response.get('error')}")
         return response
 
-    def Prepare(self, data: List[List[str]]) -> None:
-        self._chunks = [[str(chunk) for chunk in (chunks or []) if str(chunk)] for chunks in data]
+    def Prepare(self, data: List[List[List[int]]]) -> None:
+        self._chunks = [
+            [[int(token) for token in chunk] for chunk in (chunks or []) if chunk]
+            for chunks in data
+        ]
         prefix = user_turn_prefix(self.modelPath, thinking=False)
+        prefix_ids = EncodeText(prefix, self.modelPath) if prefix else []
         self._wire_chunks = []
         flat: List[str] = []
+        flat_ids: List[List[int]] = []
         seen = set()
         for chunks in self._chunks:
-            wire = list(chunks)
-            if wire and prefix and not wire[0].startswith(prefix):
-                wire[0] = prefix + wire[0]
+            wire = [list(chunk) for chunk in chunks]
+            if wire and prefix_ids:
+                wire[0] = prefix_ids + wire[0]
             self._wire_chunks.append(wire)
-            for chunk in chunks:
-                if chunk not in seen:
-                    seen.add(chunk)
-                    flat.append(chunk)
-            for chunk in wire:
-                if chunk not in seen:
-                    seen.add(chunk)
-                    flat.append(chunk)
+            for chunk in [*chunks, *wire]:
+                key = tuple(chunk)
+                if key not in seen:
+                    seen.add(key)
+                    flat.append("ids:" + hashlib.sha256(
+                        b"".join(t.to_bytes(4, "little", signed=True) for t in chunk)
+                    ).hexdigest())
+                    flat_ids.append(chunk)
         if flat:
-            self._request({"op": "collect", "chunks": flat})
+            self._request({"op": "collect", "chunks": flat, "chunk_ids": flat_ids})
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
     ) -> List[Result]:
         runStart = time.perf_counter()
@@ -252,13 +259,15 @@ class A3Repo(Method):
             if order:
                 response = self._request({
                     "op": "reuse",
-                    "chunks": order,
-                    "suffix": suffix,
+                    "chunks": ["ids:" + hashlib.sha256(
+                        b"".join(t.to_bytes(4, "little", signed=True) for t in chunk)
+                    ).hexdigest() for chunk in order],
+                    "suffix_ids": suffix,
                     "retain_output": retain,
                 })
                 full = False
             else:
-                response = self._request({"op": "full", "text": prompt, "retain_output": retain})
+                response = self._request({"op": "full", "input_ids": prompt, "retain_output": retain})
                 full = True
             results.append(
                 self._result(

@@ -6,6 +6,10 @@ from typing import List, Optional
 from core.Config import ModelPath
 from core.Result import Result
 from core.Workflow import Action, ActionKind, ActionResult, Workflow
+from helpers.backends.Tokenization import (
+    EncodeChunks,
+    EncodeText,
+)
 
 
 @dataclass(frozen=True)
@@ -36,41 +40,74 @@ class MultiAgentFullConnectionWorkflow(Workflow):
     def __init__(self, case_id: int, data: MultiAgentFullConnectionInput):
         self.case_id = case_id
         self._data = data
+        # PREPARE and each RUN occurrence use these exact independently
+        # tokenized shared-task IDs.
+        self._taskIds = EncodeChunks([data.task], data.modelPath)[0]
         self._prepared = not data.prepareSharedTask
         self._agentIndex = 0
-        self._outputs: List[str] = []
+        self._outputs: List[tuple[str, Optional[List[int]]]] = []
         self._decisionDone = False
         self._finalResult: Optional[Result] = None
 
-    def _BuildPrompt(self, spec: AgentSpec) -> str:
-        userPrompt = spec.promptTemplate.replace("{task}", self._data.task)
+    def _BuildPrompt(self, spec: AgentSpec) -> List[int]:
+        contentParts: List[tuple[str, Optional[List[int]]]] = []
+
+        def appendText(text: str) -> None:
+            if text:
+                contentParts.append((text, None))
+
+        def appendIds(displayText: str, ids: List[int]) -> None:
+            contentParts.append((displayText, ids))
+
+        templateParts = spec.promptTemplate.split("{task}")
+        for index, text in enumerate(templateParts):
+            appendText(text)
+            if index < len(templateParts) - 1:
+                appendIds(self._data.task, self._taskIds)
         if self._outputs:
-            userPrompt += (
+            appendText(
                 "\n\nAt the same time, the outputs of other agents are as follows:\n\n"
             )
-            for i, output in enumerate(self._outputs):
+            for i, (output, outputIds) in enumerate(self._outputs):
                 role = self._data.agents[i].role
-                userPrompt += f"Agent {i}, role is {role}, output is:\n\n{output}\n\n"
-        if not self._data.chatTemplate:
-            return userPrompt
+                appendText(
+                    f"Agent {i}, role is {role}, output is:\n\n"
+                )
+                if outputIds is None:
+                    raise RuntimeError(
+                        "reused agent output is missing its native token IDs"
+                    )
+                appendIds(output, outputIds)
+                appendText("\n\n")
 
-        # The agent always sees real system/user turns (and stops at the
-        # model's chat-template close token); helpers.backends.ModelAdapter
-        # .render_chat owns the per-arch kwargs (``enable_thinking``, etc.)
-        # and the boundary strings, so the same workflow renders correctly
-        # for Qwen3 / Muse Glimmer / Mistral / any future arch. ``thinking``
-        # is forced off: the multi-agent decision flow does not benefit
-        # from a per-agent <think> trace and KV-reuse tasks would otherwise
-        # eat the budget on reasoning.
-        from helpers.backends.ModelAdapter import render_chat
+        if self._data.chatTemplate:
+            systemPrompt = spec.systemPrompt or f"You are the {spec.role}."
+            from helpers.backends.ModelAdapter import _chat_boundary_parts
 
-        systemPrompt = spec.systemPrompt or f"You are the {spec.role}."
-        return render_chat(
-            [{"role": "user", "content": userPrompt}],
-            modelPath=self._data.modelPath,
-            system_prefix=systemPrompt,
-            thinking=False,
-        )
+            prefix, suffix = _chat_boundary_parts(
+                self._data.modelPath, False, systemPrompt
+            )
+        else:
+            prefix, suffix = "", ""
+
+        pieces: List[List[int]] = []
+        freshParts: List[str] = [prefix] if prefix else []
+        for text, ids in contentParts:
+            if ids is None:
+                freshParts.append(text)
+            else:
+                freshText = "".join(freshParts)
+                if freshText:
+                    pieces.append(EncodeText(freshText, self._data.modelPath))
+                freshParts.clear()
+                pieces.append(ids)
+        # Include both template boundaries in their adjacent fresh spans.
+        if suffix:
+            freshParts.append(suffix)
+        freshText = "".join(freshParts)
+        if freshText:
+            pieces.append(EncodeText(freshText, self._data.modelPath))
+        return [token for piece in pieces for token in piece]
 
     def next(self) -> Optional[List[Action]]:
         if not self._prepared:
@@ -81,17 +118,19 @@ class MultiAgentFullConnectionWorkflow(Workflow):
             return [Action(
                 ActionKind.PREPARE,
                 self.case_id,
-                [self._data.task],
+                [self._taskIds],
                 "prepare_shared_task",
             )]
         if self._agentIndex < len(self._data.agents):
             i = self._agentIndex
             self._agentIndex += 1
             retain = self._data.decisionAgent is not None or i < len(self._data.agents) - 1
-            return [Action(ActionKind.RUN, self.case_id, self._BuildPrompt(self._data.agents[i]), f"agent_{i}", retain)]
+            promptIds = self._BuildPrompt(self._data.agents[i])
+            return [Action(ActionKind.RUN, self.case_id, promptIds, f"agent_{i}", retain)]
         if self._data.decisionAgent is not None and not self._decisionDone:
             self._decisionDone = True
-            return [Action(ActionKind.RUN, self.case_id, self._BuildPrompt(self._data.decisionAgent), "decision", False)]
+            promptIds = self._BuildPrompt(self._data.decisionAgent)
+            return [Action(ActionKind.RUN, self.case_id, promptIds, "decision", False)]
         return None
 
     def observe(self, results: List[ActionResult]) -> None:
@@ -102,7 +141,12 @@ class MultiAgentFullConnectionWorkflow(Workflow):
         result = results[0].result
         self._finalResult = result
         if results[0].tag.startswith("agent_"):
-            self._outputs.append("" if result.output is None else str(result.output))
+            output = "" if result.output is None else str(result.output)
+            # Result.output_ids is the authoritative Method fragment. Methods
+            # exclude only the terminal stop token; preserve every returned ID
+            # exactly so retained KV and the next prompt use identical input.
+            outputIds = result.output_ids
+            self._outputs.append((output, outputIds))
 
     @property
     def finished(self) -> bool:

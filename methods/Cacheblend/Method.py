@@ -91,7 +91,7 @@ class CacheblendRepo(Method):
         self._stderrTail = deque(maxlen=200)
         #: Per-case warm-up chunks from the last :meth:`Prepare` call
         #: (empty chunks filtered out; used only to detect reuse in Run).
-        self._chunks: List[List[str]] = []
+        self._chunks: List[List[List[int]]] = []
 
     def Initialize(self, gpuIds: Sequence[int]) -> None:
         super().Initialize(gpuIds)
@@ -192,7 +192,7 @@ class CacheblendRepo(Method):
         return "".join(self._stderrTail)
 
     # ---------------------------------------------------------------- Method
-    def Prepare(self, data: List[List[str]]) -> None:
+    def Prepare(self, data: List[List[List[int]]]) -> None:
         """Collect every chunk's KV in the worker, batched across the batch.
 
         The chunks of all cases are sent in one ``collect`` request; the worker
@@ -202,22 +202,26 @@ class CacheblendRepo(Method):
         own (possibly shuffled) order — the per-chunk prefill is setup, not
         per-query work. Skipped entirely for ``fullPrefill`` control runs.
         """
-        self._chunks = [[c for c in (chunks or []) if c] for chunks in data]
+        self._chunks = [
+            [list(map(int, c)) for c in (chunks or []) if c]
+            for chunks in data
+        ]
         if self.fullPrefill:
             return
-        flat: List[str] = []
+        flat: List[List[int]] = []
         seen = set()
         for chunks in self._chunks:
             for c in chunks:
-                if c not in seen:
-                    seen.add(c)
+                key = tuple(c)
+                if key not in seen:
+                    seen.add(key)
                     flat.append(c)
         if flat:
-            self._Request({"op": "collect", "chunks": flat})
+            self._Request({"op": "collect", "chunk_ids": flat})
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -239,8 +243,8 @@ class CacheblendRepo(Method):
                 parts, reordered = self._splitForFuse(chunks, prompt)
                 wireParts = (
                     [
-                        [prepareIndex is not None, text]
-                        for prepareIndex, text in parts
+                        [prepareIndex is not None, ids]
+                        for prepareIndex, ids in parts
                     ]
                     if parts is not None
                     else None
@@ -260,9 +264,9 @@ class CacheblendRepo(Method):
                     maxNewTokens=maxNewTokens,
                     onlineStart=runStart,
                 )
+                if retain and result.output_ids and result.output_ids not in chunks:
+                    chunks.append(result.output_ids)
                 results.append(result)
-                if retain and result.output and result.output not in chunks:
-                    chunks.append(result.output)
                 continue
 
             wireParts, reordered = plans[i]
@@ -274,9 +278,9 @@ class CacheblendRepo(Method):
                     maxNewTokens=maxNewTokens,
                     onlineStart=runStart,
                 )
+                if retain and result.output_ids and result.output_ids not in chunks:
+                    chunks.append(result.output_ids)
                 results.append(result)
-                if retain and result.output and result.output not in chunks:
-                    chunks.append(result.output)
                 continue
 
             resp = self._Request(
@@ -294,14 +298,14 @@ class CacheblendRepo(Method):
                 reordered=reordered,
                 onlineStart=runStart,
             )
+            if retain and result.output_ids and result.output_ids not in chunks:
+                chunks.append(result.output_ids)
             results.append(result)
-            if retain and result.output and result.output not in chunks:
-                chunks.append(result.output)
 
         return results
 
 
-    def _splitForFuse(self, chunks: List[str], prompt: str):
+    def _splitForFuse(self, chunks: List[List[int]], prompt: List[int]):
         """Return interleaved cached/fresh parts for a fused run.
 
         Returns ``(parts, reordered)`` when at least one prepared chunk occurs in
@@ -325,7 +329,7 @@ class CacheblendRepo(Method):
 
     def _runFull(
         self,
-        prompt: str,
+        prompt: List[int],
         *,
         retain_output: bool = False,
         maxNewTokens: Optional[int] = None,
@@ -334,7 +338,7 @@ class CacheblendRepo(Method):
         resp = self._Request(
             {
                 "op": "full",
-                "text": prompt,
+                "input_ids": prompt,
                 "retain_output": retain_output,
                 "max_new_tokens": ResolveMaxNewTokens(maxNewTokens),
             }
@@ -358,6 +362,8 @@ class CacheblendRepo(Method):
             metadata["cacheblend_debug"] = resp["cacheblend_debug"]
         if "retained_tokens" in resp:
             metadata["retained_tokens"] = resp["retained_tokens"]
+        if "output_token_ids" in resp:
+            metadata["output_token_ids"] = resp["output_token_ids"]
         if full:
             metadata["full_prefill"] = True
         if reordered:
@@ -371,6 +377,7 @@ class CacheblendRepo(Method):
             total = float(total) + onlineOffset
         return Result(
             output=resp["text"],
+            output_ids=[int(token) for token in resp.get("output_token_ids", [])],
             performance={
                 TtftKey: ttft,
                 NumOutputTokensKey: resp["num_tokens"],

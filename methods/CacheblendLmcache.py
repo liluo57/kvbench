@@ -64,9 +64,9 @@ from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig, VllmSamplingParams
 
 from helpers.backends.Prompt import ComposeReuse
+from helpers.backends.Tokenization import OutputFragmentIds, TerminalStopIdsFromTokenizer
 from helpers.backends.VllmCacheblendPatches import (
     ApplyPatches,
-    BuildContextTokens,
     CreateBlendLlm,
     EncodeText,
     SepTokens,
@@ -146,12 +146,15 @@ class CacheblendLmcache(Method):
             tensorParallelSize=self.gpuNums,
         )
         self.tokenizer = self.llm.get_tokenizer()
+        self.terminalStopIds = TerminalStopIdsFromTokenizer(
+            self.tokenizer, self.samplingConfig
+        )
         self.sep = SepTokens(self.tokenizer)
         # First request in a fresh EngineCore: throw away its (corrupt) store.
         Warmup(self.llm, self.samplingConfig)
 
     # ---------------------------------------------------------------- Method
-    def _SaltTokens(self, prepare: List[str]) -> List[int]:
+    def _SaltTokens(self, prepare: List[List[int]]) -> List[int]:
         """A per-case token prefix that namespaces this case's cache keys.
 
         LMCache keys segments by *content hash* (chained through the prefix).
@@ -171,14 +174,18 @@ class CacheblendLmcache(Method):
         ``prepare`` is the case's *original-order* warm-up chunks — the salt
         stays tied to those even when ``Run`` rebuilds a reordered stream.
         """
-        text = "".join(prepare or [])
-        if not text:
+        if not prepare or not any(prepare):
             return []
-        h = hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
+        packed = b"".join(
+            int(token).to_bytes(4, "little", signed=True)
+            for chunk in prepare
+            for token in chunk
+        )
+        h = hashlib.md5(packed).hexdigest()[:12]
         return EncodeText(self.tokenizer, f" [kvbench:{h}] ")
 
     def _SaltedContextTokens(
-        self, chunks: List[str], prepare: List[str]
+        self, chunks: List[List[int]], prepare: List[List[int]]
     ) -> List[int]:
         """Assemble ``chunks`` with the per-case salt before *every* chunk.
 
@@ -199,16 +206,21 @@ class CacheblendLmcache(Method):
         """
         salt = self._SaltTokens(prepare)
         if not salt:
-            return BuildContextTokens(chunks, self.tokenizer, self.sep)
+            ids: List[int] = []
+            for i, chunk in enumerate(chunks):
+                if i > 0:
+                    ids += self.sep
+                ids += chunk
+            return ids
         ids: List[int] = []
         for i, chunk in enumerate(chunks):
             if i > 0:
                 ids += self.sep
             ids += salt
-            ids += EncodeText(self.tokenizer, chunk)
+            ids += chunk
         return ids
 
-    def Prepare(self, data: List[List[str]]) -> None:
+    def Prepare(self, data: List[List[List[int]]]) -> None:
         """Store the context chunks' KV for a batch of cases.
 
         For each case, each chunk is encoded separately and joined by the
@@ -226,7 +238,7 @@ class CacheblendLmcache(Method):
         self._states = []
         ctxTokensList: List[Optional[List[int]]] = []
         for chunks in data:
-            prepare = list(chunks or [])
+            prepare = [list(map(int, chunk)) for chunk in (chunks or [])]
             contextTokens = self._SaltedContextTokens(prepare, prepare)
             ctxTokensList.append(contextTokens or None)
             self._states.append(
@@ -238,7 +250,7 @@ class CacheblendLmcache(Method):
 
     def Run(
         self,
-        data: List[str],
+        data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
@@ -257,7 +269,7 @@ class CacheblendLmcache(Method):
         tokenStreams: List[List[int]] = []
         metas: List[dict] = []
         for run_input, state in zip(data, self._states):
-            prepare: List[str] = state["prepare"]
+            prepare: List[List[int]] = state["prepare"]
             contextTokens: List[int] = state["context_tokens"]
             order, suffix = ComposeReuse(prepare, run_input)
             if order is not None and contextTokens:
@@ -271,7 +283,7 @@ class CacheblendLmcache(Method):
                         ids
                         + self.sep
                         + self._SaltTokens(prepare)
-                        + EncodeText(self.tokenizer, suffix)
+                        + suffix
                     )
                 tokenStreams.append(ids)
                 nInput = len(ids)
@@ -282,7 +294,7 @@ class CacheblendLmcache(Method):
             
             # No reusable content (empty warm-up, or no chunks match the start
             # of run_input): generate the whole prompt.
-            ids = EncodeText(self.tokenizer, run_input)
+            ids = list(run_input)
             tokenStreams.append(ids)
             nInput = len(ids)
             metas.append({"n_input": nInput})
@@ -291,7 +303,7 @@ class CacheblendLmcache(Method):
             tokenStreams, maxNewTokens, onlineStart=runStart
         )
         results = []
-        for (text, ttft, nTokens, totalTime, numCached), meta in zip(
+        for (text, outputIds, ttft, nTokens, totalTime, numCached), meta in zip(
             batchOut, metas
         ):
             # Actual cache reuse as reported by the engine per request: the
@@ -313,6 +325,7 @@ class CacheblendLmcache(Method):
             results.append(
                 Result(
                     output=text,
+                    output_ids=outputIds,
                     performance={
                         TtftKey: ttft,
                         NumOutputTokensKey: nTokens,
@@ -387,6 +400,7 @@ class CacheblendLmcache(Method):
         ttfts: Dict[str, float] = {}
         numCached: Dict[str, int] = {}
         texts: Dict[str, str] = {}
+        outputs: Dict[str, List[int]] = {}
         tokenLens: Dict[str, int] = {}
         while engine.has_unfinished_requests():
             for out in engine.step():
@@ -400,14 +414,27 @@ class CacheblendLmcache(Method):
                     int(getattr(out, "num_cached_tokens", 0) or 0),
                 )
                 if out.finished and out.outputs:
-                    texts[rid] = out.outputs[0].text
-                    tokenLens[rid] = len(out.outputs[0].token_ids)
+                    completion = out.outputs[0]
+                    texts[rid] = completion.text
+                    tokenLens[rid] = len(completion.token_ids)
+                    stopReason = getattr(completion, "stop_reason", None)
+                    explicitStopIds = (
+                        [int(stopReason)]
+                        if isinstance(stopReason, int)
+                        and not isinstance(stopReason, bool)
+                        else []
+                    )
+                    outputs[rid] = OutputFragmentIds(
+                        completion.token_ids,
+                        [*self.terminalStopIds, *explicitStopIds],
+                    )
         totalTime = time.perf_counter() - t0
         n = len(requestIds) or 1
         amortized = totalTime / n
         return [
             (
                 texts.get(rid, ""),
+                outputs.get(rid, []),
                 float(ttfts.get(rid, 0.0) + onlineOffset),
                 tokenLens.get(rid, 0),
                 amortized,

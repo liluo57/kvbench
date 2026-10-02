@@ -22,12 +22,16 @@ class _TwoRunWorkflow(Workflow):
 
     def next(self):
         if self.step == 0:
-            action = Action(ActionKind.PREPARE, self.case_id, [f"ctx-{self.case_id}"])
+            action = Action(
+                ActionKind.PREPARE,
+                self.case_id,
+                [[ord(character) for character in f"ctx-{self.case_id}"]],
+            )
         elif self.step == 1:
             action = Action(
                 ActionKind.RUN,
                 self.case_id,
-                f"case-{self.case_id}:first",
+                [ord(character) for character in f"case-{self.case_id}:first"],
                 "first",
                 True,
             )
@@ -35,7 +39,7 @@ class _TwoRunWorkflow(Workflow):
             action = Action(
                 ActionKind.RUN,
                 self.case_id,
-                f"case-{self.case_id}:final",
+                [ord(character) for character in f"case-{self.case_id}:final"],
                 "final",
                 False,
             )
@@ -93,9 +97,10 @@ class _RecordingMethod(Method):
         self.prepareCalls.append(data)
 
     def Run(self, data, retainOutput=None):
-        self.runCalls.append((list(data), list(retainOutput or [])))
+        decoded = ["".join(chr(token) for token in prompt) for prompt in data]
+        self.runCalls.append((decoded, list(retainOutput or [])))
         results = []
-        for prompt in data:
+        for prompt in decoded:
             final = prompt.endswith(":final")
             results.append(
                 Result(
@@ -155,8 +160,11 @@ def test_evaluate_pair_batches_actions_and_aggregates_every_run():
     assert reuse["reuse_ratio_weight_total"] == 12
 
     assert method.prepareCalls == [
-        [["ctx-0"], ["ctx-1"]],
-        [["ctx-2"]],
+        [
+            [[ord(character) for character in "ctx-0"]],
+            [[ord(character) for character in "ctx-1"]],
+        ],
+        [[[ord(character) for character in "ctx-2"]]],
     ]
     assert method.runCalls == [
         (["case-0:first", "case-1:first"], [True, True]),
@@ -230,7 +238,11 @@ class _OneActionWorkflow(Workflow):
 
     def next(self):
         self.started = True
-        data = ["context"] if self.kind == ActionKind.PREPARE else "prompt"
+        data = (
+            [[ord("c"), ord("t"), ord("x")]]
+            if self.kind == ActionKind.PREPARE
+            else [ord(character) for character in "prompt"]
+        )
         return [Action(self.kind, self.case_id, data)]
 
     def observe(self, results):
