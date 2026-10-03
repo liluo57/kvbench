@@ -17,14 +17,15 @@ ModelConfig:
 FullPrefillVllm:
   MaxNumSeqs: 32
 
+# HYPIC and LinearKV are bundled in methods/hypic and share the project Python.
+# Run ./setup.py --hypic to install dependencies and build the retained CUDA ops.
 Hypic:
-  RepoPath: ~/hypic
   # Cap the mamba / linear-attention state pool size per rank. SGLang's
   # auto-fit (mamba_full_memory_ratio=0.9) defaults to ~300 slots, which on
   # Qwen3.5-35B eats ~47 GiB per GPU and leaves no room for prefill workspace.
   # PIC PICache segment count rarely exceeds a few dozen in practice; 32 is
   # safe for the current agent tasks. Set to -1 to fall back to SGLang's
-  # auto-fit (default when this key is absent).
+  # auto-fit. The default when this key is absent is 32.
   MaxMambaCacheSize: 32
 
 Engine:

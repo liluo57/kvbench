@@ -1,4 +1,4 @@
-"""Concrete KV optimization methods. One module per method.
+"""Concrete KV optimization methods and their public class names.
 
 Each constructor declares the strict ``gpuNums`` requirement and a relative
 ``perfWeight``.  The Engine binds concrete GPU ids inside a worker process.
@@ -26,15 +26,15 @@ Each constructor declares the strict ``gpuNums`` requirement and a relative
 """
 
 from .CacheblendLmcache import CacheblendLmcache
-from .CacheblendRepo import CacheblendRepo, NaiveCacheblendRepo
+from .Cacheblend import CacheblendRepo, NaiveCacheblendRepo
 from .A3Repo import A3Repo
 from .FullPrefill import FullPrefillTransformer, FullPrefillVllm
-from .Hypic import HypicMethod
+from .hypic import HypicMethod, LinearKVMethod
 from .Naive import NaiveTransformer
 from .KVComm import KVCommTransformer
 from .ProphetKV import ProphetKV
 from .CacheClip import CacheClip
-from .DependencyAnalysis import DependencyAnalysisMethod, DependencyAnalysisTransformer
+from .DependencyAnalysis import DependencyAnalysisMethod
 from .Rollout import RolloutMethod
 from .KVPacket import KVPacket
 from .KVPacketRecompute import (
@@ -43,7 +43,6 @@ from .KVPacketRecompute import (
     RandRecomputeTransformer,
 )
 
-RandRecompute = RandRecomputeTransformer
 __all__ = [
     "CacheblendLmcache",
     "CacheblendRepo",
@@ -52,16 +51,15 @@ __all__ = [
     "FullPrefillTransformer",
     "FullPrefillVllm",
     "HypicMethod",
+    "LinearKVMethod",
     "NaiveTransformer",
     "KVCommTransformer",
     "ProphetKV",
     "CacheClip",
     "DependencyAnalysisMethod",
-    "DependencyAnalysisTransformer",
     "RolloutMethod",
     "KVPacket",
     "EPIC",
     "RandRecomputeTransformer",
-    "RandRecompute",
     "FullRecomputeTransformer",
 ]

@@ -31,7 +31,7 @@ Refer to each class constructor for its implementation and configurable paramete
 | `FullPrefillTransformer`, `FullPrefillVllm` | Full-prefill baselines using Transformers and vLLM, respectively. |
 | `NaiveTransformer`, `NaiveCacheblendRepo` | Controls that directly reuse cached state without repairing context changes. |
 | `CacheblendRepo`, `CacheblendLmcache` | CacheBlend recomputation and fusion implementations; the former runs the bundled backend in `methods/Cacheblend` through a worker sharing the main project's Python environment. |
-| `HypicMethod` | HYPIC position-independent reuse. Token-ID input support is temporarily deferred. |
+| `HypicMethod`, `LinearKVMethod` | Built-in hybrid position-independent reuse in `methods/hypic`; both accept token IDs and explicit segment boundaries. HYPIC defaults to transition/RoPE/seam repair; LinearKV uses the last matched GDN state and static chunk-prefix repair. |
 | `A3Repo` | Adapter for the A3 repository implementation. |
 | `ProphetKV` | ProphetKV implementation. |
 | `CacheClip` | CPU auxiliary-token selection with sparse repair of primary KV caches. Prepared chunks and prompts remain authoritative primary-model token IDs; selector text and character spans are derived locally from each prepared ID chunk. |
@@ -61,6 +61,10 @@ report = Engine().Evaluate(tasks=tasks, methods=methods, metrics=[TTFTMetric()])
 
 `tag` is appended to the report label (for example, `cacheblend_repo(0.15)`). `gpuNums` declares how many GPUs the method requires; `perfWeight` controls its scheduling weight. The model path, global sampling settings, and backend paths come from `config.yaml`.
 
+Import public Method classes from `methods`. Each implementation has one class
+name: `RandRecomputeTransformer`, `DependencyAnalysisMethod`, and `KVPacket`
+are their respective public names.
+
 ## Adding a method
 
 1. Add a class under `methods/` that inherits from `Method` and declares a stable `name`. Call `super().__init__(...)` in the constructor and store algorithm parameters. Do not create models or occupy GPUs in the constructor.
@@ -71,3 +75,22 @@ report = Engine().Evaluate(tasks=tasks, methods=methods, metrics=[TTFTMetric()])
 6. Clear Case/batch state in `Reset` and release backend resources in `Close`. Export the class from `methods/__init__.py`, then add an instance to the `methods` list in `Main.py`.
 
 A Workflow may provide multiple token chunks or preserve state across multiple RUN actions. Handle these inputs according to the method's algorithm, and prevent one Case's cache from leaking into another when cross-Case reuse is not intended.
+
+HYPIC and LinearKV share the project environment. Run `./setup.py --hypic` to
+prepare their dependencies and compile the bundled CUDA ops against the active
+PyTorch ABI. They do not require an external HYPIC checkout or an installed
+SGLang package. Building requires a CUDA 12.9+ development toolkit (set
+`CUDA_HOME`); setup reuses these compiler settings for shape-specialized JIT
+kernels in workers. The retained native ops serve unquantized FP16/BF16
+checkpoints on NVIDIA GPUs. `Hypic.MaxMambaCacheSize` caps per-rank recurrent state slots
+(default 32; -1 selects auto-fit).
+
+`HypicMethod(picMode="transition_rope_recompute", seamTokens=8)` exposes the
+upstream HYPIC modes. `LinearKVMethod(recompRatio=0.2)` uses the branch's
+paper-based LinearKV implementation and static per-chunk prefix selector;
+its recurrent replay currently supports Qwen3.5/Qwen3.8 GDN models. Both accept
+`fullPrefill=True` for the same-backend no-PIC control, which keeps ordinary
+prefix caching enabled. Each case owns an isolated prepare/run/reset lifecycle.
+The Task's input IDs pass through unchanged. Retained outputs are registered
+from authoritative generated IDs with terminal stop IDs removed, outside
+online TTFT/total time.

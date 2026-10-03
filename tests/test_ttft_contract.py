@@ -8,10 +8,9 @@ import pytest
 from helpers.backends.VllmHelper import GenerateBatch
 from methods.A3Repo import A3Repo
 from methods.CacheClip import CacheClip
-from methods.CacheblendRepo import CacheblendRepo
+from methods import CacheblendRepo, HypicMethod
 from methods.DependencyAnalysis import DependencyAnalysisMethod
 from methods.FullPrefill import FullPrefillTransformer
-from methods.Hypic import HypicMethod
 from methods.Naive import NaiveTransformer
 from methods.ProphetKV import ProphetKV
 from methods.Cacheblend.Worker import CacheBlendWorker
@@ -122,7 +121,7 @@ def test_cacheclip_zero_match_ttft_includes_full_id_generation():
 
 
 class _HypicTimingEngine:
-    def generate(self, _prompt, sampling_params, stream):
+    def generate(self, *, input_ids, pic_segments, sampling_params, stream):
         delay = 0.05 if sampling_params["max_new_tokens"] <= 4 else 0.03
         time.sleep(delay)
         yield {
@@ -133,16 +132,18 @@ class _HypicTimingEngine:
 
 
 def test_hypic_prepare_is_excluded_but_online_matching_is_included(monkeypatch):
-    import methods.Hypic as hypic_module
+    import importlib
+    hypic_module = importlib.import_module("methods.hypic.Method")
 
     method = object.__new__(HypicMethod)
     method.engine = _HypicTimingEngine()
     method.fullPrefill = False
     method.modelPath = ""
-    method.separator = "<<PIC_SEP>>"
     method.picMode = "addition"
     method.samplingConfig = {}
     method._states = []
+    method._systemIds, method._tailIds = [], [3]
+    method._terminalStopIds, method._tokenizer = [], None
 
     monkeypatch.setattr(hypic_module, "arch_family", lambda _path: "llama")
 
@@ -152,8 +153,8 @@ def test_hypic_prepare_is_excluded_but_online_matching_is_included(monkeypatch):
 
     monkeypatch.setattr(hypic_module, "ComposeInterleavedReuse", delayed_no_match)
 
-    method.Prepare([["offline chunk"]])
-    result = method.Run(["online prompt"])[0]
+    method.Prepare([[[7, 8]]])
+    result = method.Run([[41, 42]])[0]
 
     # Prepare sleeps for about 50 ms, but only the online 20 ms match plus the
     # 30 ms first-token delay belongs to this TTFT.

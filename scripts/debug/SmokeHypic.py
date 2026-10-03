@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from methods import HypicMethod  # noqa: E402
+from methods import HypicMethod, LinearKVMethod  # noqa: E402
 
 
 def Main() -> None:
@@ -29,7 +29,8 @@ def Main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--mem-fraction-static", type=float, default=0.80)
     parser.add_argument("--lines-per-chunk", type=int, default=192)
-    parser.add_argument("--pic-mode", default="addition")
+    parser.add_argument("--pic-mode", default="transition_rope_recompute")
+    parser.add_argument("--linearkv", action="store_true")
     parser.add_argument(
         "--task",
         choices=["niah", "cwe", "vt", "musique", "samsum", "2wikimultihopqa"],
@@ -51,25 +52,28 @@ def Main() -> None:
     )
     args = parser.parse_args()
 
-    method = HypicMethod(
+    method = (LinearKVMethod if args.linearkv else HypicMethod)(
         memFractionStatic=args.mem_fraction_static,
-        picMode=args.pic_mode,
+        **({} if args.linearkv else {"picMode": args.pic_mode}),
         fullPrefill=args.full_prefill,
         tag="full_prefill" if args.full_prefill else None,
     )
     if args.through_engine:
         from core.engine import Engine
+        from core.Config import LoadConfig
         from metrics import TTFTMetric, ThroughputMetric
         from tasks.FreshGap import FreshGapTask
 
-        report = Engine(
-            availableGpuIds=[args.gpu],
-            batchSize=1,
-            initializeTimeout=600,
-            taskTimeout=600,
-            shutdownGracePeriod=90,
-            tui=False,
-        ).Evaluate(
+        LoadConfig().setdefault("Engine", {}).update(
+            AvailableGpuIds=[args.gpu],
+            BatchSize=1,
+            InitializeTimeoutSec=600,
+            TaskTimeoutSec=600,
+            ShutdownGracePeriodSec=90,
+            Tui=False,
+            TuiWaitForQuit=False,
+        )
+        report = Engine().Evaluate(
             tasks=[
                 FreshGapTask(
                     nCases=1,
@@ -163,10 +167,12 @@ def Main() -> None:
         first = "Document A says the answer is amber. " * 32
         second = "Document B discusses rivers and mountains. " * 32
         print("[smoke] prepare", flush=True)
-        method.Prepare([[first, second]])
+        from helpers.backends.Tokenization import EncodeChunks, EncodeText
+        chunks = EncodeChunks([first, second], method.modelPath)
+        method.Prepare([chunks])
         print("[smoke] reordered run", flush=True)
         result = method.Run(
-            [second + first + "\nWhat answer does document A give? Answer briefly."],
+            [chunks[1] + chunks[0] + EncodeText("\nWhat answer does document A give? Answer briefly.", method.modelPath)],
             maxNewTokens=args.max_new_tokens,
         )[0]
         print(

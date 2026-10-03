@@ -451,9 +451,4 @@ class KVPacket(Method):
             pass
 
 
-KVPacketTransformer = KVPacket
-KVPacketMethod = KVPacket
-KvPacket = KVPacket
-
-
 __all__ = ["KVPacket"]

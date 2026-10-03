@@ -2,7 +2,7 @@ import importlib
 from pathlib import Path
 import sys
 
-from methods.CacheblendRepo import CacheblendRepo
+from methods import CacheblendRepo
 
 
 _helper = importlib.import_module("methods.Cacheblend.Worker")

@@ -1,0 +1,34 @@
+# Shares requirement.txt's PyTorch and Transformers; no SGLang installation.
+# CUDA/Triton ops are built from backend/kvbench_hypic_kernel against this ABI.
+aiohttp>=3.9
+compressed-tensors>=0.17,<0.18
+einops>=0.8
+fastapi>=0.115
+flashinfer-python==0.6.16.post3
+apache-tvm-ffi>=0.1.11,<0.2
+torch-memory-saver==0.0.10
+huggingface-hub>=0.34
+kernels==0.11.0
+llguidance>=0.7
+msgspec>=0.19
+ninja>=1.11
+numpy>=1.26
+orjson>=3.10
+packaging>=24
+partial-json-parser>=0.2
+pillow>=10
+prometheus-client>=0.20
+psutil>=6
+pybase64>=1.4
+pyzmq>=25
+safetensors>=0.4
+scipy>=1.13
+sentencepiece>=0.2
+setproctitle>=1.3
+tiktoken>=0.8
+tqdm>=4.66
+# Keep torchvision aligned with the project's chosen PyTorch CUDA build.
+torchvision>=0.28,<0.29
+uvicorn>=0.30
+uvloop>=0.21
+xgrammar>=0.2.1,<0.3

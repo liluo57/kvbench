@@ -22,19 +22,12 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.Config import Get  # noqa: E402
-
-_HYPIC_CONFIG = Get("Hypic", {}) or {}
-_HYPIC_ROOT = os.environ.get("HYPIC_REPO_PATH") or _HYPIC_CONFIG.get("RepoPath")
-if not _HYPIC_ROOT:
-    raise RuntimeError("Set Hypic.RepoPath or HYPIC_REPO_PATH to the HYPIC checkout")
-HYPIC = Path(_HYPIC_ROOT).expanduser().resolve()
-sys.path.insert(0, str(HYPIC / "python"))
-
-import sglang as sgl  # noqa: E402
+from methods.hypic.backend.kvbench_hypic import Engine  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from sglang.srt.pic.segmenter import segment_hash  # noqa: E402
+from methods.hypic.backend.kvbench_hypic.srt.pic.segmenter import (  # noqa: E402
+    segment_hash, split_and_tokenize,
+)
 
 
 SEP = "<<PIC_SEP>>"
@@ -93,7 +86,7 @@ def main() -> None:
         log_level="error",
         pic_enable=True,
         pic_mode=args.mode,
-        pic_separator_str=SEP,
+        attention_backend="flashinfer",
         max_mamba_cache_size=int(os.environ.get("PIC_MAMBA", "32")),
     )
     warm = (
@@ -106,14 +99,16 @@ def main() -> None:
         f"C2_hash={c2_hash} warm_tokens={len(tok.encode(warm, add_special_tokens=False))}",
         flush=True,
     )
-    engine = sgl.Engine(**kwargs)
+    warm_ids, warm_segments = split_and_tokenize(warm, tok, SEP)
+    measured_ids, measured_segments = split_and_tokenize(MEASURED, tok, SEP)
+    engine = Engine(**kwargs)
     try:
         warm_out = engine.generate(
-            warm,
+            input_ids=warm_ids, pic_segments=warm_segments,
             sampling_params={"temperature": 0.0, "max_new_tokens": 4},
         )
         measured = engine.generate(
-            MEASURED,
+            input_ids=measured_ids, pic_segments=measured_segments,
             sampling_params={"temperature": 0.0, "max_new_tokens": 1},
         )
         print(

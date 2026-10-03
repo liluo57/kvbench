@@ -37,7 +37,7 @@ def main() -> None:
 
     from core.engine import Engine
     from metrics import TTFTMetric, ThroughputMetric
-    from methods.Hypic import HypicMethod
+    from methods import HypicMethod
     from tasks import HotpotQATask
 
     method_kwargs = {

@@ -1,433 +1,190 @@
+import importlib
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from core import Config
 from core.Sampling import SglangSamplingParams
-from methods.Hypic import (
-    HypicMethod,
-    _BuildHypicEngineKwargs,
-    _QWEN35_ASSISTANT_MARKER,
-    _QWEN35_CHAT_PREFIX,
-    _QWEN35_SYSTEM,
-    _Qwen35RawBody,
-    _Qwen35IndependentPicWarmups,
-    _SegmentedPrompt,
-    _WARMUP_TAIL,
-    _WARMUP_MAX_NEW_TOKENS,
-)
-from methods.CacheClip import CacheClip
-from methods.KVPacketRecompute import EPIC
-from tasks.FreshGap import FreshGapTask
+from methods import HypicMethod, LinearKVMethod
+
+adapter = importlib.import_module('methods.hypic.Method')
 
 
-@pytest.fixture
-def fake_hypic_config(monkeypatch):
-    """Point Config.Get at an in-memory Hypic dict.
-
-    ``hypic_cfg`` is the dict that ``Config.Get("Hypic", {})`` will return.
-    Default values match ``config.yaml`` (``MaxMambaCacheSize: 32``).
-
-    Both ``core.Config.Get`` and ``methods.Hypic.Get`` are patched because
-    Hypic.py imports ``Get`` directly into its module namespace.
-    """
-    from methods import Hypic as HypicModule
-
-    default = {"MaxMambaCacheSize": 32}
-    hypic_cfg = dict(default)
-
-    def _override(**overrides):
-        hypic_cfg.update(overrides)
-        return hypic_cfg
-
-    def _fake_get(key, default=None, config=None):
-        if key == "Hypic":
-            return hypic_cfg
-        return default
-
-    monkeypatch.setattr(Config, "Get", _fake_get)
-    monkeypatch.setattr(HypicModule, "Get", _fake_get)
-    return _override
+@pytest.fixture(autouse=True)
+def config(monkeypatch):
+    monkeypatch.setattr(adapter, 'Get', lambda key, default=None: {'MaxMambaCacheSize': 32})
 
 
-class _FakeEngine:
+class FakeEngine:
     def __init__(self):
         self.calls = []
-        self.flushes = 0
         self.closed = False
+        self.flushes = 0
+        self.output = [31, 99, 32, 99]
+        self.finishReason = None
 
-    def generate(self, prompt, sampling_params, stream):
-        self.calls.append((prompt, sampling_params, stream))
-        is_run = sampling_params["max_new_tokens"] > 1
-        cached = 7 if is_run else 0
-        prompt_tokens = 10 if is_run else 4
-        yield {
-            "text": None,
-            "output_ids": [31],
-            "meta_info": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": 1,
-                "cached_tokens": cached,
-            },
-        }
-        yield {
-            "text": "answer",
-            "output_ids": [31, 32],
-            "meta_info": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": 2,
-                "cached_tokens": cached,
-            },
-        }
+    def generate(self, *, input_ids, pic_segments, sampling_params, stream):
+        self.calls.append((list(input_ids), pic_segments, sampling_params))
+        cached = min(7, len(input_ids)) if sampling_params['max_new_tokens'] > 1 else 0
+        yield dict(text='wrong text', output_ids=[31], meta_info={'cached_tokens': cached})
+        yield dict(text='wrong text', output_ids=self.output,
+                   meta_info={'prompt_tokens': len(input_ids), 'cached_tokens': cached,
+                              'finish_reason': self.finishReason})
 
     def flush_cache(self):
         self.flushes += 1
-        return SimpleNamespace(success=True, message="ok")
+        return SimpleNamespace(success=True)
 
     def shutdown(self):
         self.closed = True
 
 
-def _method():
-    method = HypicMethod(maxNewTokens=8)
-    # Keep generic method tests independent of the checkout's active model.
-    method.modelPath = ""
-    method.engine = _FakeEngine()
-    return method
+class FakeTokenizer:
+    def encode(self, text, add_special_tokens=False):
+        raise AssertionError('Prepared, online and output IDs must never be re-encoded')
+
+    def decode(self, ids, skip_special_tokens=True):
+        return '/'.join(map(str, ids))
 
 
-def test_segmented_prompt_drops_empty_spans_and_rejects_separator_collision():
-    assert _SegmentedPrompt(["a", "", "b"], "<sep>") == "a<sep>b"
-    with pytest.raises(ValueError, match="contains"):
-        _SegmentedPrompt(["a<sep>b"], "<sep>")
+def method(kind=HypicMethod, **kwargs):
+    obj = kind(**kwargs)
+    obj.modelPath = ''
+    obj.engine = FakeEngine()
+    obj._tokenizer = FakeTokenizer()
+    obj._systemIds = [100]
+    obj._tailIds = [101]
+    obj._terminalStopIds = [99]
+    return obj
 
 
-def test_prepare_makes_every_user_chunk_non_final_and_run_marks_reordered_hits():
-    method = _method()
-    method.Prepare([["A", "B"]])
-
-    warmPrompt, warmParams, warmStream = method.engine.calls[0]
-    assert warmPrompt == method.separator.join(["A", "B", _WARMUP_TAIL])
-    assert warmParams == SglangSamplingParams(
-        method.samplingConfig, _WARMUP_MAX_NEW_TOKENS
-    )
-    assert warmStream is True
-
-    result = method.Run(["head-B-middle-A-tail"])[0]
-    runPrompt = method.engine.calls[1][0]
-    assert runPrompt == method.separator.join(
-        ["head-", "B", "-middle-", "A", "-tail"]
-    )
-    assert result.output == "answer"
-    assert result.metadata == {
-        "backend": "hypic-sglang",
-        "pic_mode": "addition",
-        "n_input": 10,
-        "num_cached_tokens": 7,
-        "reuse_ratio": 0.7,
-        "n_pic_segments": 5,
-        "matched_prepared_segments": 2,
-    }
-    assert result.performance["num_output_tokens"] == 2
-    assert result.performance["ttft"] >= 0
-    assert result.performance["total_time"] >= result.performance["ttft"]
+@pytest.mark.parametrize('kind', [HypicMethod, LinearKVMethod])
+def test_token_ids_survive_reordering_fresh_gaps_and_special_tokens(kind):
+    obj = method(kind)
+    obj.Prepare([[[1, 99, 2], [3, 4]]])
+    ids = [10, 3, 4, 11, 1, 99, 2, 12]
+    result = obj.Run([ids], maxNewTokens=8)[0]
+    sent, segments, sampling = obj.engine.calls[-1]
+    assert sent == ids
+    assert segments == [(0, 1), (1, 3), (3, 4), (4, 7), (7, 8)]
+    assert sampling == SglangSamplingParams(obj.samplingConfig, 8)
+    assert result.output_ids == [31, 99, 32]
+    assert result.output == '31/99/32'
+    assert result.metadata['matched_prepared_segments'] == 2
+    assert result.metadata['n_input'] == len(ids)
+    assert result.metadata['reuse_ratio'] == 7 / len(ids)
+    assert result.performance['num_output_tokens'] == 3
+    assert 0 <= result.performance['ttft'] <= result.performance['total_time']
 
 
-def test_qwen35_prepare_uses_independent_priming_for_all_pic_modes(monkeypatch):
-    from methods import Hypic as HypicModule
-
-    method = _method()
-    method.modelPath = "/fake/Qwen3.5-35b"
-    monkeypatch.setattr(HypicModule, "arch_family", lambda _path: "qwen3_5")
-
-    method.Prepare([["A", "B"]])
-
-    assert [call[0] for call in method.engine.calls] == [
-        method.separator.join([_QWEN35_SYSTEM, "A", _WARMUP_TAIL]),
-        method.separator.join([_QWEN35_SYSTEM, "B", _WARMUP_TAIL]),
+def test_hypic_uses_independent_priming_without_rewriting_online_chat(monkeypatch):
+    obj = method()
+    monkeypatch.setattr(adapter, 'arch_family', lambda path: 'qwen3_5')
+    obj.Prepare([[[1, 2], [3, 4]]])
+    assert [call[:2] for call in obj.engine.calls] == [
+        ([100, 1, 2, 101], [(0, 1), (1, 3), (3, 4)]),
+        ([100, 3, 4, 101], [(0, 1), (1, 3), (3, 4)]),
     ]
-    assert _Qwen35IndependentPicWarmups(["A", "", "B"], method.separator) == [
-        method.separator.join([_QWEN35_SYSTEM, "A", _WARMUP_TAIL]),
-        method.separator.join([_QWEN35_SYSTEM, "B", _WARMUP_TAIL]),
+    chat = [151644, 20, 3, 4, 151645, 151644, 21]
+    obj.Run([chat])
+    assert obj.engine.calls[-1][0] == chat
+
+
+def test_linearkv_warms_one_segment_without_system_or_tail():
+    obj = method(LinearKVMethod)
+    obj.Prepare([[[1, 2], [3, 4]]])
+    assert [call[:2] for call in obj.engine.calls] == [
+        ([1, 2], [(0, 2)]), ([3, 4], [(0, 2)])
     ]
 
 
-def test_fresh_gap_keeps_a_fresh_query_tail_after_final_prepared_chunk(monkeypatch):
-    from tasks import FreshGap as FreshGapModule
-    from helpers.backends import ModelAdapter
-
-    class FakeTokenizer:
-        def encode(self, text, add_special_tokens=False):
-            return [ord(character) for character in text]
-
-    monkeypatch.setattr(ModelAdapter, "_tokenizer", lambda _path: FakeTokenizer())
-
-    monkeypatch.setattr(
-        FreshGapModule,
-        "user_turn_prefix",
-        lambda *_args, **_kwargs: "<user>",
-    )
-    monkeypatch.setattr(
-        FreshGapModule,
-        "assistant_turn_suffix",
-        lambda *_args, **_kwargs: "<assistant>",
-    )
-    task = FreshGapTask(nCases=1, linesPerChunk=1)
-    case = next(task.Cases())
-    encode = lambda text: [ord(character) for character in text]
-
-    assert case.input.prepare_input == [encode(task._a), encode(task._c)]
-    assert case.input.run_input == (
-        encode(task._a + case.metadata["fresh"] + task._c + task._query_tail)
-    )
-    query_tail_ids = encode(task._query_tail)
-    assert case.input.run_input[-len(query_tail_ids):] == query_tail_ids
+def test_backend_reported_stop_id_is_stripped_without_removing_interior_special_ids():
+    obj = method()
+    obj.engine.output = [31, 99, 32, 77]
+    obj.engine.finishReason = {'type': 'stop', 'matched': 77}
+    result = obj.Run([[1, 2]], retainOutput=[True])[0]
+    assert result.output_ids == [31, 99, 32]
+    assert obj._states == [[[31, 99, 32]]]
 
 
-@pytest.mark.parametrize(
-    ("method_factory", "message"),
-    [
-        pytest.param(HypicMethod, "HYPIC token ID interface pending", id="hypic"),
-        pytest.param(EPIC, "KVPacket recompute token ID interface pending", id="kvpacket-recompute"),
-    ],
-)
-def test_deferred_methods_reject_initialization_until_token_id_interface_is_ready(
-    method_factory, message
-):
-    with pytest.raises(NotImplementedError, match=message):
-        method_factory().Initialize([])
+@pytest.mark.parametrize('kind', [HypicMethod, LinearKVMethod])
+def test_output_retention_reuses_authoritative_ids_and_excludes_warmup_timing(kind):
+    obj = method(kind)
+    obj.Prepare([[[1, 2]]])
+    original = obj._Warmup
+    def delayed(ids):
+        time.sleep(0.02)
+        original(ids)
+    obj._Warmup = delayed
+    start = time.perf_counter()
+    result = obj.Run([[1, 2, 10]], retainOutput=[True], maxNewTokens=8)[0]
+    assert time.perf_counter() - start >= result.performance['total_time'] + 0.015
+    assert obj._states == [[[1, 2], [31, 99, 32]]]
+    assert result.output_ids == [31, 99, 32]
+    obj.Run([[31, 99, 32, 10]])
+    assert obj.engine.calls[-1][:2] == ([31, 99, 32, 10], [(0, 3), (3, 4)])
 
 
-def test_cacheclip_initialize_uses_base_gpu_validation_not_deferred_guard():
-    with pytest.raises(ValueError, match="requires exactly 1 GPU"):
-        CacheClip(auxiliaryModelPath="/unused").Initialize([])
+def test_no_match_and_full_prefill_keep_exact_ids():
+    for obj in (method(), method(fullPrefill=True)):
+        obj.Prepare([[[1, 2]]])
+        obj.Run([[5, 99, 6]])
+        assert obj.engine.calls[-1][0] == [5, 99, 6]
+        assert obj.engine.calls[-1][1] == (None if obj.fullPrefill else [(0, 3)])
 
 
-def test_run_without_a_match_preserves_the_original_prompt():
-    method = _method()
-    method.Prepare([["cached"]])
-    result = method.Run(["plain prompt"])[0]
-
-    assert method.engine.calls[-1][0] == "plain prompt"
-    assert result.metadata["n_pic_segments"] == 1
-    assert result.metadata["matched_prepared_segments"] == 0
+def test_repeated_chunk_occurrences_are_distinct_segments():
+    obj = method()
+    obj.Prepare([[[1, 2]]])
+    result = obj.Run([[1, 2, 3, 1, 2, 4]])[0]
+    assert obj.engine.calls[-1][1] == [(0, 2), (2, 3), (3, 5), (5, 6)]
+    assert result.metadata['matched_prepared_segments'] == 2
 
 
-def test_run_retains_output_as_a_segment_for_a_later_run():
-    method = _method()
-    method.Prepare([["cached"]])
-
-    method.Run(["cached prompt"], retainOutput=[True])
-
-    retentionPrompt, retentionParams, retentionStream = method.engine.calls[2]
-    assert retentionPrompt == method.separator.join(["answer", _WARMUP_TAIL])
-    assert retentionParams["max_new_tokens"] == _WARMUP_MAX_NEW_TOKENS
-    assert retentionStream is True
-    assert method._states[0]["prepare"] == ["cached", "answer"]
-
-    method.Run(["prefix answer suffix"])
-    assert method.engine.calls[3][0] == method.separator.join(
-        ["prefix ", "answer", " suffix"]
-    )
+def test_prepare_copies_ids_reset_flushes_and_close_shuts_down():
+    obj = method()
+    chunks = [[1, 2]]
+    obj.Prepare([chunks])
+    chunks[0].append(3)
+    assert obj._states == [[[1, 2]]]
+    engine = obj.engine
+    obj.Reset()
+    assert not obj._states and engine.flushes == 1
+    obj.Close()
+    obj.Close()
+    assert engine.closed and obj.engine is None
 
 
-def test_run_retains_output_even_without_a_prepare_action():
-    method = _method()
-
-    method.Run(["prompt"], retainOutput=[True])
-
-    assert method._states[0]["prepare"] == ["answer"]
+@pytest.mark.parametrize('ids', ['abc', [True], [-1], [1.5]])
+def test_rejects_non_token_inputs(ids):
+    with pytest.raises(TypeError, match='token IDs'):
+        method().Run([ids])
 
 
-def test_run_does_not_retain_output_containing_the_pic_separator():
-    method = _method()
-    method.Prepare([["cached"]])
-
-    def generate(prompt, sampling_params, stream):
-        method.engine.calls.append((prompt, sampling_params, stream))
-        yield {
-            "text": "answer" + method.separator,
-            "output_ids": [31],
-            "meta_info": {
-                "prompt_tokens": 10,
-                "completion_tokens": 1,
-                "cached_tokens": 7,
-            },
-        }
-
-    method.engine.generate = generate
-    method.Run(["cached prompt"], retainOutput=[True])
-
-    assert method._states[0]["prepare"] == ["cached"]
-    assert len(method.engine.calls) == 2
+@pytest.mark.parametrize('kind', [HypicMethod, LinearKVMethod])
+def test_initialize_uses_base_gpu_validation(kind):
+    with pytest.raises(ValueError, match='requires exactly 1 GPU'):
+        kind().Initialize([])
 
 
-def test_full_prefill_disables_pic_but_keeps_prefix_reuse():
-    method = HypicMethod(maxNewTokens=8, fullPrefill=True, tag="full_prefill")
-    method.engine = _FakeEngine()
-
-    method.Prepare([["cached"]])
-    assert method.engine.calls == []
-
-    result = method.Run(["plain prompt"])[0]
-    assert method.engine.calls[0][0] == "plain prompt"
-    assert result.metadata == {
-        "backend": "hypic-sglang",
-        "n_input": 10,
-        "num_cached_tokens": 7,
-        "reuse_ratio": 0.7,
-        "full_prefill": True,
-    }
-    assert method.Label == "hypic(full_prefill)"
+@pytest.mark.parametrize('ratio', [-0.1, 1.1, float('nan'), True])
+def test_linearkv_rejects_invalid_ratio(ratio):
+    with pytest.raises(ValueError, match='recompRatio'):
+        LinearKVMethod(recompRatio=ratio)
 
 
-def test_full_prefill_engine_options_keep_radix_cache_without_pic(fake_hypic_config):
-    options = _BuildHypicEngineKwargs(
-        "/model",
-        [2],
-        dtype="bfloat16",
-        maxModelLen=128,
-        memFractionStatic=0.8,
-        picMode="addition",
-        separator="<<PIC_SEP>>",
-        fullPrefill=True,
-    )
-
-    assert options["pic_enable"] is False
-    assert options["disable_radix_cache"] is False
-    assert options["mamba_radix_cache_strategy"] == "no_buffer"
-    assert options["disable_overlap_schedule"] is True
-    assert "pic_separator_str" not in options
+def test_options_cap_state_pool_and_keep_radix_control():
+    options = adapter._BuildHypicEngineKwargs('/model', [0], dtype='bfloat16',
+        maxModelLen=100, memFractionStatic=.8, picMode='linearkv',
+        fullPrefill=False, recompRatio=.2)
+    assert options['pic_epic_ratio'] == .2
+    assert options['max_mamba_cache_size'] == 32
+    options = adapter._BuildHypicEngineKwargs('/model', [0], dtype='bfloat16',
+        maxModelLen=100, memFractionStatic=.8, picMode='addition', fullPrefill=True)
+    assert not options['pic_enable'] and not options['disable_radix_cache']
 
 
-def test_qwen35_raw_body_extracts_native_chat_prompt(monkeypatch):
-    from methods import Hypic as HypicModule
-
-    monkeypatch.setattr(HypicModule, "arch_family", lambda _model: "qwen3_5")
-    prompt = (
-        _QWEN35_CHAT_PREFIX
-        + "body text"
-        + _QWEN35_ASSISTANT_MARKER
-        + "\n<think>\n\n</think>\n\n"
-    )
-    assert _Qwen35RawBody(prompt, "/model") == "body text"
-    assert _Qwen35RawBody("already raw", "/model") is None
-
-
-def test_qwen35_addition_warms_each_segment_independently(monkeypatch):
-    from methods import Hypic as HypicModule
-
-    monkeypatch.setattr(HypicModule, "arch_family", lambda _model: "qwen3_5")
-    method = _method()
-    method.modelPath = "/model"
-    method.Prepare([["A", "B"]])
-
-    assert [call[0] for call in method.engine.calls] == [
-        method.separator.join(["You are a helpful assistant.", "A", _WARMUP_TAIL]),
-        method.separator.join(["You are a helpful assistant.", "B", _WARMUP_TAIL]),
-    ]
-
-
-def test_qwen35_transition_uses_the_same_independent_priming(monkeypatch):
-    from methods import Hypic as HypicModule
-
-    monkeypatch.setattr(HypicModule, "arch_family", lambda _model: "qwen3_5")
-    method = HypicMethod(picMode="transition")
-    method.modelPath = "/model"
-    method.engine = _FakeEngine()
-    method.Prepare([["A", "B"]])
-
-    assert [call[0] for call in method.engine.calls] == [
-        method.separator.join(["You are a helpful assistant.", "A", _WARMUP_TAIL]),
-        method.separator.join(["You are a helpful assistant.", "B", _WARMUP_TAIL]),
-    ]
-
-
-def test_pic_engine_options_auto_size_mamba_cache_by_default(fake_hypic_config):
-    # MaxMambaCacheSize = -1 -> SGLang auto-fit; max_mamba_cache_size must
-    # not appear in engine kwargs.
-    fake_hypic_config(MaxMambaCacheSize=-1)
-    options = _BuildHypicEngineKwargs(
-        "/model",
-        [2],
-        dtype="bfloat16",
-        maxModelLen=128,
-        memFractionStatic=0.8,
-        picMode="transition",
-        separator="<<PIC_SEP>>",
-        fullPrefill=False,
-    )
-
-    assert options["pic_enable"] is True
-    assert options["pic_mode"] == "transition"
-    assert "max_mamba_cache_size" not in options
-
-
-def test_pic_engine_options_pass_capped_mamba_cache_size(fake_hypic_config):
-    # Default (32) -> max_mamba_cache_size = 32 must be passed through.
-    options = _BuildHypicEngineKwargs(
-        "/model",
-        [2],
-        dtype="bfloat16",
-        maxModelLen=128,
-        memFractionStatic=0.8,
-        picMode="addition",
-        separator="<<PIC_SEP>>",
-        fullPrefill=False,
-    )
-
-    assert options["pic_enable"] is True
-    assert options["max_mamba_cache_size"] == 32
-
-
-def test_pic_engine_options_omit_mamba_cache_for_full_prefill(fake_hypic_config):
-    # fullPrefill path disables PIC; max_mamba_cache_size must not be set even
-    # when config has a positive value.
-    options = _BuildHypicEngineKwargs(
-        "/model",
-        [2],
-        dtype="bfloat16",
-        maxModelLen=128,
-        memFractionStatic=0.8,
-        picMode="addition",
-        separator="<<PIC_SEP>>",
-        fullPrefill=True,
-    )
-
-    assert options["pic_enable"] is False
-    assert "max_mamba_cache_size" not in options
-
-
-def test_hypic_method_rejects_invalid_max_mamba_cache_size(fake_hypic_config):
-    fake_hypic_config(MaxMambaCacheSize="oops")
-    with pytest.raises(TypeError, match="MaxMambaCacheSize"):
-        HypicMethod(maxNewTokens=8, tag="t")
-
-    fake_hypic_config(MaxMambaCacheSize=0)
-    with pytest.raises(ValueError, match="MaxMambaCacheSize"):
-        HypicMethod(maxNewTokens=8, tag="t")
-
-
-def test_reset_flushes_picache_and_close_shuts_down_engine():
-    method = _method()
-    engine = method.engine
-    method._states = [{"prepare": ["A"]}]
-
-    method.Reset()
-    assert method._states == []
-    assert engine.flushes == 1
-
-    method.Close()
-    assert method.engine is None
-    assert engine.closed is True
-
-
-@pytest.mark.parametrize("picMode", ["bogus", "transition-rope"])
-def test_constructor_rejects_unknown_pic_mode(picMode):
-    with pytest.raises(ValueError, match="unknown picMode"):
-        HypicMethod(picMode=picMode)
-
-
-def test_constructor_rejects_non_boolean_full_prefill():
-    with pytest.raises(TypeError, match="fullPrefill"):
-        HypicMethod(fullPrefill=1)
+def test_method_defaults():
+    assert HypicMethod().picMode == 'transition_rope_recompute'
+    assert LinearKVMethod().Label == 'linearkv'

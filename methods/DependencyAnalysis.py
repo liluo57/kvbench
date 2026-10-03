@@ -866,10 +866,4 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
         return total / count if count else None
 
 
-# Keep both names available without requiring a methods/__init__.py change.
-DependencyAnalysisTransformer = DependencyAnalysisMethod
-
-__all__ = [
-    "DependencyAnalysisMethod",
-    "DependencyAnalysisTransformer",
-]
+__all__ = ["DependencyAnalysisMethod"]

@@ -1,0 +1,25 @@
+Source: https://github.com/liluo57/HYPIC
+Branch: linearkv
+Commit: a157834fb2be776614e851da0424f4edf76e20ee
+License: Apache-2.0 (see LICENSE; original notices retained)
+
+Runtime subset: hybrid PIC, scheduling, model/cache management, Qwen3.5 dense/MoE,
+Bailing/Ring and KimiLinear models with their imported base implementations,
+and their CUDA/Triton/JIT code and headers.
+
+KVBench adaptations: private Python and Torch-op namespaces; native token-ID
+requests with explicit validated segment ranges; native seam parameter;
+restricted hybrid config/model registries compatible with Transformers 4.57;
+local RoPE normalization instead of global Transformers patch hooks;
+LinearKV repair rows excluded from cached-token metrics; local compilation of
+the retained upstream native ops against the project PyTorch ABI.
+
+Native norm.cu and pytorch_extension_utils.h are from FlashInfer commit
+bc29697ba20b7e6bdb728ded98f04788e16ee021 (Apache-2.0), the dependency pinned
+by the upstream sgl-kernel CMakeLists.txt. FlashInfer's Python package supplies
+the accompanying CUDA template headers.
+
+LinearKV is this branch's paper-based implementation with a static chunk-prefix
+selector, not the LinearKV authors' official runtime. The new recurrent replay
+path supports Qwen GDN only. Upstream documents the conv-tail interpretation
+and its need for model-level validation.
