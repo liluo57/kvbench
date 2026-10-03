@@ -3,8 +3,8 @@
 
 The script is intentionally independent of KVBench core/workload code.  It is
 an adapter/runtime sanity check: the full baseline is ragkv ``vanilla()`` and
-the reuse path is ragkv ``decode(..., reuse_config)`` through A3RepoHelper.
-Both workers use the same model checkpoint, official checkout, tokenizer,
+the reuse path is ragkv ``decode(..., reuse_config)`` through Worker.
+Both workers use the same model checkpoint, bundled backend, tokenizer,
 dtype, GPU and timing boundary; they differ only in the official reuse mode.
 
 Input is a JSON file containing one case or a list of cases.  Each case has
@@ -47,7 +47,7 @@ def _drain_stderr(proc: subprocess.Popen[str]) -> None:
 def _start(python: str, helper: str, marker: str, args: argparse.Namespace) -> subprocess.Popen[str]:
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
-    # The ragkv environment contains its own ninja executable, required by
+    # The project environment supplies ninja, required by
     # FlashInfer's first-use CUDA extension build.  Do not rely on the parent
     # SSH/login shell having activated that environment.
     env["PATH"] = str(Path(python).resolve().parent) + os.pathsep + env.get("PATH", "")
@@ -55,7 +55,6 @@ def _start(python: str, helper: str, marker: str, args: argparse.Namespace) -> s
         [
             python,
             helper,
-            "--repo_root", args.repo_root,
             "--model", args.model,
             "--max_new_tokens", str(args.max_new_tokens),
             "--recomp_ratio", str(args.recomp_ratio),
@@ -66,7 +65,7 @@ def _start(python: str, helper: str, marker: str, args: argparse.Namespace) -> s
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        cwd=args.repo_root,
+        cwd=str(Path(__file__).resolve().parents[2]),
         env=env,
     )
     threading.Thread(target=_drain_stderr, args=(proc,), daemon=True).start()
@@ -148,8 +147,7 @@ def _validate_cases(raw_case, tokenizer):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case-json", required=True, help="JSON with chunks and suffix")
-    parser.add_argument("--repo-root", required=True)
-    parser.add_argument("--python", required=True, help="official ragkv environment Python")
+    parser.add_argument("--python", default=sys.executable, help="project Python for the bundled A^3 runtime")
     parser.add_argument("--model", required=True)
     parser.add_argument("--gpu-id", default="0")
     parser.add_argument("--max-new-tokens", type=int, default=300)
@@ -172,7 +170,7 @@ def main() -> None:
                 seen_chunks.add(chunk)
                 all_chunks.append(chunk)
 
-    helper_dir = Path(__file__).resolve().parents[2] / "helpers" / "a3_repo"
+    helper_dir = Path(__file__).resolve().parents[2] / "methods" / "A3Repo"
     # Run the workers sequentially.  A3 keeps both its precompute and runtime
     # model resident; starting Vanilla concurrently would unnecessarily double
     # peak GPU memory and can turn a valid comparison into an OOM.
@@ -181,7 +179,7 @@ def main() -> None:
     try:
         vanilla = _start(
             args.python,
-            str(helper_dir / "OfficialVanillaHelper.py"),
+            str(helper_dir / "VanillaWorker.py"),
             "[official-vanilla-helper] ready",
             args,
         )
@@ -196,7 +194,7 @@ def main() -> None:
 
         a3 = _start(
             args.python,
-            str(helper_dir / "A3RepoHelper.py"),
+            str(helper_dir / "Worker.py"),
             "[a3-repo-helper] ready",
             args,
         )
@@ -213,7 +211,7 @@ def main() -> None:
         ]
         runtime_match = all(
             full.get("runtime_mode") == reuse.get("runtime_mode")
-            and full.get("runtime_mode") == "ragkv_official_patched"
+            and full.get("runtime_mode") == "ragkv_bundled"
             for full, reuse in zip(full_results, reuse_results)
         )
         per_case = []
@@ -237,7 +235,7 @@ def main() -> None:
                 "recomp_ratio": args.recomp_ratio,
                 "reuse_method": args.reuse_method,
                 "warmup": args.warmup,
-                "runtime": "official ragkv; separate vanilla/reuse workers",
+                "runtime": "bundled ragkv; separate vanilla/reuse workers",
                 "runtime_kernel_match": runtime_match,
                 "num_cases": len(cases),
             },

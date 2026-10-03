@@ -51,6 +51,12 @@ Cacheblend:
   # Defaults to the project's current Python. Relative overrides use the root.
   # Python: /path/to/project/python
 
+# A^3 is bundled in methods/A3Repo; ./setup.py --a3 installs optional dependencies.
+# Its isolated worker defaults to the current project Python.
+A3:
+  # Python: /path/to/project/python
+  Python:
+
 # KVPacket's backend is vendored under methods/KVPacket and shares the main
 # Python 3.12 or 3.13 / PyTorch / Transformers environment. Run `./setup.py --kvpacket`
 # to check that environment; it does not install or replace shared packages.

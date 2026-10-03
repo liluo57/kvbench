@@ -12,9 +12,9 @@ Each constructor declares the strict ``gpuNums`` requirement and a relative
 - :class:`CacheblendRepo` — CacheBlend through the bundled backend in
   ``methods.Cacheblend``. A worker sharing the project Python owns collected KV and
   fuses fresh queries; sampling and reuse metrics follow the shared contracts.
-- :class:`A3Repo` — A^3 via the authors' official ``ragkv`` repository: a
-  worker subprocess under that repository's environment, with only the
-  KVBench lifecycle and request protocol implemented in this checkout.
+- :class:`A3Repo` — A^3 through the bundled ``ragkv`` runtime in
+  ``methods.A3Repo``. An isolated worker uses the project Python, with
+  integrated precompute, selection, fusion and dense Qwen3 support.
 - :class:`FullPrefillTransformer` / :class:`FullPrefillVllm` — the recompute
   baselines: answer the full prompt from scratch every query, over plain
   transformers / the system vLLM.

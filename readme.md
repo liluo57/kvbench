@@ -50,10 +50,18 @@ pip install -r requirement.txt
 > This is an explicit source assertion: legacy files contain no revision or weight
 > digest, so KVBench also checks tensor shapes but cannot prove the source weights.
 
-> If you need Hypic method,
-> 1. Clone [Hypic Repo](https://github.com/redai-studio/HYPIC)
-> 2. Setup that repo according to their instructions.
-> 3. Write the repo path in `config.yaml`.
+> A3Repo's [ragkv implementation](https://github.com/yczhounlp/ragkv) is bundled
+> under `methods/A3Repo`. Run `./setup.py --a3` to install its optional dependencies
+> in the project Python environment. The isolated worker supports Llama, Mistral,
+> Qwen2 and dense Qwen3; it defaults to the current interpreter, with an optional
+> `A3.Python` override. No external repository path or separate venv is required.
+> Prepared chunks must form a contiguous prompt prefix followed by a fresh query;
+> other prompts use full prefill. Decoding follows upstream's greedy policy.
+> The integrated Qwen3 bridge requires `head_dim == hidden_size / num_attention_heads`.
+
+> HypicMethod and LinearKVMethod are bundled under `methods/hypic`.
+> Run `./setup.py --hypic` to install their dependencies and build CUDA ops
+> in the project environment.
 
 3. Prepare datasets
 ```bash

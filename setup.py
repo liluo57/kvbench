@@ -113,6 +113,31 @@ from methods.hypic.backend.kvbench_hypic.srt.entrypoints.engine import Engine
 print(Engine.__module__)
 """
 
+_CHECK_A3 = """
+import sys
+from pathlib import Path
+import importlib.metadata as metadata
+from packaging.requirements import Requirement
+sys.path.insert(0, sys.argv[1])
+assert (3, 12) <= sys.version_info[:2] < (3, 14), "Use project Python 3.12 or 3.13"
+for filename in sys.argv[2:]:
+    for line in Path(filename).read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        req = Requirement(line)
+        if not req.marker or req.marker.evaluate():
+            actual = metadata.version(req.name)
+            assert actual in req.specifier, f"{req.name}: expected {req.specifier}, found {actual}"
+from transformers import LlamaConfig, MistralConfig, Qwen2Config, Qwen3Config
+from methods.A3Repo.backend.models.loader import model_classes
+for config in (LlamaConfig(), MistralConfig(), Qwen2Config(), Qwen3Config()):
+    runtime, precompute = model_classes(config)
+    assert runtime.__module__.startswith("methods.A3Repo.backend.")
+    assert precompute.__module__.startswith("methods.A3Repo.backend.")
+print(runtime.__module__)
+"""
+
 
 def _compiler_major(command):
     try:
@@ -287,11 +312,53 @@ def setup_hypic(args):
     print(f"HYPIC / LinearKV are ready in the project environment: {python}", flush=True)
 
 
+def setup_a3(args):
+    """Install only the bundled A^3 runtime's dependencies in project Python."""
+    directory = ROOT / "methods" / "A3Repo"
+    python = shutil.which(args.python) or str(Path(args.python).expanduser())
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("LD_PRELOAD", None)
+    env.setdefault("UV_CACHE_DIR", str(ROOT / ".cache" / "uv"))
+
+    def check():
+        return subprocess.run(
+            [python, "-I", "-B", "-c", _CHECK_A3, str(ROOT),
+             str(ROOT / "requirement.txt"), str(directory / "requirements.txt")],
+            cwd=ROOT, env=env, capture_output=True, text=True,
+        )
+
+    if not args.rebuild and check().returncode == 0:
+        print(f"A^3 is ready in the project environment: {python}", flush=True)
+        return
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("Install uv before setting up A^3.")
+    options = []
+    if args.offline:
+        options.append("--offline")
+    if args.no_index:
+        options.append("--no-index")
+    for location in args.find_links:
+        options.extend(["--find-links", location if "://" in location else
+                        str(Path(location).expanduser().resolve())])
+    subprocess.run(
+        [uv, "pip", "install", "--python", python, "-r", str(ROOT / "requirement.txt"),
+         "-r", str(directory / "requirements.txt"), *options],
+        cwd=ROOT, env=env, check=True,
+    )
+    result = check()
+    if result.returncode:
+        raise RuntimeError(f"A^3 installation check failed:\n{result.stderr.strip()}")
+    print(f"A^3 is ready in the project environment: {python}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cacheblend", action="store_true", help="install the bundled CacheBlend backend")
     parser.add_argument("--kvpacket", action="store_true", help="check the bundled KVPacket backend in the main environment")
     parser.add_argument("--hypic", action="store_true", help="install the bundled HYPIC / LinearKV backend")
+    parser.add_argument("--a3", action="store_true", help="install the bundled A^3 backend dependencies")
     parser.add_argument("--rebuild", action="store_true", help="rebuild even if the installation is ready")
     parser.add_argument("--python", default=sys.executable,
                         help="existing project Python interpreter (defaults to this script's interpreter)")
@@ -300,8 +367,8 @@ def main():
     parser.add_argument("--find-links", action="append", default=[], metavar="LOCATION",
                         help="additional directory or URL containing dependency wheels")
     args = parser.parse_args()
-    if not args.cacheblend and not args.kvpacket and not args.hypic:
-        parser.error("select a method, e.g. --cacheblend, --kvpacket or --hypic")
+    if not args.cacheblend and not args.kvpacket and not args.hypic and not args.a3:
+        parser.error("select a method, e.g. --cacheblend, --kvpacket, --hypic or --a3")
     try:
         if args.cacheblend:
             setup_cacheblend(args)
@@ -309,6 +376,8 @@ def main():
             setup_kvpacket(args)
         if args.hypic:
             setup_hypic(args)
+        if args.a3:
+            setup_a3(args)
     except (OSError, RuntimeError, subprocess.CalledProcessError, tarfile.TarError) as error:
         print(f"Setup failed: {error}", file=sys.stderr)
         return 1

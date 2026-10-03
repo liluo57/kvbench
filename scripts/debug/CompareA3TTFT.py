@@ -38,8 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--a3-repo-root", required=True)
-    parser.add_argument("--a3-python", required=True)
+    parser.add_argument("--a3-python", default=sys.executable)
     parser.add_argument("--cacheblend-python",
                         help="Optional interpreter for the bundled CacheBlend worker")
     parser.add_argument("--gpu", type=int, required=True)

@@ -20,4 +20,6 @@ pytest==9.1.1
 # ./setup.py --kvpacket checks the shared environment without installing packages.
 # HYPIC / LinearKV are bundled: ./setup.py --hypic installs their dependencies
 # and builds the retained native ops against the same project PyTorch ABI.
+# A^3 is bundled: ./setup.py --a3 installs FlashInfer and checkpoint-loading
+# dependencies in this environment; no ragkv checkout or separate venv is needed.
 # Other external backends use their configured checkouts/venvs.

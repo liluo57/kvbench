@@ -1,27 +1,8 @@
-"""A^3 adapter for the authors' official ``ragkv`` repository.
+"""A^3 over the bundled ragkv backend and an isolated JSONL worker.
 
-This module intentionally contains no A^3 algorithm implementation.  It owns
-the KVBench ``Method`` lifecycle and starts a worker with the official ragkv
-checkout's Python environment.  The worker lives in
-``helpers/a3_repo/A3RepoHelper.py`` and imports the official model,
-precompute, attention-selection, and decoding code from ``ragkv``.
-
-The repository path is read from ``config.yaml``::
-
-    A3:
-      Repo:
-        RepoPath: /path/to/ragkv
-        Python: /path/to/ragkv/.venv/bin/python
-
-``Python`` is optional; when omitted, ``<RepoPath>/.venv/bin/python`` is
-used.  Keeping the official implementation in a subprocess is important:
-ragkv monkey-patches HuggingFace model classes and depends on flashinfer.
-Those changes must not leak into other KVBench methods.
-
-The initial adapter follows the official A^3 prompt contract: prepared
-chunks form a contiguous prefix and the query is a fresh suffix.  Prompts
-that do not satisfy this contract fall back to full prefill instead of
-silently changing the algorithm.
+The worker uses the project Python. Prepared chunks form a contiguous prefix
+and the fresh query is a suffix, following the upstream prompt contract.
+Other prompts fall back to full prefill through the same bundled runtime.
 """
 
 from __future__ import annotations
@@ -39,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.Config import Get, ModelPath as DefaultModelPath
-from core.Method import Method
+from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import ResolveSamplingConfig
 
@@ -52,7 +33,7 @@ _ReadyLine = "[a3-repo-helper] ready"
 
 
 class A3Repo(Method):
-    """Run official A^3 through an isolated ragkv worker."""
+    """Run A^3 through an isolated worker with the bundled runtime."""
 
     name = "a3_repo"
     maxCaseBatchSize = 1
@@ -67,40 +48,26 @@ class A3Repo(Method):
         maxModelLen: int = 32768,
         recompRatio: float = 0.15,
         reuseMethod: str = "debug",
-        repoPath: Optional[str] = None,
         pythonPath: Optional[str] = None,
         startTimeout: float = 1800.0,
         tag: Optional[str] = None,
     ):
         super().__init__(gpuNums=gpuNums, perfWeight=perfWeight, maxGpuNums=1, tag=tag)
-        self.maxNewTokens = int(maxNewTokens)
+        self.maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         self.maxModelLen = int(maxModelLen)
         self.recompRatio = float(recompRatio)
         self.reuseMethod = str(reuseMethod)
         self.startTimeout = float(startTimeout)
 
         section = Get("A3", {}) or {}
-        repo = section.get("Repo", {}) or {}
-        configuredRoot = repoPath or repo.get("RepoPath") or os.environ.get("A3_REPO_PATH")
-        if not configuredRoot:
-            raise RuntimeError(
-                "A3Repo: set A3.Repo.RepoPath in config.yaml or A3_REPO_PATH"
-            )
-        self.repoRoot = Path(str(configuredRoot)).expanduser().resolve()
-        if not self.repoRoot.is_dir():
-            raise FileNotFoundError(f"A3Repo: official ragkv repo not found: {self.repoRoot}")
-
-        configuredPython = pythonPath or repo.get("Python")
+        self.repoRoot = Path(__file__).resolve().parent / "backend"
+        configuredPython = pythonPath or section.get("Python")
         self.workerPython = (
             Path(str(configuredPython)).expanduser()
-            if configuredPython
-            else self.repoRoot / ".venv" / "bin" / "python"
+            if configuredPython else Path(sys.executable)
         )
-        if not self.workerPython.exists():
-            raise FileNotFoundError(
-                f"A3Repo: worker Python not found: {self.workerPython}; "
-                "install ragkv requirements or set A3.Repo.Python"
-            )
+        if not self.workerPython.is_absolute():
+            self.workerPython = Path(__file__).resolve().parents[2] / self.workerPython
 
         self.modelPath = DefaultModelPath()
         self.samplingConfig = ResolveSamplingConfig(self.modelPath)
@@ -132,7 +99,12 @@ class A3Repo(Method):
             pass
 
     def _startWorker(self) -> None:
-        helper = Path(__file__).resolve().parent.parent / "helpers" / "a3_repo" / "A3RepoHelper.py"
+        self._stderrTail.clear()
+        if not self.workerPython.is_file():
+            raise FileNotFoundError(
+                f"A3 worker Python not found: {self.workerPython}; run ./setup.py --a3"
+            )
+        helper = Path(__file__).resolve().parent / "Worker.py"
         env = dict(os.environ)
         env.pop("PYTHONPATH", None)
         env.pop("LD_PRELOAD", None)
@@ -146,7 +118,6 @@ class A3Repo(Method):
             [
                 str(self.workerPython),
                 str(helper),
-                "--repo_root", str(self.repoRoot),
                 "--model", self.modelPath,
                 "--max_new_tokens", str(self.maxNewTokens),
                 "--max_model_len", str(self.maxModelLen),
@@ -160,7 +131,7 @@ class A3Repo(Method):
             text=True,
             bufsize=1,
             env=env,
-            cwd=str(self.repoRoot),
+            cwd=str(Path(__file__).resolve().parents[2]),
         )
         assert self._proc.stdout is not None
         self._drainThread = threading.Thread(
@@ -173,7 +144,7 @@ class A3Repo(Method):
             if not line:
                 if self._proc.poll() is not None:
                     raise RuntimeError(
-                        "A3 official worker exited during startup: "
+                        "A3 worker exited during startup: "
                         + ("".join(self._stderrTail) or "(no stderr)")
                     )
                 continue
@@ -182,7 +153,7 @@ class A3Repo(Method):
                 return
             print(line, flush=True)
         self._proc.kill()
-        raise TimeoutError("A3 official worker did not become ready")
+        raise TimeoutError("A3 worker did not become ready")
 
     def _request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
@@ -197,7 +168,7 @@ class A3Repo(Method):
             line = self._proc.stdout.readline()
             if not line:
                 raise RuntimeError(
-                    "A3 official worker closed stdout: "
+                    "A3 worker closed stdout: "
                     + ("".join(self._stderrTail) or "(no stderr)")
                 )
             try:
@@ -206,7 +177,7 @@ class A3Repo(Method):
             except json.JSONDecodeError:
                 print(f"[a3-repo-helper stdout] {line.rstrip()}", file=sys.stderr, flush=True)
         if not response.get("ok"):
-            raise RuntimeError(f"A3 official worker error: {response.get('error')}")
+            raise RuntimeError(f"A3 worker error: {response.get('error')}")
         return response
 
     def Prepare(self, data: List[List[List[int]]]) -> None:
@@ -240,8 +211,10 @@ class A3Repo(Method):
         self,
         data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
         runStart = time.perf_counter()
+        budget = self.maxNewTokens if maxNewTokens is None else ResolveMaxNewTokens(maxNewTokens)
         if len(self._chunks) != len(data):
             self._chunks = [[] for _ in data]
             self._wire_chunks = [[] for _ in data]
@@ -255,6 +228,12 @@ class A3Repo(Method):
                 order, suffix = ComposeReuse(wire_chunks, prompt)
                 if order:
                     variant = "chat_prefixed"
+            # RULER shuffle tasks prepare the question as their final chunk.
+            # A3's attention selector requires a non-empty fresh query; keep
+            # that last chunk fresh when the cache covers the entire prompt.
+            if order and not suffix:
+                suffix = order[-1]
+                order = order[:-1]
             retain = bool(retainOutput[index]) if retainOutput and index < len(retainOutput) else False
             if order:
                 response = self._request({
@@ -264,10 +243,12 @@ class A3Repo(Method):
                     ).hexdigest() for chunk in order],
                     "suffix_ids": suffix,
                     "retain_output": retain,
+                    "max_new_tokens": budget,
                 })
                 full = False
             else:
-                response = self._request({"op": "full", "input_ids": prompt, "retain_output": retain})
+                response = self._request({"op": "full", "input_ids": prompt,
+                                          "retain_output": retain, "max_new_tokens": budget})
                 full = True
             results.append(
                 self._result(

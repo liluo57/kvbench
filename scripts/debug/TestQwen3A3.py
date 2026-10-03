@@ -12,8 +12,6 @@ The report is JSON, so it can be archived and compared across revisions::
 
     python scripts/debug/TestQwen3A3.py \
       --model "$MODEL_PATH" \
-      --repo-root "$RAGKV_REPO" \
-      --python "$RAGKV_PYTHON" \
       --gpu 3 --output outputs/test_qwen3_a3.json
 """
 
@@ -35,8 +33,7 @@ if str(ROOT) not in sys.path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--repo-root", required=True)
-    parser.add_argument("--python", dest="python_path", required=True)
+    parser.add_argument("--python", dest="python_path", default=sys.executable)
     parser.add_argument("--gpu", type=int, required=True)
     parser.add_argument("--output", type=Path,
                         default=Path("outputs/test_qwen3_a3.json"))
@@ -44,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--recomp-ratio", type=float, default=0.15)
     parser.add_argument("--reuse-method", default="debug",
-                        choices=("debug", "sample"))
+                        choices=("debug", "blend", "full", "cat"))
     parser.add_argument("--with-full-baseline", action="store_true",
                         help="Also run each prompt with no prepared chunks")
     parser.add_argument("--quick", action="store_true",
@@ -101,6 +98,7 @@ def main() -> int:
     from core import Config as C
     C.LoadConfig()["ModelPath"] = str(Path(args.model).expanduser().resolve())
     from methods.A3Repo import A3Repo
+    from helpers.backends.Tokenization import EncodePrompt
 
     method = A3Repo(
         gpuNums=1,
@@ -108,7 +106,6 @@ def main() -> int:
         maxModelLen=args.max_model_len,
         recompRatio=args.recomp_ratio,
         reuseMethod=args.reuse_method,
-        repoPath=args.repo_root,
         pythonPath=args.python_path,
         tag="qwen3-full",
     )
@@ -124,10 +121,11 @@ def main() -> int:
     try:
         method.Initialize([args.gpu])
         for case in selected_cases:
+            chunk_ids, prompt_ids = EncodePrompt(case["chunks"], case["prompt"], method.modelPath)
             method.Reset()
             started = time.perf_counter()
-            method.Prepare([case["chunks"]])
-            result = method.Run([case["prompt"]])[0]
+            method.Prepare([chunk_ids])
+            result = method.Run([prompt_ids])[0]
             reuse = result_record(result, time.perf_counter() - started)
             full_prefill = bool(reuse["metadata"].get("full_prefill"))
             observed_reuse = not full_prefill
@@ -146,7 +144,7 @@ def main() -> int:
                 method.Reset()
                 started = time.perf_counter()
                 method.Prepare([[]])
-                baseline_result = method.Run([case["prompt"]])[0]
+                baseline_result = method.Run([prompt_ids])[0]
                 case_report["full_baseline"] = result_record(
                     baseline_result, time.perf_counter() - started, baseline=True
                 )

@@ -64,8 +64,11 @@ def parse_args() -> argparse.Namespace:
     config = Config.LoadConfig()
     cacheblend = config.get("Cacheblend") or {}
     default_model = os.environ.get("KVBENCH_MODEL_PATH") or config.get("ModelPath")
-    default_a3_repo = os.environ.get("KVBENCH_A3_REPO_PATH")
-    default_a3_python = os.environ.get("KVBENCH_A3_PYTHON")
+    default_a3_python = (
+        os.environ.get("KVBENCH_A3_PYTHON")
+        or (config.get("A3") or {}).get("Python")
+        or sys.executable
+    )
     default_cacheblend_python = (
         os.environ.get("KVBENCH_CACHEBLEND_PYTHON")
         or cacheblend.get("Python")
@@ -76,10 +79,8 @@ def parse_args() -> argparse.Namespace:
                         help="Mistral-7B-Instruct-v0.2 checkpoint")
     parser.add_argument("--dataset-root", type=Path, default=ROOT / "data",
                         help="KVBench data directory")
-    parser.add_argument("--a3-repo-root", default=default_a3_repo,
-                        help="Official ragkv checkout used by A3Repo")
     parser.add_argument("--a3-python", default=default_a3_python,
-                        help="Python executable in the official ragkv env")
+                        help="Python executable for the bundled A^3 worker")
     parser.add_argument("--cacheblend-python", default=default_cacheblend_python,
                         help="Python executable for the bundled CacheBlend worker")
     parser.add_argument("--gpu", type=int, required=True,
@@ -112,11 +113,6 @@ def parse_args() -> argparse.Namespace:
                         help="Comparison methods; default is all four")
     parser.add_argument("--pair-retries", type=int, default=0)
     args = parser.parse_args()
-    if "a3" in args.methods:
-        if not args.a3_repo_root:
-            parser.error("--a3-repo-root or KVBENCH_A3_REPO_PATH is required for A3")
-        if not args.a3_python:
-            parser.error("--a3-python or KVBENCH_A3_PYTHON is required for A3")
     return args
 
 
@@ -130,12 +126,7 @@ def configure_runtime(args: argparse.Namespace) -> Dict[str, Any]:
     os.environ["KVBENCH_MODEL_PATH"] = config["ModelPath"]
     config["ModelConfig"] = {"mode": "greedy"}
     if "a3" in args.methods:
-        config["A3"] = {
-            "Repo": {
-                "RepoPath": str(Path(args.a3_repo_root).expanduser().resolve()),
-                "Python": str(Path(args.a3_python).expanduser().resolve()),
-            }
-        }
+        config["A3"] = {"Python": str(Path(args.a3_python).expanduser().resolve())}
     if args.cacheblend_python:
         cacheblend = dict(config.get("Cacheblend") or {})
         cacheblend["Python"] = str(Path(args.cacheblend_python).expanduser().resolve())
@@ -169,7 +160,6 @@ def preflight(args: argparse.Namespace) -> None:
     required_paths = []
     if "a3" in args.methods:
         required_paths.extend((
-            ("A3 repo", args.a3_repo_root),
             ("A3 Python", args.a3_python),
         ))
     if "cacheblend" in args.methods:
@@ -331,7 +321,6 @@ def build_methods(args: argparse.Namespace) -> List[Any]:
             maxModelLen=args.max_model_len,
             recompRatio=args.recomp_ratio,
             reuseMethod="debug",
-            repoPath=args.a3_repo_root,
             pythonPath=args.a3_python,
             tag="a3",
         ))
@@ -367,10 +356,7 @@ def make_manifest(args: argparse.Namespace, config: Dict[str, Any]) -> Dict[str,
         "max_new_tokens": args.max_new_tokens,
         "max_model_len": args.max_model_len,
         "gpu": args.gpu,
-        "a3_repo": (
-            str(Path(args.a3_repo_root).expanduser().resolve())
-            if args.a3_repo_root else None
-        ),
+        "a3_backend": str(ROOT / "methods" / "A3Repo" / "backend"),
         "cacheblend_python": (
             str(Path(args.cacheblend_python).expanduser().resolve())
             if args.cacheblend_python else None

@@ -1,0 +1,5 @@
+# Shares the project's Python, PyTorch and Transformers environment.
+accelerate>=1.12,<2
+flashinfer-python==0.6.16.post3
+ninja>=1.11
+sentencepiece>=0.2

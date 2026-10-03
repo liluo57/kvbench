@@ -1,0 +1,23 @@
+Source: https://github.com/yczhounlp/ragkv
+Commit: 8f3a3252510cad19325cceff4ff55f3be1862dc8
+
+Retained: complete Llama/Mistral/Qwen2 causal-LM precompute stacks, runtime
+forward functions, attention/recompute selectors, RoPE/masking and greedy
+decode/vanilla functions. Qwen3 support is KVBench's integrated adaptation.
+Excluded: datasets, chunking/evaluation/precompute CLI scripts, metrics, plots,
+experiment configs, disk KV utilities, classification/QA heads, eviction
+baselines, global monkeypatch entry points and the upstream environment freeze.
+
+KVBench adaptations: private relative imports; local runtime classes instead
+of global Transformers/Cache patches; Transformers 4.57 RoPE/head-dim
+compatibility; native Qwen3 normed projections; inline Mistral/Qwen mask fixes;
+shared checkpoint storage for precompute/runtime (including tied aliases); isolated JSONL workers using
+the project Python; Hub/local checkpoint loading without checkout-relative
+cache directories or a forced PyTorch .bin format.
+Latency boundaries wait for offline CUDA precompute to finish and for the
+first generated token to be ready before recording TTFT.
+
+The upstream commit contains no repository-wide LICENSE. Original Apache-2.0
+copyright/license headers in the precompute model files are retained;
+LICENSE-APACHE-2.0 applies to those explicitly marked files. No license is
+asserted for upstream files that carry no notice.

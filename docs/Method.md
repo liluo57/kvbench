@@ -32,7 +32,7 @@ Refer to each class constructor for its implementation and configurable paramete
 | `NaiveTransformer`, `NaiveCacheblendRepo` | Controls that directly reuse cached state without repairing context changes. |
 | `CacheblendRepo`, `CacheblendLmcache` | CacheBlend recomputation and fusion implementations; the former runs the bundled backend in `methods/Cacheblend` through a worker sharing the main project's Python environment. |
 | `HypicMethod`, `LinearKVMethod` | Built-in hybrid position-independent reuse in `methods/hypic`; both accept token IDs and explicit segment boundaries. HYPIC defaults to transition/RoPE/seam repair; LinearKV uses the last matched GDN state and static chunk-prefix repair. |
-| `A3Repo` | Adapter for the A3 repository implementation. |
+| `A3Repo` | A^3 with bundled precompute, selection, fusion and decoding; Llama/Mistral/Qwen2/dense Qwen3. |
 | `ProphetKV` | ProphetKV implementation. |
 | `CacheClip` | CPU auxiliary-token selection with sparse repair of primary KV caches. Prepared chunks and prompts remain authoritative primary-model token IDs; selector text and character spans are derived locally from each prepared ID chunk. |
 | `KVCommTransformer` | KVCOMM-style cache reuse for multi-agent workloads. |
@@ -75,6 +75,21 @@ are their respective public names.
 6. Clear Case/batch state in `Reset` and release backend resources in `Close`. Export the class from `methods/__init__.py`, then add an instance to the `methods` list in `Main.py`.
 
 A Workflow may provide multiple token chunks or preserve state across multiple RUN actions. Handle these inputs according to the method's algorithm, and prevent one Case's cache from leaking into another when cross-Case reuse is not intended.
+
+A3Repo includes the upstream ragkv causal-LM precompute, attention selection,
+selective recomputation, KV fusion and greedy decoding code in `methods/A3Repo`.
+Run `./setup.py --a3` for the optional dependencies; its worker shares project
+Python, with an optional `A3.Python` override. No external checkout is used.
+Llama, Mistral, Qwen2 and dense Qwen3 are supported. The integrated Qwen3
+projection bridge currently requires `head_dim == hidden_size / num_attention_heads`.
+Prepared chunks must form a contiguous prefix followed by a fresh query; other
+prompts fall back to full prefill through the same runtime. If the entire prompt
+is covered by cached chunks, its final chunk is kept fresh for query-based
+selection (or the whole prompt is recomputed when only one chunk matches). Task generation
+budgets are sent per request. The pinned source commit, retained files and
+adaptations are recorded in `methods/A3Repo/UPSTREAM`.
+Prepare finishes queued CUDA work before returning, and TTFT is recorded
+after the first generated token can be read.
 
 HYPIC and LinearKV share the project environment. Run `./setup.py --hypic` to
 prepare their dependencies and compile the bundled CUDA ops against the active
