@@ -1,14 +1,14 @@
 """Plain HuggingFace ``transformers`` backend, used by the transformer methods.
 
 The ``FullPrefillTransformer`` / ``NaiveTransformer`` methods own one
-:class:`TransformersGenerator` each. It exposes a manual greedy decode loop
-that measures a real TTFT (prefill + first decode step).
+:class:`TransformersGenerator` each. Its manual generation loop measures the
+real first-token boundary, including prefill and first-token sampling.
 
-GPU placement: multiple transformers methods may share one process (one model
-each). ``CUDA_VISIBLE_DEVICES`` only matters at torch's first init and a later
-env change cannot move an already-initialized torch — so instead of the env var
-we keep all GPUs visible and pin each instance with ``torch.cuda.set_device``
-and an explicit ``device_map=f"cuda:<n>"``.
+The Engine initializes each Method in its own worker process. This helper binds
+the assigned GPU using ``torch.cuda.set_device`` and an explicit
+``device_map=f"cuda:<n>"``. Direct users of the helper should configure GPU
+visibility before initializing torch; later environment changes do not move an
+already initialized model.
 """
 
 import os
@@ -16,6 +16,7 @@ import time
 from collections import Counter
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
+from core.Config import MaxModelLen
 from core.Sampling import (
     IsGreedy,
     ResolveSamplingConfig,
@@ -138,8 +139,24 @@ class TransformersGenerator:
     def _toTensor(self, ids: List[int]) -> Any:
         return self._torch.tensor([ids], device=self.device, dtype=self._torch.long)
 
+    @staticmethod
+    def _CacheLength(cache) -> int:
+        if cache is None:
+            return 0
+        if hasattr(cache, "get_seq_length"):
+            return int(cache.get_seq_length())
+        return int(next(iter(CacheLayerPairs(cache)))[0].shape[-2])
+
+    def _CheckContext(self, inputIds, pastKeyValues=None) -> int:
+        length = self._CacheLength(pastKeyValues) + len(inputIds)
+        limit = MaxModelLen()
+        if length > limit:
+            raise ValueError(f"HF context has {length} tokens; MaxModelLen={limit}")
+        return limit - length
+
     def Forward(self, inputIds: List[int], pastKeyValues=None, *, useCache: bool = True):
         """One model step: prefill (past=None) or a single decode token."""
+        self._CheckContext(inputIds, pastKeyValues)
         inputTensor = self._toTensor(inputIds)
         kw = dict(use_cache=useCache)
         try:
@@ -162,6 +179,7 @@ class TransformersGenerator:
         Feeding ≤``KVBENCH_PREFILL_CHUNK`` tokens per forward keeps the
         per-step attention matrix small.
         """
+        self._CheckContext(inputIds, pastKeyValues)
         with self._torch.no_grad():
             n = len(inputIds)
 
@@ -199,22 +217,22 @@ class TransformersGenerator:
         semantics. This is the small, backend-neutral subset of Generation
         Config's logits warpers needed by the benchmark.
         """
-        if IsGreedy(self.samplingConfig):
-            return int(self._torch.argmax(logits).item())
-
-        scores = logits.float()
-        counts = Counter(history)
         presencePenalty = float(
             self.samplingConfig.get("presence_penalty", 0.0)
         )
         frequencyPenalty = float(
             self.samplingConfig.get("frequency_penalty", 0.0)
         )
+        penalty = self.samplingConfig.get("repetition_penalty")
+        greedy = IsGreedy(self.samplingConfig)
+        if greedy and not presencePenalty and not frequencyPenalty and penalty in (None, 1.0):
+            return int(self._torch.argmax(logits).item())
+
+        scores = logits.float().clone()
         if presencePenalty or frequencyPenalty:
-            for token, count in counts.items():
+            for token, count in Counter(history).items():
                 scores[token] -= presencePenalty + frequencyPenalty * count
 
-        penalty = self.samplingConfig.get("repetition_penalty")
         if penalty is not None and penalty != 1.0 and history:
             seen = self._torch.tensor(
                 list(set(history)), dtype=self._torch.long, device=scores.device
@@ -223,6 +241,9 @@ class TransformersGenerator:
             scores[seen] = self._torch.where(
                 selected < 0, selected * penalty, selected / penalty
             )
+
+        if greedy:
+            return int(self._torch.argmax(scores).item())
 
         temperature = float(self.samplingConfig.get("temperature", 1.0))
         if temperature <= 0:
@@ -312,6 +333,10 @@ class TransformersGenerator:
         fed to the model — the cached context KV is never recomputed.
         """
         maxNew = self.maxNewTokens if maxNewTokens is None else maxNewTokens
+        remaining = self._CheckContext(inputIds, pastKeyValues)
+        if remaining < 1:
+            raise ValueError("HF prompt must leave room for a generated token within MaxModelLen")
+        maxNew = min(maxNew, remaining)
         generated: List[int] = []
         history = list(inputIds)
         past = pastKeyValues
@@ -343,7 +368,8 @@ class TransformersGenerator:
         # cache is aligned with the native retained fragment. Token-only calls
         # avoid this extra forward because they do not retain generated KV.
         if returnCache and generated and generated[-1] not in self.eosIds:
-            past = self.Forward([generated[-1]], past, useCache=True).past_key_values
+            with self._torch.no_grad():
+                past = self.Forward([generated[-1]], past, useCache=True).past_key_values
             total = time.perf_counter() - t0
         text = self.tokenizer.decode(generated, skip_special_tokens=True)
         outputIds = self.OutputTokenIds(generated)

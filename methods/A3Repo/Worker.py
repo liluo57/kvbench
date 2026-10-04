@@ -140,6 +140,8 @@ class A3Worker:
         ids = list(ids) if ids is not None else self._encode(text)
         if not ids:
             return
+        if len(ids) > self.args.max_model_len:
+            raise ValueError(f"A3 prepared chunk exceeds max_model_len={self.args.max_model_len}")
         input_ids = self.torch.tensor([ids], device="cuda", dtype=self.torch.long)
         with self.torch.no_grad():
             self.precompute_model(
@@ -186,9 +188,16 @@ class A3Worker:
 
     def _decode(self, ids, config, max_new_tokens=None):
         from .backend.utils import decode
+        from helpers.backends.Tokenization import OutputFragmentIds
 
         if not ids:
             raise ValueError("empty prompt")
+        if len(ids) >= self.args.max_model_len:
+            raise ValueError(f"A3 prompt must leave room for generation within max_model_len={self.args.max_model_len}")
+        budget = min(
+            self.args.max_new_tokens if max_new_tokens is None else max_new_tokens,
+            self.args.max_model_len - len(ids),
+        )
         decodeCallStart = time.perf_counter()
         args = self._sampling_args()
         input_state = {
@@ -206,23 +215,24 @@ class A3Worker:
         # otherwise a numeric-only answer (for example ``2009``) is parsed as
         # a JSON integer by the parent adapter instead of as its response.
         with contextlib.redirect_stdout(sys.stderr):
-            text, ttft, _tpot = decode(
+            text, ttft, _tpot, generatedIds = decode(
                 args,
                 self.model,
                 self.tokenizer,
                 input_state,
                 stop,
-                self.args.max_new_tokens if max_new_tokens is None else max_new_tokens,
+                budget,
                 config,
+                return_token_ids=True,
             )
         total = time.perf_counter() - decodeCallStart
-        n_tokens = len(self.tokenizer.encode(text, add_special_tokens=False))
         return (
             text,
             float(ttft),
             float(total),
-            int(n_tokens),
+            len(generatedIds),
             generationStart,
+            OutputFragmentIds(generatedIds, stop),
         )
 
     def _full_config(self):
@@ -243,12 +253,13 @@ class A3Worker:
         baseline process and calls ragkv's ``vanilla()`` entry point.
         """
         ids = list(input_ids) if input_ids is not None else self._encode(text or "")
-        output, ttft, total, n_tokens, generationStart = self._decode(
+        output, ttft, total, n_tokens, generationStart, outputIds = self._decode(
             ids, self._full_config(), max_new_tokens
         )
         return {
             "ok": True,
             "text": output,
+            "output_ids": outputIds,
             "ttft": ttft,
             "total_time": total,
             "num_tokens": n_tokens,
@@ -272,6 +283,8 @@ class A3Worker:
         full_ids = doc_ids + suffix_ids
         if not full_ids:
             raise ValueError("empty A^3 prompt")
+        if len(full_ids) >= self.args.max_model_len:
+            raise ValueError(f"A3 prompt must leave room for generation within max_model_len={self.args.max_model_len}")
 
         n_layers = len(self.model.model.layers)
         n_doc = len(doc_ids)
@@ -312,18 +325,19 @@ class A3Worker:
                 },
             },
         }
-        output, ttft, total, n_tokens, generationStart = self._decode(
+        output, ttft, total, n_tokens, generationStart, outputIds = self._decode(
             full_ids, config, max_new_tokens
         )
         return {
             "ok": True,
             "text": output,
+            "output_ids": outputIds,
             "ttft": ttft,
             "total_time": total,
             "num_tokens": n_tokens,
             "n_input": len(full_ids),
             "generation_start": generationStart,
-            "reuse_ratio": round(n_doc / len(full_ids), 6) if full_ids else 0.0,
+            "reuse_ratio": n_doc / len(full_ids) if full_ids else 0.0,
             "runtime_mode": "ragkv_bundled",
             "algorithm": "a3_reuse",
             "a3_debug": {

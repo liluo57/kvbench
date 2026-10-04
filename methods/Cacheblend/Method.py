@@ -7,6 +7,7 @@ names, sampling, reuse metrics and lifecycle contracts are preserved.
 
 import json
 import os
+import select
 import subprocess
 import sys
 import threading
@@ -89,6 +90,7 @@ class CacheblendRepo(Method):
         self._proc: Optional[subprocess.Popen] = None
         self._drainThread = None
         self._stderrTail = deque(maxlen=200)
+        self._stdoutBuffer = bytearray()
         #: Per-case warm-up chunks from the last :meth:`Prepare` call
         #: (empty chunks filtered out; used only to detect reuse in Run).
         self._chunks: List[List[List[int]]] = []
@@ -111,6 +113,7 @@ class CacheblendRepo(Method):
             pass
 
     def _startWorker(self) -> None:
+        self._stdoutBuffer.clear()
         self._stderrTail.clear()
         if not self.workerPython.is_file():
             raise FileNotFoundError(
@@ -153,9 +156,9 @@ class CacheblendRepo(Method):
         self._drainThread.start()
         # Wait until the worker has loaded the model and is ready to serve.
         ready = False
-        deadline = time.time() + self.startTimeout
-        while time.time() < deadline:
-            line = self._proc.stdout.readline()
+        deadline = time.monotonic() + self.startTimeout
+        while time.monotonic() < deadline:
+            line = self._ReadlineUntil(deadline)
             if not line:
                 if self._proc.poll() is not None:
                     if self._drainThread is not None:
@@ -174,9 +177,9 @@ class CacheblendRepo(Method):
             raise TimeoutError("cacheblend helper did not become ready")
 
     def _Request(self, payload: Dict[str, Any], timeout: float = 3600.0) -> Dict[str, Any]:
-        self._proc.stdin.write(json.dumps(payload) + "\n")
-        self._proc.stdin.flush()
-        line = self._proc.stdout.readline()
+        deadline = time.monotonic() + timeout
+        self._WriteUntil(payload, deadline)
+        line = self._ReadlineUntil(deadline)
         if not line:
             if self._drainThread is not None:
                 self._drainThread.join(timeout=0.5)
@@ -186,6 +189,38 @@ class CacheblendRepo(Method):
         if not resp.get("ok"):
             raise RuntimeError(f"cacheblend helper error: {resp.get('error')}")
         return resp
+
+    def _WriteUntil(self, payload: Dict[str, Any], deadline: float) -> None:
+        wire = memoryview((json.dumps(payload) + "\n").encode("utf-8"))
+        fd = self._proc.stdin.fileno()
+        while wire:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([], [fd], [], remaining)[1]:
+                self._proc.kill()
+                raise TimeoutError("CacheBlend worker request timed out")
+            # PIPE_BUF-sized writes cannot block after writability was signaled.
+            wire = wire[os.write(fd, wire[:4096]):]
+
+    def _ReadlineUntil(self, deadline: float) -> str:
+        fd = self._proc.stdout.fileno()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._proc.kill()
+                raise TimeoutError("CacheBlend worker response timed out")
+            if b"\n" in self._stdoutBuffer:
+                line, _, rest = self._stdoutBuffer.partition(b"\n")
+                self._stdoutBuffer = rest
+                return (line + b"\n").decode("utf-8")
+            if not select.select([fd], [], [], remaining)[0]:
+                self._proc.kill()
+                raise TimeoutError("CacheBlend worker response timed out")
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                line = self._stdoutBuffer
+                self._stdoutBuffer = bytearray()
+                return line.decode("utf-8")
+            self._stdoutBuffer.extend(chunk)
 
     def _StderrTail(self) -> str:
         """Return stderr already consumed by the sole pipe-drain thread."""
@@ -390,7 +425,7 @@ class CacheblendRepo(Method):
         self._chunks = []
         try:
             self._Request({"op": "reset"})
-        except (BrokenPipeError, RuntimeError):
+        except (BrokenPipeError, RuntimeError, TimeoutError):
             self._restartWorker()
 
     def Close(self) -> None:
@@ -399,8 +434,10 @@ class CacheblendRepo(Method):
         if proc is not None:
             try:
                 if proc.poll() is None and proc.stdin is not None:
-                    proc.stdin.write(json.dumps({"op": "close"}) + "\n")
-                    proc.stdin.flush()
+                    fd = proc.stdin.fileno()
+                    if not select.select([], [fd], [], 1.0)[1]:
+                        raise TimeoutError("CacheBlend worker close timed out")
+                    os.write(fd, b'{"op": "close"}\n')
                 proc.wait(timeout=30)
             except Exception:  # noqa: BLE001
                 with suppress(Exception):

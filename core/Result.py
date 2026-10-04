@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Optional
 #: outside this measurement. Task-side prompt tokenization is performed before
 #: the Method call and is also outside this measurement.
 TtftKey = "ttft"
-#: Number of generated (output) tokens.
+#: Number of tokens actually generated, including terminal EOS/stop tokens.
+#: This can exceed len(output_ids), whose reusable fragment excludes terminal stops.
 NumOutputTokensKey = "num_output_tokens"
 #: Total wall-clock time of ``Method.Run``, in seconds.
 TotalTimeKey = "total_time"

@@ -857,6 +857,10 @@ class Req(ReqDllmMixin):
         # is an arbitrary set of hit-token positions chosen by the selector.
         self.pic_linearkv_selected_positions: Dict[Tuple[int, int], List[int]] = {}
         self.pic_online_token_positions: Optional[torch.Tensor] = None
+        # HYPIC seam rows are removed from prefix_indices before being replayed;
+        # LinearKV repair rows stay there. Add only these omitted rows back to
+        # raw hit-coverage accounting.
+        self.pic_hit_tokens_removed_from_prefix: int = 0
         self.pic_linearkv_skip_cache: bool = False
         # transition_rope_recompute: per-hit-segment seam absolute positions
         # (real-pos in fill_ids). When set, hit-seg sink tokens are
@@ -1186,6 +1190,7 @@ class Req(ReqDllmMixin):
             self.pic_linearkv_skip_cache = False
             self.pic_linearkv_selected_positions = {}
             self.pic_online_token_positions = None
+            self.pic_hit_tokens_removed_from_prefix = 0
             if cow_mamba is None:
                 cow_mamba = tree_cache.supports_mamba()
             match_result = tree_cache.match_prefix(
@@ -1302,6 +1307,13 @@ class Req(ReqDllmMixin):
                     )
                     if policy is not None and policy.is_linearkv:
                         self.pic_online_token_positions = self.pic_miss_token_positions
+
+                # Seam rows are removed from prefix_indices, so add their
+                # matched-token count back to cache-hit coverage below.
+                self.pic_hit_tokens_removed_from_prefix = sum(
+                    len(rows)
+                    for rows in (getattr(self, "pic_hit_seam_positions", {}) or {}).values()
+                )
 
             if self.is_dllm():
                 self._update_block_offset_for_dllm()
@@ -2220,9 +2232,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             # flag will always True
             if not req.retracted_stain:
                 new_cached = pre_len - req.already_computed
-                # LinearKV repair rows remain in the FA prefix mapping but
-                # execute online; exclude them from reuse accounting.
-                new_cached -= sum(len(rows) for rows in req.pic_linearkv_selected_positions.values())
+                # HYPIC seam hits are absent from prefix_indices because they
+                # are forwarded online; they remain matched input tokens.
+                new_cached += req.pic_hit_tokens_removed_from_prefix
+                # Count matched input tokens, including matched rows that are
+                # re-forwarded by PIC repair.
                 req.cached_tokens += max(0, new_cached)
 
                 # Calculate detailed breakdown of cached tokens by source (for HiCache)
@@ -2234,7 +2248,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     # - len(prefix_indices) = device_original + host_loaded
                     # - host_hit_length = total tokens from host cache (including storage-prefetched)
                     # - storage_hit_length = tokens loaded from storage backend (L3 hits)
-                    # - device_portion = len(prefix_indices) - host_hit_length
+                    # - device_portion = matched device tokens - host_hit_length
                     #
                     # Storage hits are now tracked via scheduler after prefetch completes.
                     # storage_hit_length is set by scheduler.pop_prefetch_loaded_tokens()
@@ -2242,16 +2256,20 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     # Clamp storage to host_total to handle edge cases
                     storage_portion = min(host_total, req.storage_hit_length)
                     host_portion = host_total - storage_portion
-                    device_portion = max(0, len(req.prefix_indices) - host_total)
+                    device_portion = max(
+                        0,
+                        len(req.prefix_indices)
+                        + req.pic_hit_tokens_removed_from_prefix
+                        - host_total,
+                    )
 
                     req.cached_tokens_device = device_portion
                     req.cached_tokens_host = host_portion
                     req.cached_tokens_storage = storage_portion
 
-                    # PIC: hit segments are composed from device-cached state and
-                    # are not re-forwarded. match_prefix already folds their slots
-                    # into prefix_indices, so the radix accounting above (pre_len)
-                    # counts them — no separate PIC add here (would double-count).
+                    # PIC hits are included through prefix_indices; HYPIC seam hits
+                    # removed from that mapping were restored above. No additional
+                    # PIC adjustment is needed for the device/host split here.
                     req._cache_breakdown_computed = True
 
                 req.already_computed = seq_len

@@ -507,7 +507,7 @@ class DependencyAnalysisMethod(FullPrefillTransformer):
     """FullPrefill generation plus RAG document dependency measurements."""
 
     name = "dependency_analysis"
-    method_metrics = _MetricNames
+    method_metrics = ("reuse_ratio", *_MetricNames)
     maxCaseBatchSize = 1
 
     def __init__(

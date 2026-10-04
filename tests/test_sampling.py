@@ -122,6 +122,44 @@ def test_sampling_mode_is_validated():
         ResolveSamplingConfig(config={"ModelConfig": {"mode": "random"}})
 
 
+def test_default_sampling_reads_hub_metadata_and_uses_generation_precedence(tmp_path, monkeypatch):
+    import transformers.utils.hub
+    directory = _model_dir(tmp_path, config={"temperature": 0.4}, generation={
+        "do_sample": True, "temperature": 0.7, "top_p": 0.9, "top_k": 20})
+    requested = []
+
+    def cached_file(repo, filename, **kwargs):
+        assert repo == "org/model"
+        requested.append(filename)
+        return str(directory / filename)
+
+    monkeypatch.setattr(transformers.utils.hub, "cached_file", cached_file)
+    policy = ResolveSamplingConfig("org/model", config={"ModelConfig": {"mode": "default"}})
+    assert policy == {"mode": "default", "do_sample": True, "temperature": 0.7,
+                      "top_p": 0.9, "top_k": 20}
+    assert set(requested) == {"config.json", "generation_config.json"}
+
+
+def test_default_hub_sampling_does_not_hide_resolution_failure(monkeypatch):
+    import transformers.utils.hub
+
+    def unavailable(*args, **kwargs):
+        raise OSError("offline metadata unavailable")
+
+    monkeypatch.setattr(transformers.utils.hub, "cached_file", unavailable)
+    with pytest.raises(OSError, match="offline metadata"):
+        ResolveSamplingConfig("org/model", config={"ModelConfig": {"mode": "default"}})
+
+
+@pytest.mark.parametrize("translate", [VllmSamplingParams, SglangSamplingParams])
+@pytest.mark.parametrize("do_sample", [True, False])
+def test_engine_backends_reject_eos_replacement_instead_of_ignoring_it(translate, do_sample):
+    with pytest.raises(ValueError, match="eos_token_id replacement"):
+        translate({"mode": "override", "do_sample": do_sample, "eos_token_id": 9}, 5)
+    # Model defaults remain engine-owned; this is not an EOS replacement.
+    assert translate({"mode": "default", "do_sample": False, "eos_token_id": 2}, 5)["temperature"] == 0
+
+
 class _OutputCache:
     def __init__(self, length):
         self.layers = [(
@@ -248,6 +286,29 @@ def test_naive_native_output_cache_hits_next_prompt_without_full_prefill():
     assert method._gen.generate_calls[0][0] == [9]
 
 
+def test_naive_counts_cached_final_prompt_token_even_though_it_is_replayed():
+    method = _naive_cache_registrar()
+    assert method.method_metrics == ("reuse_ratio",)
+    state = {"segments": [], "ids": [], "caches": []}
+    method._registerOutput(state, [7, 99, 8], _OutputCache(6), promptLength=3)
+    method._states = [state]
+
+    result = method.Run([[7, 99, 8]])[0]
+
+    assert result.metadata["reuse_ratio"] == pytest.approx(1.0)
+    assert method._gen.generate_calls[0][0] == [8]
+    assert method._gen.generate_calls[0][1].get_seq_length() == 2
+
+
+def test_naive_no_match_reports_zero_reuse_ratio():
+    method = _naive_cache_registrar()
+    method._states = [{"segments": [], "ids": [], "caches": []}]
+
+    result = method.Run([[1, 2]])[0]
+
+    assert result.metadata["reuse_ratio"] == 0.0
+
+
 def test_kvcomm_retains_internal_special_and_reuses_native_cache(monkeypatch):
     method = object.__new__(KVCommTransformer)
 
@@ -308,6 +369,34 @@ def test_kvcomm_retains_internal_special_and_reuses_native_cache(monkeypatch):
     method._BuildBase(parts, [[1], [7, 99, 8], [9]])
 
     assert parts[1]["raw_cache"] is segment["base_cache"]
+
+
+def test_kvcomm_equal_answers_keep_their_contextual_cache_identity():
+    from helpers.backends.Prompt import ComposeInterleavedReuse
+    method = object.__new__(KVCommTransformer)
+    segments = [
+        {"base_ids": (1,), "base_cache": object(), "placeholder_id": "user_question"},
+        {"base_ids": (2,), "base_cache": object(), "placeholder_id": "agent_0_current"},
+        {"base_ids": (2,), "base_cache": object(), "placeholder_id": "agent_1_current"},
+    ]
+    matches = ComposeInterleavedReuse([list(s["base_ids"]) for s in segments], [1, 2, 2])
+    parts = method._MakeParts(segments, matches)
+    assert [part["segment"] for part in parts] == segments
+    assert parts[1]["segment"]["base_cache"] is not parts[2]["segment"]["base_cache"]
+    # A single immutable prepared chunk remains reusable more than once.
+    repeated = method._MakeParts(segments[:1], [(0, [1]), (0, [1])])
+    assert all(part["segment"] is segments[0] for part in repeated)
+
+
+def test_terminal_stop_override_replaces_default_and_keeps_explicit_stops():
+    from helpers.backends.Tokenization import TerminalStopIdsFromTokenizer, OutputFragmentIds
+    tokenizer = SimpleNamespace(eos_token_id=2)
+    stops = TerminalStopIdsFromTokenizer(tokenizer, {"eos_token_id": 9}, [8])
+    assert stops == [8, 9]
+    assert OutputFragmentIds([10, 2], stops) == [10, 2]
+    assert OutputFragmentIds([2, 10, 9], stops) == [2, 10]
+    assert TerminalStopIdsFromTokenizer(tokenizer, {"eos_token_id": []}) == []
+    assert TerminalStopIdsFromTokenizer(tokenizer) == [2]
 
 
 def test_transformers_returncache_keeps_raw_ids_and_token_return_keeps_internal_special():

@@ -17,10 +17,38 @@ All methods inherit from `core.Method.Method` and implement this lifecycle:
 Each `Result` returned by `Run` should contain decoded generated `output` and timing fields in `performance`. Set `output_ids` to the authoritative generated token fragment when available: it excludes terminal stop IDs but retains interior special IDs. Multi-turn workflows pass this exact sequence into a later prompt and retained KV must use the same fragment; never decode and re-encode `output` as a substitute for cache identity. A text-only backend without `output_ids` cannot provide reusable output to a later turn. System metrics use these keys from `core.Result`:
 
 - `ttft`: seconds. Timing starts when `Run` begins and includes request-dependent lookup, cache loading/assembly/transformation, selection, repair, recomputation, and transfers. Task-side prompt tokenization is completed before `Run` and is excluded.
-- `num_output_tokens`: number of generated tokens.
+- `num_output_tokens`: number of tokens actually generated, including terminal EOS/stop tokens. Count the backend's raw generated IDs or completion-token metadata, not the decoded text or the stop-trimmed `output_ids` fragment.
 - `total_time`: total time spent in `Run`, in seconds.
 
 Model initialization and reusable state built in `Prepare` are excluded from TTFT. Per-request method metrics belong in `Result.metadata`; keys declared in the class attribute `method_metrics` are aggregated by the Engine into the report's `method_metrics` section.
+
+`reuse_ratio` is cache-hit coverage: the number of canonical input token
+positions matched to cached state divided by `n_input`, the complete RUN
+prompt length. Count each matched occurrence, including repeated chunks.
+Repairing a hit or replaying the final prompt token does not remove it from
+the numerator. Artificial wrappers, separators and cache-isolation salts are
+excluded. The Engine weights the aggregate mean by `n_input`, so it represents
+total cache-hit tokens divided by total input tokens across RUN actions.
+Full HF prefill has zero cache hits; a backend that uses native prefix caching
+reports its actual hits.
+
+Recomputation and reuse are separate concepts. A fixed `recompRatio` or
+`recomputeRatio` is an algorithm parameter, not an aggregated method metric,
+and `reuse_ratio` is not one minus that parameter. Methods that determine the
+repair amount dynamically may report `recompute_ratio`. CacheClip reports
+the number of repaired cached positions (including a mandatory final-token
+replay) divided by cached input positions. Fresh prefix/query positions do not
+enter that denominator. A CacheClip full-prefill fallback records
+`reuse_ratio=0`, `recompute_ratio=1`, `full_prefill=True`, and `fallback_rate=1`;
+ordinary reuse records `fallback_rate=0`. Both paths contribute to the report.
+
+`MaxModelLen` bounds the context window. RUN prompts must leave room for at
+least one generated token. Generation-budget handling is backend-specific:
+the HF generation paths cap the budget at the remaining window, while
+HYPIC/LinearKV reject requests whose input plus requested generation budget
+exceeds the backend's permitted request length. Choose a Task budget that
+passes the selected backend's validation. KVPacket counts inserted wrapper
+positions as part of that window even when its physical KV cache is compressed.
 
 ## Existing methods
 
@@ -43,6 +71,10 @@ Refer to each class constructor for its implementation and configurable paramete
 | `EPIC` | Independent EPIC/LegoLink method: repairs a fixed prefix of relocated cached chunks using the shared local HF/cache backend. |
 
 CacheClip's current primary-ID alignment supports fast ByteLevel tokenizers and has been validated with Qwen. `sharedPrefixText` optionally supplies an explicit warmup prefix: preparation tokenizes `P` independently, prefills `P_ids + D_ids`, then stores only the cache rows for `D_ids` and records the length of `P_ids`. Run never inserts or removes IDs for this prefix; without a matching prefix in the runtime prompt, this warmup is a calibration variant rather than strict paper-style prefix retention. The auxiliary selector view is decoded from primary IDs, so Unicode normalization may differ from the original source text.
+
+CacheClip's sparse repair currently has decoder adapters for Llama, Qwen2 and
+dense Qwen3 only. Tokenizer alignment support alone does not imply support for
+another primary-model architecture.
 
 ## Using a method in an evaluation
 
@@ -83,8 +115,11 @@ HF execution and selective-recompute implementation in
 classes alongside `KVPacket`; EPIC lives in `methods/EPIC.py` and imports only
 the shared backend. These methods accept the Task's authoritative token IDs,
 including reordered/repeated chunks and fresh spans between cached chunks.
-Prepared caches are immutable; retained outputs keep their native IDs and KV
-for later turns. TTFT includes matching, cache alignment, repair, fresh rows,
+Prepared caches are immutable. Methods that implement the optional
+`retainOutput` hint preserve native output IDs and their matching KV for later
+turns. KVPacket returns native `output_ids` but does not retain generated KV:
+only prepared packets are reused, and earlier outputs in later prompts are
+prefilled as fresh spans. TTFT includes matching, cache alignment, repair, fresh rows,
 and first-token selection; GPU precompute finishes before Prepare returns.
 
 EPIC's `recomputeTokens` (default 32) repairs the first tokens of each cached

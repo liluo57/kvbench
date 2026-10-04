@@ -72,7 +72,7 @@ def _ReadJson(path: Path) -> Dict[str, Any]:
 
 
 def _ModelGenerationValues(modelPath: Optional[Union[str, Path]]) -> Dict[str, Any]:
-    """Read generation values from a local model directory.
+    """Read generation values from a local directory or a Hugging Face Hub ID.
 
     ``generation_config.json`` is the canonical HuggingFace location.  The
     fallback to ``config.json`` is needed for model exports that embed those
@@ -82,10 +82,17 @@ def _ModelGenerationValues(modelPath: Optional[Union[str, Path]]) -> Dict[str, A
     if not modelPath:
         return {}
     modelDir = Path(modelPath).expanduser()
-    if not modelDir.is_dir():
-        return {}
+    if modelDir.is_dir():
+        configPath = modelDir / "config.json"
+        generationPath = modelDir / "generation_config.json"
+    else:
+        from transformers.utils.hub import cached_file
+        # Resolve only metadata, honoring HF's existing local cache/offline
+        # policy. Auth/network failures must not silently change the policy.
+        configPath = cached_file(str(modelPath), "config.json", _raise_exceptions_for_missing_entries=False)
+        generationPath = cached_file(str(modelPath), "generation_config.json", _raise_exceptions_for_missing_entries=False)
 
-    modelConfig = _ReadJson(modelDir / "config.json")
+    modelConfig = _ReadJson(Path(configPath)) if configPath is not None else {}
     values: Dict[str, Any] = {}
     for container in (
         modelConfig,
@@ -97,7 +104,8 @@ def _ModelGenerationValues(modelPath: Optional[Union[str, Path]]) -> Dict[str, A
 
     # The dedicated generation config takes precedence over fields embedded in
     # the model config, just as AutoModel/GenerationConfig does.
-    values.update(_CanonicalValues(_ReadJson(modelDir / "generation_config.json")))
+    if generationPath is not None:
+        values.update(_CanonicalValues(_ReadJson(Path(generationPath))))
     return values
 
 
@@ -204,6 +212,8 @@ def VllmSamplingParams(
     samplingConfig: Optional[Mapping[str, Any]], maxTokens: int
 ) -> Dict[str, Any]:
     """Translate the shared config to ``vllm.SamplingParams`` kwargs."""
+    if samplingConfig and samplingConfig.get("eos_token_id") is not None and samplingConfig.get("mode") != "default":
+        raise ValueError("vLLM does not support ModelConfig.eos_token_id replacement; use the model's default EOS")
     if IsGreedy(samplingConfig):
         return {"temperature": 0, "max_tokens": maxTokens}
 
@@ -228,6 +238,8 @@ def SglangSamplingParams(
     samplingConfig: Optional[Mapping[str, Any]], maxNewTokens: int
 ) -> Dict[str, Any]:
     """Translate the shared config to SGLang ``sampling_params``."""
+    if samplingConfig and samplingConfig.get("eos_token_id") is not None and samplingConfig.get("mode") != "default":
+        raise ValueError("SGLang does not support ModelConfig.eos_token_id replacement; use the model's default EOS")
     if IsGreedy(samplingConfig):
         return {"temperature": 0, "max_new_tokens": maxNewTokens}
 

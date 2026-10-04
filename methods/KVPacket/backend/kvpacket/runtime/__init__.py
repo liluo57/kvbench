@@ -1,7 +1,13 @@
 """Reentrant packet-aware execution with caller-owned cache state."""
 
 from .executor import PacketExecutor
-from .generation import PacketDecodeState, PacketDecodeStep, SamplingConfig, select_next_token
+from .generation import (
+    PacketDecodeState,
+    PacketDecodeStep,
+    SamplingConfig,
+    make_generator,
+    select_next_token,
+)
 from .matching import Match
 from .types import (
     MixedPrefillPolicy,
@@ -19,6 +25,7 @@ __all__ = [
     "PacketTokenForwardResult",
     "MixedPrefillPolicy",
     "SamplingConfig",
+    "make_generator",
     "PacketDecodeState",
     "PacketDecodeStep",
     "select_next_token",

@@ -127,6 +127,15 @@ def _repair_plan(segments: list, prefix_len: int, ratio: float) -> dict:
     }
 
 
+def _cache_hit_token_count(segments) -> int:
+    """Count prompt positions sourced from cached segments.
+
+    CacheBlend may recompute cached positions during repair or replay a cached
+    tail as its mandatory suffix. Both are still cache hits for reuse_ratio.
+    """
+    return sum(end - start for cached, _, _, start, end in segments if cached)
+
+
 class CacheBlendWorker:
     def __init__(self, args):
         # Heavy deps load only inside this subprocess (see module docstring).
@@ -208,6 +217,8 @@ class CacheBlendWorker:
     def _SamplingParams(self, maxTokens: int):
         # The parent passes the resolved sampling policy over JSON.
         config = self.samplingConfig
+        if config and config.get("eos_token_id") is not None and config.get("mode") != "default":
+            raise ValueError("CacheBlend does not support ModelConfig.eos_token_id replacement; use the model's default EOS")
         if (
             not config
             or config.get("mode") == "greedy"
@@ -622,13 +633,9 @@ class CacheBlendWorker:
                 valueBuffer[:fullLen],
             ])
 
-        reusedTokens = sum(
-            end - start
-            for cached, _, _, start, end in segments
-            if cached
-        )
-        if lastCached:
-            reusedTokens = max(0, reusedTokens - suffixLen)
+        # A cached row selected for repair or suffix replay still counts as a
+        # cache hit; the metric reports source coverage, not saved FLOPs.
+        reusedTokens = _cache_hit_token_count(segments)
 
         self.engine.model.old_kvs = oldKvs
         self.cfm["collect"] = False
@@ -726,7 +733,11 @@ class CacheBlendWorker:
             retain_output=retain_output,
             max_new_tokens=max_new_tokens,
         )
-        reusedTokens = max(0, len(fullIds) - suffixLen)
+        # Every context chunk was fetched from cache, even when the last
+        # cached chunk doubles as CacheBlend's mandatory recompute suffix.
+        reusedTokens = _cache_hit_token_count([
+            (True, ids, None, 0, len(ids)) for ids in ctxIds
+        ])
         resp["reuse_ratio"] = self._reuseRatio(len(fullIds), reusedTokens)
         return resp
 

@@ -34,6 +34,7 @@ from ..runtime import (
     PacketDecodeState,
     PacketExecutor,
     SamplingConfig,
+    make_generator,
     select_next_token,
 )
 from ..runtime.matching import Match, string_cover
@@ -423,14 +424,19 @@ class PacketSession:
         top_p: float = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
+        typical_p: float = 1.0,
+        repetition_penalty: float = 1.0,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        seed: int | None = None,
     ) -> GenerationResult:
         """Commit pending content and generate a continuation.
 
         The final unmatched span is treated as the generation prompt. Prefix assembly
         and prompt prefill determine TTFT; decoding then updates the persistent cache.
-        Greedy selection is the default, with temperature, top-p, top-k, and min-p
-        filtering available when sampling is enabled. RECORD mode also stores a
-        ``TrainingSample``.
+        Greedy selection is the default. Sampling supports temperature, top-p, top-k,
+        min-p, typical-p, history penalties, and a request-local seed. RECORD mode
+        also stores a ``TrainingSample``.
 
         Args:
             max_new_tokens: Maximum continuation length.
@@ -443,9 +449,14 @@ class PacketSession:
                 this method was entered.
             do_sample: Whether to sample instead of selecting the maximum logit.
             temperature: Positive sampling temperature.
-            top_p: Cumulative-probability threshold in ``(0, 1]``.
+            top_p: Cumulative-probability threshold in ``[0, 1]``; zero disables it.
             top_k: Maximum number of candidate tokens; zero disables this filter.
             min_p: Minimum probability relative to the most likely token.
+            typical_p: Locally typical probability mass to retain.
+            repetition_penalty: Multiplicative penalty for tokens in prompt/history.
+            presence_penalty: Additive penalty for tokens present in prompt/history.
+            frequency_penalty: Additive penalty scaled by history token counts.
+            seed: Optional seed reset for each generation request.
 
         Returns:
             Generated tokens, decoded text, matches, and serving diagnostics.
@@ -465,7 +476,13 @@ class PacketSession:
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
+            typical_p=typical_p,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            seed=seed,
         )
+        generator = make_generator(sampling, self.backend.device)
         stream_ids, records = self._build_stream()
         cover = self._match(stream_ids, records)
         # Generation needs at least one freshly forwarded prompt token to
@@ -505,6 +522,7 @@ class PacketSession:
         assert cache is not None
         cur = prefill.cache_state.next_position
         prompt_logits = prefill.prompt_logits
+        history = [*self._trajectory_ids, *stream_ids]
 
         if use_native_continuation:
             gen_ids, gen_logits, cache, final_offset, ttft = self._continue_natively(
@@ -517,6 +535,8 @@ class PacketSession:
                 capture_logits=capture_logits,
                 started_at=t0,
                 sampling=sampling,
+                history=history,
+                generator=generator,
             )
         else:
             gen_ids, gen_logits, cache, final_offset, ttft = self._continue(
@@ -528,6 +548,8 @@ class PacketSession:
                 capture_logits,
                 started_at=t0,
                 sampling=sampling,
+                history=history,
+                generator=generator,
             )
         self._cache, self._offset = cache, final_offset
         generated_start = len(self._trajectory_ids) + len(stream_ids)
@@ -802,13 +824,15 @@ class PacketSession:
         capture_logits: bool,
         started_at: float,
         sampling: SamplingConfig,
+        history: list[int],
+        generator: torch.Generator | None,
     ) -> tuple[list[int], list[Tensor], KVCache, int, float]:
         """Select the timed first token, then delegate only its continuation."""
         backend = self.backend
         if not isinstance(backend, GenerationBackend):
             raise TypeError("native continuation requires a GenerationBackend")
 
-        first = select_next_token(first_token_logits, sampling)
+        first = select_next_token(first_token_logits, sampling, history, generator)
         self._sync()
         ttft = perf_counter() - started_at
         generated = [first]
@@ -837,6 +861,12 @@ class PacketSession:
             top_p=sampling.top_p,
             top_k=sampling.top_k,
             min_p=sampling.min_p,
+            typical_p=sampling.typical_p,
+            repetition_penalty=sampling.repetition_penalty,
+            presence_penalty=sampling.presence_penalty,
+            frequency_penalty=sampling.frequency_penalty,
+            generator=generator,
+            history_ids=[*history, first],
         )
         generated.extend(native.token_ids)
         generated_logits.extend(native.logits)
@@ -854,6 +884,8 @@ class PacketSession:
         *,
         started_at: float,
         sampling: SamplingConfig,
+        history: list[int],
+        generator: torch.Generator | None,
     ) -> tuple[list[int], list[Tensor], KVCache, int, float]:
         """Decode tokens while retaining optional teacher logits and cache state."""
         gen_ids: list[int] = []
@@ -866,10 +898,13 @@ class PacketSession:
         for _ in range(max_new_tokens):
             if capture_logits:
                 gen_logits.append(state.next_token_logits[0].detach().clone())
-            step = self.executor.decode_step(state, sampling)
+            step = self.executor.decode_step(
+                state, sampling, history=history, generator=generator
+            )
             nxt = step.token_id
             state = step.state
             gen_ids.append(nxt)
+            history.append(nxt)
             if first_token_ttft is None:
                 self._sync()
                 first_token_ttft = perf_counter() - started_at

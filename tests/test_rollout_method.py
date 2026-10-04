@@ -69,12 +69,45 @@ def test_rollout_uses_population_statistics_and_keeps_one_result_per_input():
     assert result.metadata["rollout_variance"] == pytest.approx(2 / 3)
     assert result.metadata["rollout_std"] == pytest.approx(math.sqrt(2 / 3))
     assert result.metadata["rollout"]["num_rollouts"] == 3
-    assert [item.output for item in result.metadata["rollout"]["results"]] == [
-        1,
-        2,
-        3,
-    ]
+    assert [item.output for item in result.metadata["rollout"]["results"]] == [1, 2, 3]
     assert len(base.calls) == 3
+
+
+def test_stateful_rollouts_retain_only_the_delivered_response():
+    import torch
+    from methods.Naive import NaiveTransformer
+
+    class Cache:
+        def __init__(self, length):
+            self.layers = [(torch.zeros(1, 1, length, 2), torch.zeros(1, 1, length, 2))]
+
+        def get_seq_length(self):
+            return self.layers[0][0].shape[-2]
+
+    class Generator:
+        calls = 0
+        retains = []
+
+        def Generate(self, ids, *, returnCache=False, **kwargs):
+            self.calls += 1
+            self.retains.append(returnCache)
+            output_ids = [9 + self.calls]
+            result = (str(output_ids[0]), 0.01, 0.02, 1)
+            return result + ((Cache(len(ids) + 1), output_ids) if returnCache else (output_ids,))
+
+        def OutputTokenIds(self, ids):
+            return list(ids)
+
+    base = NaiveTransformer()
+    base._gen = Generator()
+    base.Prepare([[]])
+    result = RolloutMethod(base, num_rollouts=3).Run([[1, 2]], [True], maxNewTokens=1)[0]
+    assert base._gen.retains == [False, False, True]
+    assert base._states[0]["ids"] == [[12]]
+    assert result.output_ids == [12]
+    assert result.output == "12"
+    assert [raw.output_ids for raw in result.metadata["rollout"]["results"]] == [[10], [11], [12]]
+    assert result.metadata["rollout"]["representative_index"] == 2
 
 
 def test_two_cases_are_not_flattened_into_six_samples_and_task_scores_are_means():

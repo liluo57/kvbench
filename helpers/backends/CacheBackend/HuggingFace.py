@@ -13,6 +13,7 @@ use a repositionable RoPE variant, and return standard-attention cache layers.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
 
 import torch
 from torch import Tensor
@@ -79,6 +80,18 @@ def _model_config_fingerprint_data(config: object) -> dict[str, object]:
     return fingerprint_data
 
 
+def _model_weights_digest(model: PreTrainedModel) -> str:
+    """Identify unversioned weights with bounded CPU transfer buffers."""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        metadata = {"name": name, "dtype": str(tensor.dtype), "shape": list(tensor.shape)}
+        digest.update(fingerprint_json(metadata, domain="kvpacket.hf_tensor/1").encode("ascii"))
+        raw = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
+        for start in range(0, raw.numel(), 32 * 1024 * 1024):
+            digest.update(raw[start:start + 32 * 1024 * 1024].cpu().numpy().tobytes())
+    return digest.hexdigest()
+
+
 class HFBackend(ComputeBackend):
     """Hugging Face implementation of inference and training backend capabilities.
 
@@ -104,7 +117,8 @@ class HFBackend(ComputeBackend):
             model: Loaded causal language model.
             model_artifact_id: Stable revision, content digest, or deployment artifact
                 identifier for the exact weights. When omitted, the backend combines
-                the model ID with Hugging Face revision metadata when available.
+                the model ID with Hugging Face revision metadata when available,
+                or a digest of the actual weights for unversioned/local models.
         """
         self.model: PreTrainedModel = model
         self.config = model.config
@@ -131,6 +145,8 @@ class HFBackend(ComputeBackend):
             or getattr(self.config, "_commit_hash", None)
             or getattr(self.model, "_commit_hash", None)
         )
+        if revision is None:
+            revision = "weights_sha256:" + _model_weights_digest(self.model)
         artifact_identity = {
             "model_id": model_id,
             "revision": str(revision) if revision is not None else None,
@@ -360,6 +376,13 @@ class HFBackend(ComputeBackend):
         top_p: float = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
+        typical_p: float = 1.0,
+        repetition_penalty: float = 1.0,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        seed: int | None = None,
+        generator: torch.Generator | None = None,
+        history_ids: list[int] | None = None,
     ) -> BackendGenerationOutput:
         """Continue decoding while advancing logical and physical positions separately.
 
@@ -391,7 +414,7 @@ class HFBackend(ComputeBackend):
         else:
             current_attention_mask = attention_mask
 
-        from .Sampling import SamplingConfig, select_next_token
+        from .Sampling import SamplingConfig, make_generator, select_next_token
 
         sampling = SamplingConfig(
             do_sample=do_sample,
@@ -399,7 +422,28 @@ class HFBackend(ComputeBackend):
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
+            typical_p=typical_p,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            seed=seed,
         )
+        if generator is not None and seed is not None:
+            raise ValueError("pass either generator or seed, not both")
+        if generator is None:
+            generator = make_generator(sampling, input_ids.device)
+        uses_history_penalty = (
+            sampling.repetition_penalty != 1.0
+            or sampling.presence_penalty != 0.0
+            or sampling.frequency_penalty != 0.0
+        )
+        if history_ids is None and cache is not None and uses_history_penalty:
+            raise ValueError(
+                "history_ids are required for history penalties when generation uses a cache"
+            )
+        history = list(history_ids) if history_ids is not None else [
+            int(token) for token in input_ids[0].tolist()
+        ]
         if eos_token_id is None:
             eos_token_id = getattr(
                 getattr(self.model, "generation_config", None), "eos_token_id", None
@@ -423,8 +467,9 @@ class HFBackend(ComputeBackend):
         for index in range(max_new_tokens):
             if capture_logits:
                 captured_logits.append(next_logits[0].detach().clone())
-            token_id = select_next_token(next_logits, sampling)
+            token_id = select_next_token(next_logits, sampling, history, generator)
             token_ids.append(token_id)
+            history.append(token_id)
 
             # Commit each chosen token at its logical position, including the final
             # token. This keeps the session cache ready for any later continuation.

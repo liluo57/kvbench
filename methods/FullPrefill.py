@@ -1,7 +1,8 @@
 """FullPrefill — the baseline that recomputes the whole prompt every query.
 
-Nothing is cached or reused: ``Run(data)`` answers the complete prompt ``data``
-from scratch. Two backends:
+``Prepare`` stores no reusable document state; ``Run(data)`` submits the complete
+prompt. Native backend prefix-cache hits, when enabled, are reported separately.
+Two backends:
 
 - :class:`FullPrefillTransformer` — plain HuggingFace ``transformers``.
 - :class:`FullPrefillVllm` — the system vLLM.
@@ -10,12 +11,9 @@ This is the correctness / TTFT baseline that cacheblend's ``blend_niah.py``
 compares its fused runs against. The constructor declares a strict GPU count;
 the Engine assigns concrete ids when the worker initializes.
 
-Both ``Run`` methods process their whole batch in one call:
-
-- the vLLM backend submits every prompt as a concurrent request and steps them
-  together (:func:`helpers.VllmHelper.GenerateBatch`);
-- the transformers backend pads the prompts into one batched ``model.generate``
-  (:meth:`helpers.TransformersHelper.TransformersGenerator.GenerateBatch`).
+The vLLM backend submits the batch as concurrent requests. The Transformers
+backend processes prompts sequentially through the manual token-by-token
+``TransformersGenerator.Generate`` loop to measure the first-token boundary.
 
 ``Prepare`` is a no-op — FullPrefill recomputes everything, so warm-up text is
 irrelevant.
@@ -57,11 +55,11 @@ def _ConfiguredMaxNumSeqs() -> Optional[int]:
 
 class _FullPrefillBase(Method):
     """Shared FullPrefill logic. ``Prepare`` is a no-op (the whole prompt is
-    recomputed); ``Run`` is implemented per backend and processes the whole
-    batch at once."""
+    recomputed); each backend's ``Run`` returns one result per prompt."""
 
     #: backend identifier for ``Result.metadata``.
     backend = "transformers"
+    method_metrics = ("reuse_ratio",)
 
     def __init__(
         self,
@@ -103,7 +101,7 @@ class _FullPrefillBase(Method):
                 NumOutputTokensKey: nTokens,
                 TotalTimeKey: total,
             },
-            metadata={"backend": self.backend, **metadata},
+            metadata={"backend": self.backend, "reuse_ratio": 0.0, **metadata},
             output_ids=outputIds,
         )
 
@@ -162,10 +160,9 @@ class FullPrefillTransformer(_FullPrefillBase):
         # Task supplies the canonical segmented-token sequence.  Keep all
         # prompt tokenization outside the online Method boundary.
         idsList = [list(ids) for ids in data]
-        # The KVCOMM protocol is request-sequential (batch size 1). Generate()
-        # exposes the real first-token boundary; GenerateBatch() can only
-        # approximate TTFT from total generation time and must not be used for
-        # latency comparisons.
+        # Process prompts sequentially and include time spent serving earlier
+        # prompts in the same Run call. Generate() measures the first-token
+        # boundary; GenerateBatch() also uses this sequential generation loop.
         batchOut = []
         for index, ids in enumerate(idsList):
             generationStart = time.perf_counter()

@@ -43,6 +43,8 @@ def test_full_prefill_consumes_token_ids_without_encoding():
 
     assert result.performance["ttft"] >= 0.025
     assert result.output_ids == [2]
+    assert result.metadata["reuse_ratio"] == 0.0
+    assert method.method_metrics == ("reuse_ratio",)
 
 
 def test_naive_miss_consumes_token_ids_without_encoding():
@@ -87,6 +89,8 @@ def test_prophet_fallback_consumes_token_ids_without_encoding():
             return "answer", 0.03, 0.04, 1, [2]
 
     method = object.__new__(ProphetKV)
+    method.maxNewTokens = 64
+    method.maxModelLen = 32768
     method._runtime = Runtime()
     method._states = [SimpleNamespace(chunks=[], caches=[])]
     method.debug = False

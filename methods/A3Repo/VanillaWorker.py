@@ -112,7 +112,7 @@ class OfficialVanillaWorker:
         # and retain the diagnostic in the worker's stderr instead.
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured):
-            output, ttft, tpot = vanilla(
+            output, ttft, tpot, generated_ids = vanilla(
                 self._sampling_args(),
                 self.model,
                 self.tokenizer,
@@ -120,6 +120,7 @@ class OfficialVanillaWorker:
                 stop,
                 self.args.max_new_tokens,
                 self._full_config(),
+                return_token_ids=True,
             )
         onlineOffset = generationStart - onlineStart
         ttft = onlineOffset + float(ttft)
@@ -127,7 +128,9 @@ class OfficialVanillaWorker:
         diagnostic = captured.getvalue().strip()
         if diagnostic:
             print(f"[official-vanilla-helper output] {diagnostic}", file=sys.stderr, flush=True)
-        n_tokens = len(self._encode(output))
+        # vanilla() keeps terminal stop IDs out of its decoded text, but they
+        # were still generated and must be included in the performance count.
+        n_tokens = len(generated_ids)
         return {
             "ok": True,
             "text": output,

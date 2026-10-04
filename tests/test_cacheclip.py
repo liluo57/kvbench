@@ -715,6 +715,9 @@ def test_cacheclip_run_hit_preserves_chunk_and_fresh_ids_and_output_ids(monkeypa
     assert result.output_ids == [901]
     assert result.metadata["n_input"] == 3
     assert result.metadata["n_cached_tokens"] == 2
+    assert result.metadata["reuse_ratio"] == pytest.approx(2 / 3)
+    assert result.metadata["recompute_ratio"] == 0.0
+    assert result.metadata["fallback_rate"] == 0.0
 
 
 def test_cacheclip_composes_abc1abc2_without_reencoding(monkeypatch):
@@ -745,6 +748,7 @@ def test_cacheclip_interleaved_reorders_and_repeats_prepared_chunks(monkeypatch)
     assert method._gen.generate_calls[0][0] == [7]
     assert result.metadata["n_cached_tokens"] == 6
     assert result.metadata["n_input"] == 9
+    assert result.metadata["reuse_ratio"] == pytest.approx(6 / 9)
 
 
 def test_cacheclip_interleaved_tail_replay_uses_original_last_id(monkeypatch):
@@ -760,8 +764,10 @@ def test_cacheclip_interleaved_tail_replay_uses_original_last_id(monkeypatch):
     assert method._gen.generate_calls[0][0] == [4]
     assert method._gen.generate_calls[0][1][0].ids == [7, 8, 55, 3, 4]
     assert method._gen.generate_calls[0][1][1:] == (0, -1)
-    assert result.metadata["n_cached_tokens"] == 3
+    assert result.metadata["n_cached_tokens"] == 4
     assert result.metadata["n_input"] == 5
+    assert result.metadata["reuse_ratio"] == pytest.approx(4 / 5)
+    assert result.metadata["recompute_ratio"] == pytest.approx(1 / 4)
 
 
 def test_cacheclip_replay_at_contiguous_cached_tail_drops_one_cached_row(monkeypatch):
@@ -773,8 +779,10 @@ def test_cacheclip_replay_at_contiguous_cached_tail_drops_one_cached_row(monkeyp
     result = method.Run([[7, 8]])[0]
 
     assert method._gen.generate_calls[0][0] == [8]
-    assert result.metadata["n_cached_tokens"] == 1
+    assert result.metadata["n_cached_tokens"] == 2
     assert result.metadata["n_input"] == 2
+    assert result.metadata["reuse_ratio"] == 1.0
+    assert result.metadata["recompute_ratio"] == 0.5
 
 
 def test_cacheclip_zero_match_is_the_only_full_prefill_and_is_strict_when_requested():
@@ -786,9 +794,47 @@ def test_cacheclip_zero_match_is_the_only_full_prefill_and_is_strict_when_reques
     assert method._gen.encode_calls == []
     assert result.metadata["n_input"] == 2
 
+    assert result.metadata["full_prefill"] is True
+    assert result.metadata["fallback_rate"] == 1.0
+    assert result.metadata["reuse_ratio"] == 0.0
+    assert result.metadata["recompute_ratio"] == 1.0
+    assert result.metadata["n_recomputed_tokens"] == 2
+
     method.requireReuse = True
     with pytest.raises(RuntimeError, match="no matching prepared token IDs"):
         method.Run([[42, 43]])
+
+
+@pytest.mark.parametrize("selected", [[], [1], [1, 2]])
+def test_cacheclip_dynamic_repair_ratio_excludes_fresh_prefix_and_does_not_reduce_hits(monkeypatch, selected):
+    method = _fake_method()
+    method._states = [_state_for_documents([[7, 8]])]
+    method._select = lambda *args: selected
+    _patch_fake_assembly(monkeypatch)
+
+    result = method.Run([[42, 7, 8, 9]])[0]
+
+    assert result.metadata["reuse_ratio"] == 0.5
+    assert result.metadata["recompute_ratio"] == len(selected) / 2
+
+
+def test_cacheclip_fallback_is_included_in_every_declared_metric(monkeypatch):
+    from core.Worker import _RecordRunResults
+
+    method = _fake_method()
+    method._states = [_state_for_documents([[7, 8]])]
+    method._select = lambda *args: []
+    _patch_fake_assembly(monkeypatch)
+    hit = method.Run([[7, 8, 9]])[0]
+    miss = method.Run([[42, 43]])[0]
+    scores = {name: [] for name in method.method_metrics}
+    weights = {name: [] for name in method.method_metrics}
+    _RecordRunResults([hit, miss], [], method, scores, weights)
+
+    assert scores["reuse_ratio"] == [2 / 3, 0.0]
+    assert weights["reuse_ratio"] == [3.0, 2.0]
+    assert scores["recompute_ratio"] == [0.0, 1.0]
+    assert scores["fallback_rate"] == [0.0, 1.0]
 
 
 def test_cacheclip_run_budget_prefers_explicit_value_then_constructor_default():
@@ -853,7 +899,7 @@ def test_cacheclip_constructor_uses_common_performance_contract(monkeypatch):
     monkeypatch.setattr(_cacheclip_module, "DefaultModelPath", lambda: "/model")
     monkeypatch.setattr(_cacheclip_module, "ResolveSamplingConfig", lambda _: {})
     method = CacheClip(auxiliaryModelPath="/unused")
-    assert method.method_metrics == ("actual_recompute_ratio",)
+    assert method.method_metrics == ("reuse_ratio", "recompute_ratio", "fallback_rate")
 
 
 def test_cacheclip_accepts_retain_output_and_returns_native_ids(monkeypatch):

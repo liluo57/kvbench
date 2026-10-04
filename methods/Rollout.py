@@ -50,11 +50,12 @@ def _AggregateMapping(
     values: Sequence[Mapping[str, Any]],
     *,
     includeSamples: bool = False,
+    representativeIndex: int = 0,
 ) -> tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
     """Aggregate only scalar mapping fields; retain metadata otherwise.
 
     Numeric fields are averaged independently. Nested structures and
-    identifiers are not silently averaged: the first value is retained when
+    identifiers are not silently averaged: the representative value is retained when
     present in every rollout, which mirrors the existing diagnostic metadata
     behavior while keeping the numeric path generic.
     """
@@ -77,7 +78,7 @@ def _AggregateMapping(
             # A value that is absent in one rollout is not a well-defined
             # rollout statistic. Preserve it only if it is available at all.
             if present:
-                aggregate[key] = present[0]
+                aggregate[key] = values[representativeIndex].get(key, present[0])
             continue
         stats = _Stats(present)
         if stats is not None:
@@ -89,7 +90,7 @@ def _AggregateMapping(
                 metricStats["samples"] = list(present)
             metrics[str(key)] = metricStats
         else:
-            aggregate[key] = present[0]
+            aggregate[key] = present[representativeIndex]
     return aggregate, metrics
 
 
@@ -199,9 +200,13 @@ class RolloutMethod(Method):
 
         rolloutResults: List[List[Result]] = []
         elapsedByRollout: List[float] = []
-        for _ in range(self.num_rollouts):
+        for rolloutIndex in range(self.num_rollouts):
             started = time.perf_counter()
-            results = _CallRun(self.base_method, data, retain, maxNewTokens)
+            # Keep only the response that the workflow will actually consume.
+            # Generate it last so earlier rollouts cannot see newly retained
+            # response caches and unselected responses never accumulate KV.
+            rolloutRetain = retain if rolloutIndex == self.num_rollouts - 1 else [False] * len(data)
+            results = _CallRun(self.base_method, data, rolloutRetain, maxNewTokens)
             elapsedByRollout.append(time.perf_counter() - started)
             if len(results) != len(data):
                 raise RuntimeError(
@@ -216,6 +221,7 @@ class RolloutMethod(Method):
             result = self._AggregateSample(
                 individual,
                 elapsedByRollout=elapsedByRollout,
+                representativeIndex=self.num_rollouts - 1 if retain[sampleIndex] else 0,
             )
             if not self.keep_individual_results:
                 # Task.Evaluate still needs the raw Results briefly, but the
@@ -373,16 +379,19 @@ class RolloutMethod(Method):
         individual: List[Result],
         *,
         elapsedByRollout: Sequence[float],
+        representativeIndex: int = 0,
     ) -> Result:
         outputs = [result.output for result in individual]
         outputStats = _Stats(outputs)
-        output = outputStats["mean"] if outputStats is not None else outputs[0]
+        output = outputStats["mean"] if outputStats is not None else outputs[representativeIndex]
 
         performance, performanceMetrics = _AggregateMapping(
-            [result.performance for result in individual], includeSamples=True
+            [result.performance for result in individual], includeSamples=True,
+            representativeIndex=representativeIndex,
         )
         metadata, metadataMetrics = _AggregateMapping(
-            [result.metadata for result in individual], includeSamples=True
+            [result.metadata for result in individual], includeSamples=True,
+            representativeIndex=representativeIndex,
         )
 
         # Numeric output is the most natural scalar quality signal for direct
@@ -426,6 +435,7 @@ class RolloutMethod(Method):
 
         rollout: Dict[str, Any] = {
             "num_rollouts": len(individual),
+            "representative_index": representativeIndex,
             "primary_metric": primaryMetric,
             "mean": primaryStats["mean"] if primaryStats else None,
             "variance": primaryStats["variance"] if primaryStats else None,
@@ -462,7 +472,7 @@ class RolloutMethod(Method):
             output=output,
             performance=performance,
             metadata=metadata,
-            output_ids=(individual[0].output_ids if individual else None),
+            output_ids=(individual[representativeIndex].output_ids if individual else None),
         )
 
 

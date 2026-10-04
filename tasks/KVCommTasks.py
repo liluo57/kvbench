@@ -212,14 +212,22 @@ class KVCommHumanEvalTask(Task):
             yield Case(text, MultiAgentFullConnectionWorkflow(i, MultiAgentFullConnectionInput(text, specs, decision)), meta)
     def Evaluate(self, result, metadata):
         code = _extract_python(result.output)
-        if code is None:
+        entry_point = metadata.get("entry_point")
+        test = metadata.get("test")
+        if (
+            code is None
+            or not isinstance(entry_point, str)
+            or not entry_point.isidentifier()
+            or not isinstance(test, str)
+            or not test.strip()
+        ):
             return {"accuracy": 0.0}
 
         command = [
             sys.executable,
             "-I",
             "-c",
-            code + "\n" + metadata.get("test", ""),
+            code + "\n" + test + f"\ncheck(globals()[{entry_point!r}])\n",
         ]
         try:
             with tempfile.TemporaryDirectory(prefix="kvcomm-humaneval-") as cwd:

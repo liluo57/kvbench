@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import time
 from typing import Any, Optional
 
-from core.Config import ModelPath
+from core.Config import MaxModelLen, ModelPath
 from core.Method import Method, ResolveMaxNewTokens
 from core.Result import Result, TtftKey, TotalTimeKey, NumOutputTokensKey
 from core.Sampling import ResolveSamplingConfig
@@ -62,6 +62,8 @@ class CacheRecomputeMethod(Method):
             seen = set()
             for chunk in chunks:
                 ids = list(chunk)
+                if len(ids) > MaxModelLen():
+                    raise ValueError(f"Prepared chunk exceeds MaxModelLen={MaxModelLen()}")
                 if any(not isinstance(token, int) or isinstance(token, bool) for token in ids):
                     raise TypeError("Prepare requires native integer token IDs")
                 if not ids or tuple(ids) in seen or self.fullRecompute:
@@ -97,6 +99,9 @@ class CacheRecomputeMethod(Method):
                 ids = list(prompt)
                 if not ids:
                     raise ValueError("recomputation requires a non-empty prompt")
+                if len(ids) >= MaxModelLen():
+                    raise ValueError(f"Prompt must leave room for generation within MaxModelLen={MaxModelLen()}")
+                case_budget = min(budget, MaxModelLen() - len(ids))
                 if any(not isinstance(token, int) or isinstance(token, bool) for token in ids):
                     raise TypeError("Run requires native integer token IDs")
                 inputs = torch.tensor([ids], dtype=torch.long, device=self._backend.device)
@@ -124,13 +129,13 @@ class CacheRecomputeMethod(Method):
                 generated, history = [], list(ids)
                 generator = self._gen._Generator()
                 ttft = None
-                for step in range(budget):
+                for step in range(case_budget):
                     token = self._gen._SampleNextToken(logits, history, generator)
                     if ttft is None:
                         ttft = time.perf_counter() - started
                     generated.append(token)
                     history.append(token)
-                    if token in self._gen.eosIds or step + 1 == budget:
+                    if token in self._gen.eosIds or step + 1 == case_budget:
                         break
                     out = self._backend.forward(
                         input_ids=inputs.new_tensor([[token]]), cache=cache,
@@ -138,7 +143,7 @@ class CacheRecomputeMethod(Method):
                     )
                     cache, logits = out.cache, out.logits[0, -1]
                 output_ids = self._gen.OutputTokenIds(generated)
-                if retainOutput and retainOutput[case_index]:
+                if not self.fullRecompute and retainOutput and retainOutput[case_index]:
                     if generated and generated[-1] not in self._gen.eosIds:
                         cache = self._backend.forward(
                             input_ids=inputs.new_tensor([[generated[-1]]]), cache=cache,
@@ -146,7 +151,8 @@ class CacheRecomputeMethod(Method):
                         ).cache
                     self._states[case_index].append(PreparedChunk(ids + output_ids, cache))
                 cached_positions = {pos for hit in hits for pos in range(hit.start, hit.end)}
-                reused = len(cached_positions - set(selected))
+                # Reuse measures cache-hit coverage, independently of repair.
+                reused = len(cached_positions)
                 results.append(Result(
                     output=self._gen.tokenizer.decode(generated, skip_special_tokens=True),
                     output_ids=output_ids,

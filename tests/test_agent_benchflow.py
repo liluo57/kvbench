@@ -413,6 +413,15 @@ def test_runner_reads_official_result_shape(tmp_path):
     assert runner.Diagnostics()["benchflow_retry_attempts"] == 0
 
 
+def test_runner_attempt_directories_are_unique_with_same_pid_and_second(tmp_path, monkeypatch):
+    module = importlib.import_module("helpers.benchflow.BenchflowRunner")
+    monkeypatch.setattr(module.time, "strftime", lambda *args: "20261004-010101")
+    first = BenchflowRunner(taskId="demo", modelPath="model", jobsDir=tmp_path, endpoint=object())
+    second = BenchflowRunner(taskId="demo", modelPath="model", jobsDir=tmp_path, endpoint=object())
+    assert first.jobsDir != second.jobsDir
+    assert first.jobsDir.parent == second.jobsDir.parent == tmp_path
+
+
 def test_runner_subprocess_is_mockable_and_lifecycle_is_explicit(tmp_path):
     class FakeProcess:
         returncode = 0
@@ -689,6 +698,23 @@ def test_local_task_skills_are_prepared_once_before_first_run(tmp_path):
     runText = _decodeTokenPrompt(run.data)
     assert _CanonicalSkillDocument(skill) in runText
     assert runText.endswith("rendered prompt without a skill tool result")
+
+
+def test_dataset_source_does_not_inject_skills_from_local_checkout(tmp_path):
+    skill_path = tmp_path / "tasks/demo-task/environment/skills/demo/SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("LOCAL VERSION INSTRUCTION", encoding="utf-8")
+    request = _request("registry dataset prompt")
+    workflow = AgentBenchFlowWorkflow(
+        case_id=3,
+        data=AgentBenchFlowInput(task_id="demo-task", source_mode="dataset",
+                                dataset="skillsbench@1.1", skillsbench_dir=str(tmp_path)),
+        runner=_FakeRunner([request]),
+    )
+    action = workflow.next()[0]
+    assert action.kind == ActionKind.RUN
+    assert _decodeTokenPrompt(action.data) == "registry dataset prompt"
+    assert workflow._skillDocuments == []
 
 
 def test_first_run_skill_injection_uses_chat_template_when_request_has_metadata(

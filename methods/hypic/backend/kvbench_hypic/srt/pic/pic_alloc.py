@@ -64,6 +64,8 @@ def _pic_alloc_standard(batch) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
     total_mamba_alloc = 0
     for i, req in enumerate(batch.reqs):
         req.pic_miss_segment_slots = {}
+        req.pic_cache_owned_miss_segments = set()
+        req.pic_freed_miss_segments = set()
         req_idx = req_pool_indices[i]
         pic_segments = getattr(req, "pic_segments", None)
         last_seg = tuple(pic_segments[-1]) if pic_segments else None
@@ -190,6 +192,8 @@ def _pic_alloc_transition_rope(batch) -> Tuple[torch.Tensor, torch.Tensor, List[
     per_req_slot_at_pos: List[Dict[int, torch.Tensor]] = []
     for i, req in enumerate(batch.reqs):
         req.pic_miss_segment_slots = {}
+        req.pic_cache_owned_miss_segments = set()
+        req.pic_freed_miss_segments = set()
         req.pic_rope_hit_private_slots = {}  # {(start, end): (private, entry_public)}
         req_idx = req_pool_indices[i]
         last_seg = (

@@ -48,8 +48,11 @@ def test_setup_uses_selected_project_python_and_no_checkout(monkeypatch):
     assert not any("venv" in command or "git" in command for command in commands)
 
 
-@pytest.mark.parametrize("family", ["llama", "mistral", "qwen2", "qwen3"])
-def test_native_models_preserve_hf_classes_and_selective_recompute(monkeypatch, family):
+@pytest.mark.parametrize("family,head_dim", [
+    ("llama", 8), ("mistral", 8), ("mistral", None), ("mistral", 16),
+    ("qwen2", 8), ("qwen3", 8),
+])
+def test_native_models_preserve_hf_classes_and_selective_recompute(monkeypatch, family, head_dim):
     pytest.importorskip("flashinfer")
     import transformers
     from transformers.cache_utils import DynamicCache
@@ -64,7 +67,7 @@ def test_native_models_preserve_hf_classes_and_selective_recompute(monkeypatch, 
     config = getattr(transformers, prefix + "Config")(
         vocab_size=32, hidden_size=32, intermediate_size=64,
         num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2,
-        max_position_embeddings=128, sliding_window=None, head_dim=8,
+        max_position_embeddings=128, sliding_window=None, head_dim=head_dim,
         tie_word_embeddings=True,
     )
     config._attn_implementation = "sdpa"
@@ -222,3 +225,90 @@ def test_first_token_time_waits_for_the_token(monkeypatch):
     _, token, stop, first_time = utils.decode_step(None, model, state, {}, [3], 0)
     assert events[:2] == [("token_ready", 3), "timestamp"]
     assert stop and first_time == 100.0
+
+
+def test_decode_returns_native_ids_including_terminal_stop(monkeypatch):
+    from methods.A3Repo.backend import utils
+    tokens = iter([7, 99, 8, 2])
+
+    def step(**kwargs):
+        token = next(tokens)
+        return kwargs["input"], torch.tensor(token), token == 2, utils.time.time()
+
+    monkeypatch.setattr(utils, "decode_step", step)
+    text, _, _, ids = utils.decode(
+        None, None, SimpleNamespace(decode=lambda ids, **kw: "display"), {},
+        [2], 8, {"reuse_config": None, "other_config": {}},
+        return_token_ids=True,
+    )
+    assert text == "display"
+    assert ids == [7, 99, 8, 2]
+
+
+def test_vanilla_can_report_generated_count_including_terminal_stop(monkeypatch):
+    from contextlib import nullcontext
+    from methods.A3Repo.backend import utils
+
+    tokens = iter([7, 2])
+    decoded = []
+
+    class Token:
+        def __init__(self, value):
+            self.value = value
+
+        def item(self):
+            return self.value
+
+    def step(**kwargs):
+        token = next(tokens)
+        return kwargs["input"], Token(token), token == 2, 1.0
+
+    monkeypatch.setattr(utils.torch, "no_grad", nullcontext)
+    monkeypatch.setattr(utils, "decode_step", step)
+
+    def decode(ids, **_kwargs):
+        decoded.extend(ids)
+        return "visible"
+
+    text, _, _, generated = utils.vanilla(
+        None, None, SimpleNamespace(decode=decode), {}, [2], 4, {},
+        return_token_ids=True,
+    )
+    assert text == "visible"
+    assert decoded == [7]
+    assert generated == [7, 2]
+
+
+def test_a3_native_output_survives_next_agent_prompt(monkeypatch):
+    from methods import A3Repo
+    from core.Result import Result
+    from core.Workflow import ActionResult
+    from helpers.backends import ModelAdapter
+    from workflow import AgentSpec, MultiAgentFullConnectionInput, MultiAgentFullConnectionWorkflow
+    monkeypatch.setattr(ModelAdapter, "_tokenizer", lambda path: SimpleNamespace(
+        encode=lambda text, **kwargs: [ord(c) for c in text]))
+    workflow = MultiAgentFullConnectionWorkflow(1, MultiAgentFullConnectionInput(
+        "TASK", [AgentSpec("A", "A {task}"), AgentSpec("B", "B {task}")],
+        chatTemplate=False, modelPath="synthetic"))
+    prepare = workflow.next()[0]
+    workflow.observe([ActionResult(1, Result(), prepare.tag)])
+    action = workflow.next()[0]
+    method = A3Repo()
+    monkeypatch.setattr(method, "_request", lambda payload: {
+        "text": "unrelated display", "output_ids": [900, 999], "num_tokens": 2})
+    result = method.Run([action.data])[0]
+    workflow.observe([ActionResult(1, result, action.tag)])
+    next_prompt = workflow.next()[0].data
+    assert any(next_prompt[i:i + 2] == [900, 999] for i in range(len(next_prompt)))
+
+
+def test_a3_total_time_includes_adapter_ipc_and_worker_preparation(monkeypatch):
+    from methods import A3Repo
+    module = importlib.import_module("methods.A3Repo.Method")
+    method = A3Repo()
+    monkeypatch.setattr(module.time, "perf_counter", lambda: 12.0)
+    result = method._result({"text": "answer", "output_ids": [7], "ttft": 0.1,
+                             "generation_start": 11.0, "total_time": 0.2},
+                            full=False, onlineStart=10.0)
+    assert result.performance["ttft"] == pytest.approx(1.1)
+    assert result.performance["total_time"] == pytest.approx(2.0)

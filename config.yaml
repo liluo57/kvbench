@@ -2,12 +2,16 @@
 ModelPath: mistralai/Mistral-7B-Instruct-v0.3
 
 # Shared context-window limit used by every model backend.
+# RUN prompts must leave room for generation. Generation-budget handling is
+# backend-specific; see docs/Method.md for remaining-window validation.
 MaxModelLen: 32768
 
 # Shared model sampling policy.
 #   greedy   - deterministic argmax decoding
 #   default  - use the model's generation_config.json (or config.json)
 #   override - use the sampling values listed below
+# EOS replacement via eos_token_id is backend-specific; vLLM/SGLang
+# methods reject it explicitly and use their model's native default EOS.
 ModelConfig:
   mode: greedy
   temperature: 1.0

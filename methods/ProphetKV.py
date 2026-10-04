@@ -30,11 +30,12 @@ from __future__ import annotations
 import math
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from core.Config import ModelPath as DefaultModelPath
-from core.Method import Method
+from core.Config import MaxModelLen, ModelPath as DefaultModelPath
+from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import IsGreedy, ResolveSamplingConfig
 
@@ -838,16 +839,39 @@ class _DenseProphetRuntime:
         return updated_layers, logits
 
     # ------------------------------------------------------------- generation
-    def _sample(self, logits, history: Sequence[int]) -> int:
+    def _sample(self, logits, history: Sequence[int], generator=None) -> int:
         torch = self.torch
         if IsGreedy(self.sampling_config):
             return int(torch.argmax(logits).item())
         temperature = float(self.sampling_config.get("temperature", 1.0))
-        scores = logits.float() / max(temperature, 1e-6)
+        scores = logits.float().clone()
+        presence = float(self.sampling_config.get("presence_penalty", 0.0))
+        frequency = float(self.sampling_config.get("frequency_penalty", 0.0))
+        if presence or frequency:
+            for token, count in Counter(history).items():
+                scores[token] -= presence + frequency * count
+        penalty = float(self.sampling_config.get("repetition_penalty", 1.0))
+        if penalty != 1.0 and history:
+            seen = torch.tensor(list(set(history)), dtype=torch.long, device=scores.device)
+            selected = scores[seen]
+            scores[seen] = torch.where(selected < 0, selected * penalty, selected / penalty)
+        scores = scores / max(temperature, 1e-6)
         top_k = int(self.sampling_config.get("top_k", -1))
         if top_k > 0 and top_k < scores.numel():
             threshold = torch.topk(scores, top_k).values[-1]
             scores = scores.masked_fill(scores < threshold, float("-inf"))
+        typical_p = float(self.sampling_config.get("typical_p", 1.0))
+        if 0 < typical_p < 1:
+            probs = torch.softmax(scores, dim=-1)
+            log_probs = torch.log(probs.clamp_min(1e-20))
+            entropy = -(probs * log_probs).sum()
+            indices = torch.argsort((-log_probs - entropy).abs())
+            remove = probs[indices].cumsum(dim=-1) > typical_p
+            remove[1:] = remove[:-1].clone()
+            remove[0] = False
+            scores = scores.masked_fill(
+                torch.zeros_like(remove).scatter(0, indices, remove), float("-inf")
+            )
         top_p = float(self.sampling_config.get("top_p", 1.0))
         if 0 < top_p < 1:
             ordered, indices = torch.sort(scores, descending=True)
@@ -860,18 +884,31 @@ class _DenseProphetRuntime:
                 torch.zeros_like(remove).scatter(0, indices, remove),
                 float("-inf"),
             )
+        min_p = self.sampling_config.get("min_p")
+        if min_p is not None and 0 < float(min_p) <= 1:
+            probs = torch.softmax(scores, dim=-1)
+            scores = scores.masked_fill(probs < probs.max() * float(min_p), float("-inf"))
         probs = torch.softmax(scores, dim=-1)
-        return int(torch.multinomial(probs, 1).item())
+        if not torch.isfinite(probs).all() or float(probs.sum()) <= 0:
+            return int(torch.argmax(scores).item())
+        return int(torch.multinomial(probs, 1, generator=generator).item())
 
     def decode_from_cache(self, layers_cache, last_hidden_logits, history: List[int]):
         """Decode after partial recomputation using the assembled layer cache."""
         torch = self.torch
         generated: List[int] = []
         logits = last_hidden_logits
+        generator = None
+        seed = self.sampling_config.get("seed")
+        if seed is not None:
+            generator = torch.Generator(device=logits.device).manual_seed(int(seed))
         t0 = time.perf_counter()
         ttft = None
-        for _ in range(max(1, self.max_new_tokens)):
-            token = self._sample(logits, history)
+        remaining = self.max_model_len - len(history)
+        if remaining < 1:
+            raise ValueError(f"ProphetKV prompt exceeds generation capacity of max_model_len={self.max_model_len}")
+        for _ in range(min(max(1, self.max_new_tokens), remaining)):
+            token = self._sample(logits, history, generator)
             if ttft is None:
                 ttft = time.perf_counter() - t0
             generated.append(token)
@@ -935,6 +972,8 @@ class _DenseProphetRuntime:
         """Reference full-prefill path used when reuse cannot be established."""
         if not ids:
             return "", 0.0, 0.0, 0, []
+        if len(ids) >= self.max_model_len:
+            raise ValueError(f"ProphetKV prompt must leave room for generation within max_model_len={self.max_model_len}")
         full_start = time.perf_counter()
         context_ids = list(ids)
         empty = []
@@ -956,13 +995,13 @@ class _DenseProphetRuntime:
             [],
         )
         prefill_ttft = time.perf_counter() - full_start
-        text, decode_ttft, decode_total, n_tokens, output_ids = self.decode_from_cache(
+        text, decode_ttft, _, n_tokens, output_ids = self.decode_from_cache(
             cache, logits, list(context_ids)
         )
         return (
             text,
             prefill_ttft + decode_ttft,
-            decode_total,
+            time.perf_counter() - full_start,
             n_tokens,
             output_ids,
         )
@@ -973,7 +1012,10 @@ class ProphetKV(Method):
 
     name = "prophetkv"
     maxCaseBatchSize = 1
-    method_metrics = ("reuse_ratio", "recompute_ratio", "stage1_score_time", "fallback_rate")
+    # recomputeRatio is a fixed selector target; only the positions are chosen
+    # dynamically from scores, so its achieved fraction is diagnostic metadata
+    # rather than a comparable adaptive method metric.
+    method_metrics = ("reuse_ratio", "stage1_score_time", "fallback_rate")
 
     def __init__(
         self,
@@ -981,7 +1023,7 @@ class ProphetKV(Method):
         perfWeight: float = 1.0,
         *,
         maxNewTokens: int = 64,
-        maxModelLen: int = 32768,
+        maxModelLen: Optional[int] = None,
         recomputeRatio: float = 0.20,
         dtype: str = "bfloat16",
         tag: Optional[str] = None,
@@ -996,8 +1038,10 @@ class ProphetKV(Method):
             raise ValueError("recomputeRatio must be in [0, 1]")
         self.modelPath = DefaultModelPath()
         self.samplingConfig = ResolveSamplingConfig(self.modelPath)
-        self.maxNewTokens = int(maxNewTokens)
-        self.maxModelLen = int(maxModelLen)
+        self.maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
+        self.maxModelLen = min(MaxModelLen(), int(maxModelLen)) if maxModelLen is not None else MaxModelLen()
+        if self.maxModelLen < 1:
+            raise ValueError("maxModelLen must be at least 1")
         self.recomputeRatio = float(recomputeRatio)
         self.dtype = dtype
         self.debug = os.environ.get("PROPHETKV_DEBUG", "") not in {"", "0", "false"}
@@ -1023,6 +1067,8 @@ class ProphetKV(Method):
             token_chunks = [list(chunk) for chunk in (chunks or [])]
             caches = []
             for chunk_index, ids in enumerate(token_chunks):
+                if len(ids) > self.maxModelLen:
+                    raise ValueError(f"ProphetKV prepared chunk exceeds MaxModelLen={self.maxModelLen}")
                 t_chunk = time.perf_counter()
                 cache = self._runtime.prefill_isolated(ids)
                 caches.append(cache)
@@ -1038,10 +1084,16 @@ class ProphetKV(Method):
         self,
         data: List[List[int]],
         retainOutput: Optional[List[bool]] = None,
+        maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
         request_start = time.perf_counter()
         if self._runtime is None:
             raise RuntimeError("ProphetKV.Initialize must run before Run")
+        budget = ResolveMaxNewTokens(
+            self.maxNewTokens if maxNewTokens is None else maxNewTokens
+        )
+        if any(len(prompt) >= self.maxModelLen for prompt in data):
+            raise ValueError(f"ProphetKV prompt must leave room for generation within MaxModelLen={self.maxModelLen}")
         if len(self._states) != len(data):
             self._states = [_CaseState([], []) for _ in data]
         results = []
@@ -1050,6 +1102,7 @@ class ProphetKV(Method):
         # work and are all measured from the Run boundary above.
         for index, prompt in enumerate(data):
             prompt_ids = list(prompt)
+            self._runtime.max_new_tokens = min(budget, self.maxModelLen - len(prompt_ids))
             state = self._states[index]
             t_match = time.perf_counter()
             parts = ComposeInterleavedReuse(state.chunks, prompt_ids)
@@ -1067,13 +1120,13 @@ class ProphetKV(Method):
                 t0 = time.perf_counter()
                 ids = prompt_ids
                 generation_start = time.perf_counter()
-                text, backend_ttft, total, n_tokens, output_ids = self._runtime.full_generate(ids)
+                text, backend_ttft, _, n_tokens, output_ids = self._runtime.full_generate(ids)
                 ttft = generation_start - request_start + backend_ttft
                 results.append(
                     self._result(
                         text,
                         ttft,
-                        total,
+                        time.perf_counter() - request_start,
                         n_tokens,
                         {
                             "reuse_ratio": 0.0,
@@ -1165,7 +1218,7 @@ class ProphetKV(Method):
                     f"query_tokens={len(query_ids)}",
                     flush=True,
                 )
-            if not cached_ids or len(full_ids) > self.maxModelLen:
+            if not cached_ids:
                 results.append(self._fallback(prompt, "length_limit", request_start))
                 continue
             for layer_index in range(len(self._runtime.layers)):
@@ -1223,7 +1276,7 @@ class ProphetKV(Method):
             recompute_only_time = time.perf_counter() - t_recompute
             history = list(full_ids)
             t_decode = time.perf_counter()
-            text, decode_ttft, total, n_tokens, output_ids = self._runtime.decode_from_cache(
+            text, decode_ttft, _, n_tokens, output_ids = self._runtime.decode_from_cache(
                 updated, logits, history
             )
             decode_wall_time = time.perf_counter() - t_decode
@@ -1239,7 +1292,7 @@ class ProphetKV(Method):
                 self._result(
                     text,
                     t_decode - request_start + decode_ttft,
-                    score_time + select_time + recompute_time + total,
+                    time.perf_counter() - request_start,
                     n_tokens,
                     {
                         "reuse_ratio": len(cached_ids) / n_input if n_input else 0.0,
@@ -1279,12 +1332,12 @@ class ProphetKV(Method):
             request_start = time.perf_counter()
         ids = list(prompt)
         generation_start = time.perf_counter()
-        text, backend_ttft, total, n_tokens, output_ids = self._runtime.full_generate(ids)
+        text, backend_ttft, _, n_tokens, output_ids = self._runtime.full_generate(ids)
         ttft = generation_start - request_start + backend_ttft
         return self._result(
             text,
             ttft,
-            total,
+            time.perf_counter() - request_start,
             n_tokens,
             {
                 "reuse_ratio": 0.0,

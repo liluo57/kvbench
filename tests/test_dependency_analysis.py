@@ -160,10 +160,11 @@ def test_cci_exposes_and_clamps_a_near_zero_intra_denominator():
     assert torch.isfinite(torch.tensor(chunk["raw_ratio"]))
 
 
-def test_dependency_method_exposes_exactly_six_formal_metrics():
+def test_dependency_method_exposes_reuse_and_six_analysis_metrics():
     method = DependencyAnalysisMethod(skipK=1)
 
     assert method.method_metrics == (
+        "reuse_ratio",
         "missing_attention",
         "value_weighted_dependency",
         "missing_attention_skip_k",

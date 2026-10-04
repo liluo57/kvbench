@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from uuid import uuid4
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from helpers.endpoint import KVBenchEndpoint, OpenAIRequest
@@ -86,7 +87,7 @@ class BenchflowRunner:
         # scores 1.0 on every subsequent attempt because bench finds no
         # remaining work and reports the old summary).
         self.jobsDir = Path(jobsDir) if jobsDir else Path.cwd() / "jobs" / taskId
-        self.jobsDir = self.jobsDir / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        self.jobsDir = self.jobsDir / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid4().hex}"
         self.resultJsonTimeout = float(resultJsonTimeout)
         # The provider request must not outlive the task-level deadline, but
         # it also must not silently fall back to LiteLLM's short default. This

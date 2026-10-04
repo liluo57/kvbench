@@ -246,14 +246,18 @@ class AgentBenchFlowWorkflow(Workflow):
     def _LoadBundledSkillDocuments(self) -> List[str]:
         """Load local task skills so they can be prepared before turn one.
 
-        A supplied SkillsBench checkout has the exact source tree that
-        BenchFlow uses for local runs (and that dataset-mode configurations
-        may retain for task enumeration). Preparing these files up front
-        avoids one prepare/reset cycle per Skill as the agent progressively
-        reads them. Without a checkout, dataset-mode runs use the request
-        history fallback in :meth:`next` instead.
+        Local runs share this source tree with BenchFlow. A checkout retained
+        only for dataset-mode enumeration is not the registry dataset's
+        verified Skill source and must not change its prompt. Preparing local
+        files up front avoids one prepare/reset cycle per Skill as the agent
+        progressively reads them. Dataset-mode runs always discover documents
+        from the request history in :meth:`next` instead.
         """
-        if self._data.skill_mode != SKILL_MODE_WITH_SKILL or not self._data.skillsbench_dir:
+        if (
+            self._data.source_mode != "local"
+            or self._data.skill_mode != SKILL_MODE_WITH_SKILL
+            or not self._data.skillsbench_dir
+        ):
             return []
         skillsRoot = (
             Path(self._data.skillsbench_dir)

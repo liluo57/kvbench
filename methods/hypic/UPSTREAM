@@ -11,8 +11,9 @@ KVBench adaptations: private Python and Torch-op namespaces; native token-ID
 requests with explicit validated segment ranges; native seam parameter;
 restricted hybrid config/model registries compatible with Transformers 4.57;
 local RoPE normalization instead of global Transformers patch hooks;
-LinearKV repair rows excluded from cached-token metrics; local compilation of
-the retained upstream native ops against the project PyTorch ABI.
+Cached-token metrics count all matched input tokens, including LinearKV/HYPIC
+repair rows. Local compilation of the retained upstream native ops targets the
+project PyTorch ABI.
 
 Native norm.cu and pytorch_extension_utils.h are from FlashInfer commit
 bc29697ba20b7e6bdb728ded98f04788e16ee021 (Apache-2.0), the dependency pinned

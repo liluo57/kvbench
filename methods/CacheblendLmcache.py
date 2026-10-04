@@ -88,14 +88,9 @@ if os.environ.get("LMCACHE_ENABLE_BLENDING") or os.environ.get(
 class CacheblendLmcache(Method):
     name = "cacheblend_lmcache"
 
-    #: Reuse rate is cacheblend's method metric: the share of the run stream the
-    #: engine actually served from lmcache KV — ``num_cached_tokens`` reported by
-    #: the scheduler for the request, over the input length (see :meth:`Run`).
-    #: It is *not* the constructed context share, which stays ~1.0 even when the
-    #: cache could not store anything (memory pressure) and zero tokens were hit.
-    #: Naive may record ``reuse_ratio`` as diagnostic metadata but does not
-    #: declare it; FullPrefill does neither. Their report entries therefore
-    #: have no ``method_metrics`` section.
+    #: Reuse rate is the share of canonical run-input token positions covered
+    #: by the actual cached stream prefix reported by the scheduler. Per-case
+    #: salts and separators are excluded (see :meth:`Run`).
     method_metrics = ("reuse_ratio",)
 
     def __init__(
@@ -204,21 +199,38 @@ class CacheblendLmcache(Method):
         salt is derived (unchanged whether the stream is the original order or a
         re-detected run order).
         """
+        return self._SaltedContextTokensWithCanonicalMask(chunks, prepare)[0]
+
+    def _SaltedContextTokensWithCanonicalMask(
+        self, chunks: List[List[int]], prepare: List[List[int]]
+    ) -> tuple[List[int], List[bool]]:
+        """Return the LMCache stream and mark positions from the real input.
+
+        The per-case salt and inter-chunk separators exist only to namespace
+        cache entries. They are fed to the model but are wrapper tokens, so
+        they must not inflate the benchmark's canonical-input reuse ratio.
+        """
         salt = self._SaltTokens(prepare)
-        if not salt:
-            ids: List[int] = []
-            for i, chunk in enumerate(chunks):
-                if i > 0:
-                    ids += self.sep
-                ids += chunk
-            return ids
         ids: List[int] = []
-        for i, chunk in enumerate(chunks):
-            if i > 0:
-                ids += self.sep
-            ids += salt
-            ids += chunk
-        return ids
+        canonical: List[bool] = []
+        for index, chunk in enumerate(chunks):
+            if index > 0:
+                ids.extend(self.sep)
+                canonical.extend([False] * len(self.sep))
+            if salt:
+                ids.extend(salt)
+                canonical.extend([False] * len(salt))
+            ids.extend(chunk)
+            canonical.extend([True] * len(chunk))
+        return ids, canonical
+
+    @staticmethod
+    def _CanonicalCachedPrefixTokens(
+        numCached: int, canonicalMask: List[bool]
+    ) -> int:
+        """Count canonical input rows covered by a cached stream prefix."""
+        cachedPrefixLen = max(0, min(int(numCached), len(canonicalMask)))
+        return sum(canonicalMask[:cachedPrefixLen])
 
     def Prepare(self, data: List[List[List[int]]]) -> None:
         """Store the context chunks' KV for a batch of cases.
@@ -274,22 +286,21 @@ class CacheblendLmcache(Method):
             order, suffix = ComposeReuse(prepare, run_input)
             if order is not None and contextTokens:
                 # Found reusable chunks forming a prefix of run_input
-                ids = self._SaltedContextTokens(order, prepare)
-                if suffix:
-                    # The trailing fresh text is salted too, so it can never
-                    # collide with another case's segment keys (it is never
-                    # stored, only computed fresh).
-                    ids = (
-                        ids
-                        + self.sep
-                        + self._SaltTokens(prepare)
-                        + suffix
-                    )
+                # Keep a position map so cache hits on salt/separator wrapper
+                # tokens do not count as hits on canonical prompt tokens.
+                canonicalChunks = order + ([suffix] if suffix else [])
+                ids, canonicalMask = self._SaltedContextTokensWithCanonicalMask(
+                    canonicalChunks, prepare
+                )
                 tokenStreams.append(ids)
-                nInput = len(ids)
+                nInput = len(run_input)
                 # Check if order differs from original prepare order
                 reordered = order != prepare
-                metas.append({"reordered": reordered, "n_input": nInput})
+                metas.append({
+                    "reordered": reordered,
+                    "n_input": nInput,
+                    "canonical_mask": canonicalMask,
+                })
                 continue
             
             # No reusable content (empty warm-up, or no chunks match the start
@@ -297,7 +308,10 @@ class CacheblendLmcache(Method):
             ids = list(run_input)
             tokenStreams.append(ids)
             nInput = len(ids)
-            metas.append({"n_input": nInput})
+            metas.append({
+                "n_input": nInput,
+                "canonical_mask": [True] * nInput,
+            })
 
         batchOut = self._GenerateBatch(
             tokenStreams, maxNewTokens, onlineStart=runStart
@@ -306,19 +320,20 @@ class CacheblendLmcache(Method):
         for (text, outputIds, ttft, nTokens, totalTime, numCached), meta in zip(
             batchOut, metas
         ):
-            # Actual cache reuse as reported by the engine per request: the
-            # tokens the scheduler served from lmcache (``out.num_cached_tokens``),
-            # not the constructed stream's context share. The constructed share
-            # lies under memory pressure (reports ~1.0 when the cache could not
-            # store anything and zero tokens were actually hit); the engine count
-            # reflects what was really hit/scheduled to load.
+            # Use the engine's actual cached-prefix length, mapped back to
+            # canonical prompt positions. Salt/separator wrapper tokens are
+            # present in the LMCache stream, but are not benchmark input.
             nInput = meta["n_input"]
-            reuseRatio = min(1.0, numCached / nInput) if nInput else 0.0
+            cacheHitTokens = self._CanonicalCachedPrefixTokens(
+                numCached, meta["canonical_mask"]
+            )
+            reuseRatio = cacheHitTokens / nInput if nInput else 0.0
             metadata = {
                 "reuse_ratio": reuseRatio,
                 "recomp_ratio": self.recompRatio,
                 "n_input": nInput,
                 "num_cached_tokens": numCached,
+                "cache_hit_tokens": cacheHitTokens,
             }
             if meta.get("reordered"):
                 metadata["reordered"] = True

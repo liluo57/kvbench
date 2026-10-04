@@ -691,6 +691,13 @@ class KVCommTransformer(Method):
     ) -> List[Dict[str, Any]]:
         parts: List[Dict[str, Any]] = []
         slot = 0
+        # Equal output IDs can have different contextual KV. The workflow
+        # includes retained answers once each in generation order, whereas
+        # the content matcher resolves ties to the first equal segment.
+        indicesByIds: Dict[Tuple[int, ...], List[int]] = {}
+        for index, segment in enumerate(segments):
+            indicesByIds.setdefault(tuple(segment["base_ids"]), []).append(index)
+        consumedByIds: Dict[Tuple[int, ...], int] = {}
         for segmentIndex, ids in matches:
             tokenIds = list(ids)
             if not tokenIds:
@@ -698,6 +705,12 @@ class KVCommTransformer(Method):
             if segmentIndex is None:
                 parts.append({"kind": "fresh", "ids": tokenIds, "slot": None})
             else:
+                key = tuple(tokenIds)
+                candidates = indicesByIds.get(key, [])
+                occurrence = consumedByIds.get(key, 0)
+                if occurrence < len(candidates):
+                    segmentIndex = candidates[occurrence]
+                consumedByIds[key] = occurrence + 1
                 segment = segments[segmentIndex]
                 parts.append(
                     {

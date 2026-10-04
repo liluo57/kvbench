@@ -39,8 +39,12 @@ def decode_step(args, model, input, config, stop_list, step):
     stop = True if next_token_id in stop_list else False
     return input, next_token, stop, first_token_time
 
-def vanilla(args, model, tokenizer, input, stop_list, max_new_tokens, config):
+def vanilla(
+    args, model, tokenizer, input, stop_list, max_new_tokens, config,
+    *, return_token_ids=False,
+):
     new_token_list = []
+    generated_token_ids = []
 
     with torch.no_grad():
         start_time = time.time()
@@ -49,6 +53,7 @@ def vanilla(args, model, tokenizer, input, stop_list, max_new_tokens, config):
 
             if i == 0:
                 ttft = first_token_time - start_time
+            generated_token_ids.append(next_token.item())
             if stop:
                 break
 
@@ -57,15 +62,19 @@ def vanilla(args, model, tokenizer, input, stop_list, max_new_tokens, config):
         tpot = (time.time() - start_time) / (i+1)
         output_sequence = tokenizer.decode(new_token_list, skip_special_tokens=True)
         print(output_sequence)
+        if return_token_ids:
+            return output_sequence, ttft, tpot, generated_token_ids
         return output_sequence, ttft, tpot
 
-def decode(args, model, tokenizer, input, stop_list, max_new_tokens, config):
+def decode(args, model, tokenizer, input, stop_list, max_new_tokens, config, *, return_token_ids=False):
     new_token_list = []
+    generated_token_ids = []
 
     with torch.no_grad():
         start_time = time.time()
         for i in range(max_new_tokens):
             input, next_token, stop, first_token_time = decode_step(args=args, model=model, input=input, config=config, stop_list=stop_list, step=i)
+            generated_token_ids.append(next_token.item())
             
             if i == 0:
                 ttft = first_token_time - start_time
@@ -82,4 +91,6 @@ def decode(args, model, tokenizer, input, stop_list, max_new_tokens, config):
         tpot = (time.time() - start_time) / (i+1)
         output_sequence = tokenizer.decode(new_token_list, skip_special_tokens=True)
         print(output_sequence)
+        if return_token_ids:
+            return output_sequence, ttft, tpot, generated_token_ids
         return output_sequence, ttft, tpot

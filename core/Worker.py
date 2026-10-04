@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .Metrics import AggregateStats, Metric
+from .Config import MaxModelLen
 from .Method import Method
 from .Result import AggregateScores, NormalizeScores, Result
 from .Task import Case, Task
@@ -413,6 +414,13 @@ def _RunMethod(
     contract. Keep them usable while all built-in Methods receive the new
     Task-owned value explicitly.
     """
+    limit = MaxModelLen()
+    for index, prompt in enumerate(data):
+        if len(prompt) >= limit:
+            raise ValueError(
+                f"RUN prompt {index} has {len(prompt)} tokens; MaxModelLen={limit} "
+                "must leave room for at least one generated token"
+            )
     try:
         parameters = inspect.signature(method.Run).parameters.values()
     except (TypeError, ValueError):

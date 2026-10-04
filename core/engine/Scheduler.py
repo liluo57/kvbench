@@ -101,6 +101,10 @@ class Scheduler:
             eventQueue.close()
             raise
         childConnection.close()
+        # Only the child produces events. Keeping a writer open in the parent
+        # prevents EOF if the child dies halfway through a queue frame, making
+        # even get_nowait() block forever while receiving the remaining bytes.
+        eventQueue._writer.close()
         self.ctx.workers[workerId] = _WorkerState(
             workerId=workerId,
             methodIndex=methodIndex,
@@ -393,10 +397,10 @@ class Scheduler:
     def drainEvents(self, ctx: "RunContext") -> None:
         """Drain each worker's isolated event queue and control pipe.
 
-        A queue shared by all workers can become unusable if a worker exits
-        abruptly while its multiprocessing queue feeder is writing. Keeping
-        one queue per worker limits that failure to the process that crashed,
-        so replacement workers can still report their lifecycle events.
+        Each queue has only its worker's writer open. If that worker exits
+        halfway through a frame, receive raises EOF/OSError rather than
+        waiting on a writer held by the coordinator. Separate queues let
+        the remaining workers continue reporting events.
         """
         received = False
         for worker in list(ctx.workers.values()):

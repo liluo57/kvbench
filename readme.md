@@ -124,6 +124,11 @@ method = RolloutMethod(
 )
 ```
 
+When an action requests retained output KV, only the final rollout receives
+that hint. Its text and native IDs become the representative response passed
+to the next workflow turn; other responses do not leave unused output caches.
+The raw results and metric samples remain in execution order.
+
 Numeric Result fields use population variance (`ddof=0`). The existing task
 scorer is applied to each raw rollout and its scalar task metrics are retained
 with `mean`, `variance`, `std`, and raw `samples`, then averaged once per

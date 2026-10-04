@@ -23,7 +23,7 @@ TTFT includes request-dependent cache lookup/loading, assembly, transformation, 
    pip install -r requirement.txt
    ```
 
-2. Set the model checkpoint, `MaxModelLen`, sampling mode, GPU pool, and dataset path in `config.yaml`. The paper uses 64 samples per configuration and batch size 1 for the standard RAG and multi-agent experiments. Skill reuse has separate context-length and decoding settings; see Section 5.
+2. Set the model checkpoint, `MaxModelLen`, sampling mode, GPU pool, and dataset path in `config.yaml`. The paper uses 64 samples per configuration and batch size 1 for the standard RAG and multi-agent experiments. Skill reuse has separate context-length and decoding settings; see Section 4.
 
 3. Download or generate the datasets declared in the configuration:
 
@@ -35,9 +35,24 @@ TTFT includes request-dependent cache lookup/loading, assembly, transformation, 
 
 4. Install the runtime required by each method. Repository-specific setup and paths are described in Section 3.
 
-## 3. External repositories and backends
+## 3. Bundled backends
 
-KVBench serves as a unified evaluation framework built on top of multiple external repositories and inference backends. For several evaluated methods, we adapt or modify the publicly released implementations to integrate them into KVBench and ensure compatibility with our common evaluation protocol. The fully consolidated, ready-to-use version of the framework, including these integrations and adaptations, will be released publicly upon publication of the paper.
+The following integrations are included in this checkout and use the project's
+Python environment. Run the relevant setup command from the repository root:
+
+| Backend | Setup command | Additional configuration |
+| --- | --- | --- |
+| CacheBlend | `./setup.py --cacheblend` | Configure GPU memory use under `Cacheblend`. |
+| HYPIC / LinearKV | `./setup.py --hypic` | Use a supported hybrid-model checkpoint; configure the Mamba pool under `Hypic`. |
+| A3 | `./setup.py --a3` | Use a model supported by the bundled A3 worker. |
+| KVPacket | `./setup.py --kvpacket` | This checks the shared environment. Set a trained, model-matching `KVPacket.WrapperCheckpointPath` for benchmark runs. |
+
+The setup commands install or validate optional dependencies; HYPIC also builds
+its retained native operations. Source revisions and local adaptations are
+recorded in the backends' `UPSTREAM` files. Other runtime requirements remain
+method-specific; consult `docs/Method.md` and the selected class before running
+an evaluation. This guide does not establish that every method supports the
+same model or sampling configuration.
 
 ## 4. Skill reuse
 

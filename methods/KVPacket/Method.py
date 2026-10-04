@@ -8,11 +8,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
-from core.Config import DefaultConfigPath, Get, ModelPath as DefaultModelPath
+from core.Config import (
+    DefaultConfigPath,
+    Get,
+    MaxModelLen,
+    ModelPath as DefaultModelPath,
+)
 from core.Method import Method, ResolveMaxNewTokens
 from core.Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
 from core.Sampling import IsGreedy, ResolveSamplingConfig
 from helpers.backends.Tokenization import OutputFragmentIds, TerminalStopIdsFromTokenizer
+
+
+_SUPPORTED_SAMPLING_FIELDS = {
+    "mode",
+    "do_sample",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "typical_p",
+    "repetition_penalty",
+    "presence_penalty",
+    "frequency_penalty",
+    "seed",
+    "eos_token_id",
+}
 
 
 @dataclass
@@ -104,6 +125,12 @@ class KVPacket(Method):
         self.allowUntrainedWrapper = configured_untrained
         self.modelPath = DefaultModelPath()
         self.samplingConfig = ResolveSamplingConfig(self.modelPath)
+        unsupported = sorted(set(self.samplingConfig) - _SUPPORTED_SAMPLING_FIELDS)
+        if unsupported:
+            raise ValueError(
+                "KVPacket does not support resolved sampling field(s): "
+                + ", ".join(unsupported)
+            )
         self.maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         self.dtype = dtype
 
@@ -303,6 +330,8 @@ class KVPacket(Method):
             seen: set[tuple[int, ...]] = set()
             for raw_chunk in raw_chunks or []:
                 ids = [int(token) for token in raw_chunk]
+                if ids and len(ids) + self._wrapper.header_len + self._wrapper.trailer_len > MaxModelLen():
+                    raise ValueError(f"Wrapped KVPacket chunk exceeds MaxModelLen={MaxModelLen()}")
                 key = tuple(ids)
                 if ids and key not in seen:
                     seen.add(key)
@@ -340,7 +369,13 @@ class KVPacket(Method):
         retainOutput: Optional[List[bool]] = None,
         maxNewTokens: Optional[int] = None,
     ) -> List[Result]:
-        """Serve complete prompts through independent packet sessions."""
+        """Serve complete prompts through independent packet sessions.
+
+        ``retainOutput`` is an optional hint and is not implemented here.
+        Native output IDs are returned for later workflow prompts, but their
+        generated KV is not registered as a prepared packet. Later requests
+        prefill those output IDs as fresh spans; only prepared packets reuse KV.
+        """
 
         assert self._backend is not None and self._tokenizer is not None
         from .backend.kvpacket import Mode, PacketSession
@@ -350,20 +385,44 @@ class KVPacket(Method):
             if maxNewTokens is None
             else ResolveMaxNewTokens(maxNewTokens)
         )
+        if any(len(prompt) >= MaxModelLen() for prompt in data):
+            raise ValueError(f"KVPacket prompt must leave room for generation within MaxModelLen={MaxModelLen()}")
         sampling = self.samplingConfig
-        sampling_kwargs: dict[str, Any] = {}
-        if not IsGreedy(sampling):
-            sampling_kwargs["do_sample"] = True
-            for key in ("temperature", "top_p", "top_k", "min_p"):
-                if key in sampling:
-                    value = sampling[key]
-                    # PacketSession uses zero to disable top-k; HF configs also
-                    # allow -1 as the equivalent "disabled" value.
-                    if key == "top_k" and value < 0:
-                        value = 0
-                    sampling_kwargs[key] = value
-        if "eos_token_id" in sampling:
-            sampling_kwargs["eos_token_id"] = sampling["eos_token_id"]
+        do_sample = not IsGreedy(sampling)
+        temperature = float(sampling.get("temperature", 1.0))
+        # The packet selector validates positive temperatures even in greedy
+        # mode, where temperature is intentionally irrelevant.
+        if temperature <= 0 and not do_sample:
+            temperature = 1.0
+        top_k = int(sampling.get("top_k", 0))
+        if top_k < 0:
+            top_k = 0
+        sampling_kwargs: dict[str, Any] = {
+            "do_sample": do_sample,
+            "temperature": temperature,
+            "top_p": float(sampling.get("top_p", 1.0)),
+            "top_k": top_k,
+            "min_p": float(sampling.get("min_p", 0.0)),
+            "typical_p": float(sampling.get("typical_p", 1.0)),
+            "repetition_penalty": float(sampling.get("repetition_penalty", 1.0)),
+            "presence_penalty": float(sampling.get("presence_penalty", 0.0)),
+            "frequency_penalty": float(sampling.get("frequency_penalty", 0.0)),
+            "seed": sampling.get("seed"),
+        }
+        eos_ids = sampling.get("eos_token_id")
+        if eos_ids is None:
+            eos_ids = getattr(
+                getattr(self._model, "generation_config", None), "eos_token_id", None
+            )
+        if eos_ids is None:
+            eos_ids = self._tokenizer.eos_token_id
+        # The tokenizer is intentionally omitted from PacketSession. Pass the
+        # effective EOS explicitly so its first-token selection and the native
+        # continuation use the same stopping policy.
+        sampling_kwargs["eos_token_id"] = eos_ids if eos_ids is not None else []
+        self._terminalStopIds = TerminalStopIdsFromTokenizer(
+            self._tokenizer, {"eos_token_id": sampling_kwargs["eos_token_id"]}
+        )
 
         if len(self._states) != len(data):
             from .backend.kvpacket import PacketStore
@@ -390,8 +449,21 @@ class KVPacket(Method):
                 session.register_store_chunks()
             input_ids = [int(token) for token in prompt]
             session.push(input_ids)
+            cover = session.preview_matches()
+            matched_tokens = sum(item.end - item.start for item in cover)
+            # PacketSession keeps a terminal match fresh to obtain first-token
+            # logits. Count only substituted occurrences, including their
+            # wrapper positions even when their physical KV is compressed.
+            if cover and cover[-1].end == len(input_ids):
+                cover = cover[:-1]
+            logical_length = len(input_ids) + sum(
+                state.store.get(item.chunk_id).wrapped_len - (item.end - item.start)
+                for item in cover
+            )
+            if logical_length >= MaxModelLen():
+                raise ValueError(f"Wrapped KVPacket prompt must leave room for generation within MaxModelLen={MaxModelLen()}")
             generated = session.generate(
-                max_new_tokens=generation_limit,
+                max_new_tokens=min(generation_limit, MaxModelLen() - logical_length),
                 started_at=request_started,
                 **sampling_kwargs,
             )
@@ -401,7 +473,12 @@ class KVPacket(Method):
                 self._torch.cuda.synchronize(self._backend.device)
 
             n_input = len(input_ids)
-            cached_tokens = int(generated.cached_tokens)
+            # Report semantic prompt coverage, including a terminal packet that
+            # is deliberately forwarded fresh to provide first-token logits.
+            # Wrapper positions and physically stored compressed rows are not
+            # input-token coverage and therefore do not affect this metric.
+            cached_tokens = matched_tokens
+            substituted_tokens = int(generated.cached_tokens)
             reuse_ratio = cached_tokens / n_input if n_input else 0.0
             output_ids = OutputFragmentIds(
                 generated.token_ids,
@@ -427,6 +504,7 @@ class KVPacket(Method):
                         ),
                         "reuse_ratio": reuse_ratio,
                         "cached_tokens": cached_tokens,
+                        "substituted_tokens": substituted_tokens,
                         "matched_chunk_ids": generated.matched_chunk_ids,
                         "n_input": n_input,
                         "flops": int(generated.flops),

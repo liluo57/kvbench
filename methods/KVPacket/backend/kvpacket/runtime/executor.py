@@ -253,9 +253,14 @@ class PacketExecutor:
         self,
         state: PacketDecodeState,
         sampling: SamplingConfig = SamplingConfig(),
+        *,
+        history: Sequence[int] = (),
+        generator: torch.Generator | None = None,
     ) -> PacketDecodeStep:
         """Select and commit one token without retaining generation state."""
-        token_id = select_next_token(state.next_token_logits, sampling)
+        token_id = select_next_token(
+            state.next_token_logits, sampling, history, generator
+        )
         forwarded = self.forward_tokens(state.cache_state, [token_id])
         return PacketDecodeStep(
             token_id=token_id,

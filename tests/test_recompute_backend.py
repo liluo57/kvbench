@@ -150,6 +150,41 @@ def test_terminal_eos_is_excluded_from_retained_ids_and_kv():
     assert method._states[0][-1].cache.seq_len == 3
 
 
+def test_full_recompute_does_not_accumulate_unused_kv_or_forward_the_final_sample(monkeypatch):
+    backend, sampler = runtime()
+    sampler._SampleNextToken = lambda *args: 7
+    method = bind(FullRecomputeTransformer(), backend, sampler)
+    forward = backend.forward
+    forwarded = []
+
+    def record_forward(**kwargs):
+        forwarded.append(kwargs["input_ids"].tolist())
+        return forward(**kwargs)
+
+    monkeypatch.setattr(backend, "forward", record_forward)
+    prompts = [[2, 3, 4], [2, 3, 4, 7, 5], [2, 3, 4, 7, 5, 7, 6]]
+    for prompt in prompts:
+        result = method.Run([prompt], retainOutput=[True], maxNewTokens=1)[0]
+        assert result.output_ids == [7]
+        assert result.metadata["cached_tokens"] == 0
+        assert method._states == [[]]
+    assert forwarded == [[prompt] for prompt in prompts]
+
+
+@pytest.mark.parametrize("repair_tokens", [0, 100])
+def test_reuse_ratio_counts_hits_independently_of_repair_and_terminal_replay(repair_tokens):
+    backend, sampler = runtime()
+    method = bind(EPIC(recomputeTokens=repair_tokens), backend, sampler)
+    method.Prepare([[[2, 3, 4], [5, 6]]])
+    for prompt, cached in [([2, 3, 4, 5, 6, 7], 5),
+                           ([2, 3, 4], 3),
+                           ([5, 6, 2, 3, 4, 5, 6, 7], 7),
+                           ([9, 10], 0)]:
+        result = method.Run([prompt], maxNewTokens=1)[0]
+        assert result.metadata["cached_tokens"] == cached
+        assert result.metadata["reuse_ratio"] == pytest.approx(cached / len(prompt))
+
+
 def test_random_policy_is_reproducible_without_changing_global_rng():
     state = random.getstate()
     method = RandRecomputeTransformer(recomputeRatio=0.5, seed=42)

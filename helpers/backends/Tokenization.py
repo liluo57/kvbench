@@ -56,9 +56,8 @@ def TerminalStopIdsFromTokenizer(
         else:
             stopIds.update(int(value) for value in values)
 
-    add(getattr(tokenizer, "eos_token_id", None))
-    if samplingConfig is not None:
-        add(samplingConfig.get("eos_token_id"))
+    override = samplingConfig.get("eos_token_id") if samplingConfig is not None else None
+    add(getattr(tokenizer, "eos_token_id", None) if override is None else override)
     add(explicitStopIds)
     return sorted(stopIds)
 

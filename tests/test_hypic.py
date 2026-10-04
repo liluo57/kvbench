@@ -30,6 +30,7 @@ class FakeEngine:
         yield dict(text='wrong text', output_ids=[31], meta_info={'cached_tokens': cached})
         yield dict(text='wrong text', output_ids=self.output,
                    meta_info={'prompt_tokens': len(input_ids), 'cached_tokens': cached,
+                              'completion_tokens': len(self.output),
                               'finish_reason': self.finishReason})
 
     def flush_cache(self):
@@ -73,8 +74,9 @@ def test_token_ids_survive_reordering_fresh_gaps_and_special_tokens(kind):
     assert result.output == '31/99/32'
     assert result.metadata['matched_prepared_segments'] == 2
     assert result.metadata['n_input'] == len(ids)
+    assert result.metadata['num_cached_tokens'] == 7
     assert result.metadata['reuse_ratio'] == 7 / len(ids)
-    assert result.performance['num_output_tokens'] == 3
+    assert result.performance['num_output_tokens'] == 4
     assert 0 <= result.performance['ttft'] <= result.performance['total_time']
 
 
@@ -105,6 +107,7 @@ def test_backend_reported_stop_id_is_stripped_without_removing_interior_special_
     obj.engine.finishReason = {'type': 'stop', 'matched': 77}
     result = obj.Run([[1, 2]], retainOutput=[True])[0]
     assert result.output_ids == [31, 99, 32]
+    assert result.performance['num_output_tokens'] == 4
     assert obj._states == [[[31, 99, 32]]]
 
 

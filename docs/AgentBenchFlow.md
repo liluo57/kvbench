@@ -12,7 +12,7 @@ BenchFlow agent
   -> HTTP request
   -> KVBench OpenAI-compatible endpoint
   -> Workflow.next()
-  -> Action(RUN, retainOutput=True)
+  -> Action(RUN, retainOutput=False)
   -> KVBench Engine / Worker
   -> Method.Run()
   -> Workflow.observe()
@@ -41,7 +41,7 @@ task Skill's full document is not the system-level available-Skills index. It
 appears later, after the agent issues a tool call such as
 `read({"path":".../SKILL.md"})`, as the matching `tool` message body.
 
-`AgentBenchFlowWorkflow` recognizes only those tool-call/response pairs. Local
+`AgentBenchFlowWorkflow` discovers dataset Skills from those tool-call/response pairs. Local
 task-bundled documents are sent as a `PREPARE` action and are also inserted
 verbatim into the first provider prompt. The prompt is then rendered again
 with the model's native chat template:
@@ -56,9 +56,11 @@ provider request
 The system prompt's available-Skill index, task instruction, tool-call
 metadata, and multi-turn common prefix are therefore not preparation inputs.
 Local SkillsBench runs load the task-bundled
-`environment/skills/*/SKILL.md` files before the first turn; dataset runs with
-no local checkout discover documents from the provider history as the agent
+`environment/skills/*/SKILL.md` files before the first turn; dataset runs
+discover documents from the provider history as the agent
 reads them, so those documents cannot be retroactively added to turn one.
+An optional local checkout used for dataset task enumeration is not read as
+a Skill source and cannot inject different-version documents into the prompt.
 Bodies are deduplicated, and later requests reuse the accumulated Skill set.
 
 This path is useful for methods that support interleaved reusable spans, such
@@ -69,7 +71,7 @@ preparation target.
 
 ## Configuration
 
-The default configuration in `config.yaml` uses the pinned dataset source:
+To use the pinned dataset source, configure:
 
 ```yaml
 AgentBenchFlow:
@@ -86,8 +88,12 @@ Use `SourceMode: local` with `SkillsBenchRepo` for a local checkout. The local
 checkout is used for task enumeration and `--tasks-dir`; task parsing,
 environment setup, skill provisioning, agent lifecycle, tool execution,
 verification, and official artifacts remain BenchFlow responsibilities. The
-`with-skill` and `no-skill` modes are passed to BenchFlow without changing the
-agent prompt in KVBench. `SkillMode: no-skill` is the baseline condition in
+`with-skill` and `no-skill` modes are passed to BenchFlow. In local
+`with-skill` runs, KVBench also appends the full task-bundled Skill documents
+to the first request's system message before rendering the prompt and sends
+those documents to `PREPARE`. Dataset runs discover Skill bodies from later
+provider history and do not inject local documents into the first request.
+`SkillMode: no-skill` is the baseline condition in
 which BenchFlow strips task-bundled skills from the Docker build context and
 does not deploy them to the agent sandbox. KVBench also accepts
 `SkillMode: WithoutSkill` as an alias and, in that mode, does not read or

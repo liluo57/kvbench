@@ -469,7 +469,10 @@ class LlamaForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        tied_embeddings = getattr(self.config, "tie_word_embeddings", False)
         for name, loaded_weight in weights:
+            if tied_embeddings and name == "lm_head.weight":
+                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -496,6 +499,14 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+                if (tied_embeddings and name == "model.embed_tokens.weight"
+                        and "lm_head.weight" in params_dict):
+                    # LoRA can give the head and embedding different padding
+                    # and TP ranges, so load each from the unsharded tensor.
+                    param = params_dict["lm_head.weight"]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

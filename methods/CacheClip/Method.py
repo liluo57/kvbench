@@ -32,13 +32,13 @@ from .Selector import (
 )
 
 
-def recompute_diagnostics(selected_indices: Sequence[int], context_tokens: int) -> dict[str, Any]:
+def recompute_diagnostics(selected_indices: Sequence[int], cached_tokens: int) -> dict[str, Any]:
     selected_count = len(set(int(index) for index in selected_indices))
-    denominator = max(0, int(context_tokens))
+    denominator = max(0, int(cached_tokens))
     return {
         "n_recomputed_tokens": selected_count,
-        "n_reusable_context_tokens": denominator,
-        "actual_recompute_ratio": selected_count / denominator if denominator else 0.0,
+        "n_cached_tokens": denominator,
+        "recompute_ratio": selected_count / denominator if denominator else 0.0,
     }
 
 
@@ -48,7 +48,7 @@ class CacheClip(Method):
     name = "cacheclip"
     backend = "transformers"
     maxCaseBatchSize = 1
-    method_metrics = ("actual_recompute_ratio",)
+    method_metrics = ("reuse_ratio", "recompute_ratio", "fallback_rate")
 
     def __init__(
         self,
@@ -237,11 +237,7 @@ class CacheClip(Method):
         return self._generate_from_assembly(
             assembly, prompt_ids, query_ids, selected, run_start,
             max_new_tokens,
-            max(
-                0,
-                sum(len(state["document_ids"][index]) for index in ordered_indices)
-                - (1 if not query_ids else 0),
-            ),
+            sum(len(state["document_ids"][index]) for index in ordered_indices),
         )
 
     def _run_interleaved(self, state, prompt_ids, parts, matches, run_start, max_new_tokens):
@@ -305,8 +301,6 @@ class CacheClip(Method):
         if assembly is None:
             raise RuntimeError("CacheClip matched documents but assembled no cache")
         selected = self._select_occurrences(query_text, occurrences)
-        if not query_ids:
-            cached_count -= 1
         return self._generate_from_assembly(
             assembly, prompt_ids, query_ids, selected, run_start,
             max_new_tokens, max(0, cached_count),
@@ -376,8 +370,17 @@ class CacheClip(Method):
             maxNewTokens=max_new_tokens,
             returnTokenIds=True,
         )
-        diagnostics = recompute_diagnostics(selected, len(context_ids))
-        diagnostics["n_cached_tokens"] = cached_count
+        # A replayed last cached token is still a cache hit, and is counted
+        # once among repaired rows even if the selector already chose it.
+        repaired = set(selected)
+        if not query_ids:
+            repaired.add(len(context_ids) - 1)
+        diagnostics = recompute_diagnostics(repaired, cached_count)
+        diagnostics.update(
+            reuse_ratio=cached_count / len(prompt_ids),
+            full_prefill=False,
+            fallback_rate=0.0,
+        )
         online = generation_start - run_start
         return Result(
             output=text,
@@ -406,7 +409,13 @@ class CacheClip(Method):
                 NumOutputTokensKey: token_count,
                 TotalTimeKey: online + total,
             },
-            metadata={"backend": "transformers", "n_input": len(prompt_ids)},
+            metadata={
+                "backend": "transformers", "n_input": len(prompt_ids),
+                "n_cached_tokens": 0, "n_recomputed_tokens": len(prompt_ids),
+                "reuse_ratio": 0.0, "recompute_ratio": 1.0,
+                "full_prefill": True, "fallback_rate": 1.0,
+                "fallback_reason": "no_matching_prepared_tokens",
+            },
         )
 
     @staticmethod

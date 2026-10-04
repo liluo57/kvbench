@@ -198,7 +198,7 @@ class _PicMethod(Method):
                                 matched_prepared_segments=sum(i is not None for i, _ in parts))
             result = Result(output=output, output_ids=outputIds, metadata=metadata,
                             performance={TtftKey: ttft, TotalTimeKey: total,
-                                         NumOutputTokensKey: len(outputIds)})
+                                         NumOutputTokensKey: int(meta["completion_tokens"])})
             if retainOutput and index < len(retainOutput) and retainOutput[index]:
                 if not self.fullPrefill and outputIds and outputIds not in prepared:
                     self._Warmup(outputIds)
@@ -223,13 +223,24 @@ class _PicMethod(Method):
         if final is None:
             raise RuntimeError("HYPIC returned no generation output")
         meta = dict(final.get("meta_info") or {})
+        rawOutputIds = list(final.get("output_ids") or [])
+        completionTokens = meta.get("completion_tokens")
+        if (
+            isinstance(completionTokens, bool)
+            or not isinstance(completionTokens, int)
+            or completionTokens < 0
+        ):
+            # Compatibility with lightweight/fake engines that omit SGLang's
+            # cumulative completion count. Count before terminal stop stripping.
+            completionTokens = len(rawOutputIds)
+        meta["completion_tokens"] = completionTokens
         stopIds = list(self._terminalStopIds)
         reason = meta.get("finish_reason") or {}
         if isinstance(reason, dict) and reason.get("type") == "stop":
             matched = reason.get("matched")
             if isinstance(matched, int) and not isinstance(matched, bool):
                 stopIds.append(matched)
-        outputIds = OutputFragmentIds(final.get("output_ids") or [], stopIds)
+        outputIds = OutputFragmentIds(rawOutputIds, stopIds)
         meta["cached_tokens"] = cached
         output = (self._tokenizer.decode(outputIds, skip_special_tokens=True)
                   if self._tokenizer is not None else final.get("text") or "")

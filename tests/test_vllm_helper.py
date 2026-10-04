@@ -111,3 +111,16 @@ def test_full_prefill_vllm_reads_max_num_seqs_from_config(monkeypatch):
     method = FullPrefillVllm()
 
     assert method.maxNumSeqs == 32
+
+
+def test_full_prefill_vllm_reports_native_prefix_hits(monkeypatch):
+    monkeypatch.setitem(sys.modules, "vllm", types.SimpleNamespace(SamplingParams=_SamplingParams))
+    method = object.__new__(FullPrefillVllm)
+    method.llm = types.SimpleNamespace(llm_engine=_Engine(), get_tokenizer=lambda: _Tokenizer())
+    method.samplingConfig = {"mode": "greedy"}
+
+    result = method.Run([[7, 8, 9]], maxNewTokens=2)[0]
+
+    assert result.metadata["num_cached_tokens"] == 3
+    assert result.metadata["reuse_ratio"] == 1.0
+    assert method.method_metrics == ("reuse_ratio",)

@@ -11,7 +11,7 @@ from methods.Cacheblend.backend.cacheblend_ops import (
 )
 from helpers.backends.Prompt import ComposeInterleavedReuse
 from helpers.backends.Tokenization import OutputFragmentIds
-from methods.Cacheblend.Worker import CacheBlendWorker
+from methods.Cacheblend.Worker import CacheBlendWorker, _cache_hit_token_count
 
 
 def test_native_capture_retains_decode_tokens_without_collecting_prefill():
@@ -117,3 +117,14 @@ def test_sparse_mask_uses_absolute_positions_for_interleaved_repair():
     for row, position in enumerate([1, 5, 12]):
         assert torch.all(mask[..., row, :position + 1] == 0)
         assert torch.all(mask[..., row, position + 1:] == torch.finfo(torch.float32).min)
+
+
+def test_cacheblend_reuse_counts_cached_terminal_suffix_and_repaired_rows():
+    # The final cached segment may be replayed as CacheBlend's suffix, and any
+    # cached segment may be selected by its repair top-k. Both remain hits.
+    segments = [
+        (True, [1, 2], None, 0, 2),
+        (False, [3], None, 2, 3),
+        (True, [4, 5, 6], None, 3, 6),
+    ]
+    assert _cache_hit_token_count(segments) == 5

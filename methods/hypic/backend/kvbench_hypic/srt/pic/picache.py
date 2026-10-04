@@ -348,18 +348,38 @@ class PICache(BasePrefixCache):
         # one-segment request. A multi-segment online prefill may use its miss
         # slots transiently, but its joint state is not a reusable local state.
         if self.policy.is_linearkv and getattr(req, "pic_linearkv_skip_cache", False):
-            req.pic_cache_owned_miss_segments = set()
-            req.pic_freed_miss_segments = set()
+            req.pic_cache_owned_miss_segments = getattr(
+                req, "pic_cache_owned_miss_segments", set()
+            )
+            req.pic_freed_miss_segments = getattr(
+                req, "pic_freed_miss_segments", set()
+            )
             req.pic_linearkv_uninserted_miss_segments = set(miss_slots)
             return
 
         inserted = 0
         inflight_tokens = 0
         inflight_mamba = 0
-        req.pic_cache_owned_miss_segments = set()
-        req.pic_freed_miss_segments = set()
+        # Keep the ownership ledger across repeated unfinished/finished calls.
+        # cache_finished_req invokes this method again for a request that may
+        # already have published its misses after prefill. Resetting these sets
+        # here makes that second pass mistake the cache-owned slots for a new
+        # duplicate allocation and free slots that live entries still reference.
+        req.pic_cache_owned_miss_segments = getattr(
+            req, "pic_cache_owned_miss_segments", set()
+        )
+        req.pic_freed_miss_segments = getattr(req, "pic_freed_miss_segments", set())
         min_tokens = getattr(get_global_server_args(), "pic_segment_min_tokens", -1)
         for (start, end) in miss_segments:
+            segment = (start, end)
+            if (
+                segment in req.pic_cache_owned_miss_segments
+                or segment in req.pic_freed_miss_segments
+            ):
+                # This request already transferred the slot or freed its local
+                # duplicate on an earlier cache_unfinished_req call. In either
+                # case, do not repeat the transfer/accounting/free operation.
+                continue
             # ponytail: the last segment (Q) is normally not cached (recomputed by
             # decode). A scatter single-seg sub-request has exactly one segment that
             # IS the "last" one but MUST be cached + pushed to combine — don't skip.

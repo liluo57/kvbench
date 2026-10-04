@@ -7,10 +7,15 @@ from dataclasses import dataclass
 from torch import Tensor
 
 from .types import PacketCacheState
-from helpers.backends.CacheBackend.Sampling import SamplingConfig, select_next_token
+from helpers.backends.CacheBackend.Sampling import (
+    SamplingConfig,
+    make_generator,
+    select_next_token,
+)
 
 __all__ = [
     "SamplingConfig",
+    "make_generator",
     "PacketDecodeState",
     "PacketDecodeStep",
     "select_next_token",
