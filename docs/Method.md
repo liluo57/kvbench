@@ -39,7 +39,8 @@ Refer to each class constructor for its implementation and configurable paramete
 | `DependencyAnalysisMethod` | Computes cache dependency analysis metrics. |
 | `RolloutMethod` | Decorator that repeats `Run` on a base Method and aggregates the results. |
 | `KVPacket` | Reuses prepared token sequences through KV Packet wrappers and token-aware matching. |
-| `EPIC`, `RandRecomputeTransformer`, `FullRecomputeTransformer` | KVPacket recomputation artifact methods. Their token-ID input support is temporarily deferred. |
+| `RandRecomputeTransformer`, `FullRecomputeTransformer` | KVPacket package controls using the shared local HF/cache backend; random selective repair and full recomputation. |
+| `EPIC` | Independent EPIC/LegoLink method: repairs a fixed prefix of relocated cached chunks using the shared local HF/cache backend. |
 
 CacheClip's current primary-ID alignment supports fast ByteLevel tokenizers and has been validated with Qwen. `sharedPrefixText` optionally supplies an explicit warmup prefix: preparation tokenizes `P` independently, prefills `P_ids + D_ids`, then stores only the cache rows for `D_ids` and records the length of `P_ids`. Run never inserts or removes IDs for this prefix; without a matching prefix in the runtime prompt, this warmup is a calibration variant rather than strict paper-style prefix retention. The auxiliary selector view is decoded from primary IDs, so Unicode normalization may differ from the original source text.
 
@@ -75,6 +76,27 @@ are their respective public names.
 6. Clear Case/batch state in `Reset` and release backend resources in `Close`. Export the class from `methods/__init__.py`, then add an instance to the `methods` list in `Main.py`.
 
 A Workflow may provide multiple token chunks or preserve state across multiple RUN actions. Handle these inputs according to the method's algorithm, and prevent one Case's cache from leaking into another when cross-Case reuse is not intended.
+
+KVPacket, its random/full-recompute controls, and EPIC use the same cache, RoPE,
+HF execution and selective-recompute implementation in
+`helpers/backends/CacheBackend`. The KVPacket package exports the control
+classes alongside `KVPacket`; EPIC lives in `methods/EPIC.py` and imports only
+the shared backend. These methods accept the Task's authoritative token IDs,
+including reordered/repeated chunks and fresh spans between cached chunks.
+Prepared caches are immutable; retained outputs keep their native IDs and KV
+for later turns. TTFT includes matching, cache alignment, repair, fresh rows,
+and first-token selection; GPU precompute finishes before Prepare returns.
+
+EPIC's `recomputeTokens` (default 32) repairs the first tokens of each cached
+chunk except a chunk already at prompt position zero. Rand's `recomputeRatio`
+(default 0.2) samples that same eligible cached region with an optional local
+`seed`. Every fresh row and the final prompt row is forwarded. FullRecompute
+ignores prepared state and recomputes the whole prompt. These controls require
+no trained KVPacket wrapper and no external `kv_packet` checkout. The selective
+kernel supports dense Llama/Mistral/Qwen2/Qwen3 and complete, uncompressed
+standard-attention caches; cache relocation retains the backend's RoPE checks.
+EPIC follows the baseline LegoLink policy and is not the authors' vLLM serving
+system. Sources and adaptations are recorded in the shared backend's UPSTREAM.
 
 A3Repo includes the upstream ragkv causal-LM precompute, attention selection,
 selective recomputation, KV fusion and greedy decoding code in `methods/A3Repo`.

@@ -23,6 +23,9 @@ Each constructor declares the strict ``gpuNums`` requirement and a relative
   over transformers).
 - :class:`HypicMethod` — position-independent segment reuse through the HYPIC
   SGLang fork, including hybrid linear/full-attention state composition.
+- :class:`KVPacket` and its random/full-recompute controls use the shared local
+  HF/cache backend. :class:`EPIC` provides an independent LegoLink selector
+  over that backend, without a KVPacket wrapper or external source checkout.
 """
 
 from .CacheblendLmcache import CacheblendLmcache
@@ -36,9 +39,9 @@ from .ProphetKV import ProphetKV
 from .CacheClip import CacheClip
 from .DependencyAnalysis import DependencyAnalysisMethod
 from .Rollout import RolloutMethod
-from .KVPacket import KVPacket
-from .KVPacketRecompute import (
-    EPIC,
+from .EPIC import EPIC
+from .KVPacket import (
+    KVPacket,
     FullRecomputeTransformer,
     RandRecomputeTransformer,
 )

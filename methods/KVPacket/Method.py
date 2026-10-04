@@ -451,4 +451,39 @@ class KVPacket(Method):
             pass
 
 
-__all__ = ["KVPacket"]
+from helpers.backends.RecomputeMethod import CacheRecomputeMethod
+
+
+class RandRecomputeTransformer(CacheRecomputeMethod):
+    """Random repair baseline using the same local HF/cache backend as KVPacket."""
+
+    name = "rand_recompute"
+
+    def __init__(self, *args, recomputeRatio=0.2, recompute_ratio=None, seed=None, **kwargs):
+        import math
+
+        ratio = recomputeRatio if recompute_ratio is None else recompute_ratio
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not math.isfinite(ratio) or not 0 <= ratio <= 1:
+            raise ValueError("recomputeRatio must be a finite number in [0, 1]")
+        self.recomputeRatio = float(ratio)
+        self.seed = seed
+        super().__init__(*args, **kwargs)
+
+    def _select(self, hits):
+        import random
+
+        eligible = [position for hit in hits if hit.start > 0
+                    for position in range(hit.start, hit.end)]
+        return sorted(random.Random(self.seed).sample(
+            eligible, int(len(eligible) * self.recomputeRatio),
+        ))
+
+
+class FullRecomputeTransformer(CacheRecomputeMethod):
+    """Full recomputation control for the shared KVPacket HF backend."""
+
+    name = "full_recompute"
+    fullRecompute = True
+
+
+__all__ = ["KVPacket", "RandRecomputeTransformer", "FullRecomputeTransformer"]

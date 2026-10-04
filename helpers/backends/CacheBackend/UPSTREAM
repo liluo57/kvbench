@@ -1,0 +1,12 @@
+Source: https://github.com/ChuangtaoChen-TUM/KVPacket
+Library commit: d28d336a007bdbb37bb43cfeab1bc858d79a0a67
+Baseline reference: abc8d2c72ef34e9dd4aafacb424f58fdbd72d534
+License: MIT (see LICENSE)
+
+The cache, RoPE, HF execution/training, compatibility, fingerprint and validation
+implementations were moved from the bundled KV Packet library into this shared
+backend. Packet APIs re-export these same definitions; EPIC and recomputation
+baselines use them directly, without importing a KV Packet method or wrapper.
+Selective recomputation adapts the baseline decoder equations to the same cache
+types, native token IDs, current HF APIs and the KVBench TTFT/output contracts.
+Benchmark/data/metric/evaluation code and external module-path injection omitted.

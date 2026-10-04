@@ -9,6 +9,10 @@ Modules:
 - :mod:`helpers.backends.TransformersHelper` — plain HF ``transformers``
   generator (owned model + tokenizer, manual ModelConfig-aware decode with
   real TTFT).
+- :mod:`helpers.backends.CacheBackend` — shared KV cache, RoPE, HF execution,
+  training and selective repair used by KVPacket and independent EPIC.
+- :mod:`helpers.backends.RecomputeMethod` — native token-ID lifecycle for
+  selective-repair and full-recompute controls.
 - :mod:`helpers.backends.VllmCacheblendPatches` — runtime wiring for
   vLLM + LMCache CacheBlend.
 - :mod:`helpers.backends.ModelAdapter` — the **single chat-template truth

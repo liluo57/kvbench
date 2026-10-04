@@ -3,3 +3,10 @@ Commit: d28d336a007bdbb37bb43cfeab1bc858d79a0a67
 License: MIT (see LICENSE)
 Vendored runtime/training subset: kvpacket/backend, kvcache, packet, runtime, session, training, _internal, compression/base.py, preprocessing.py, fingerprint.py, errors.py.
 KVBench adaptations: optional serving/KVPress integrations and upstream examples/tasks/tests are omitted; the HF backend uses incremental forwards because Transformers 4.57.x does not advance supplied position_ids during model.generate; session.generate accepts a caller start timestamp so TTFT includes packet matching; RoPE shifting is restricted to plain/known-static types and rejects dynamic, longrope, and unknown types.
+
+The backend, cache, RoPE, fingerprint and validation implementations now live
+in helpers/backends/CacheBackend. The packet library re-exports those same
+definitions. RandRecomputeTransformer and FullRecomputeTransformer are included
+in this package and use that shared backend; EPIC has its own method/selector
+in methods/EPIC.py. No external artifact checkout or kv_packet import remains.
+Recompute baseline reference: abc8d2c72ef34e9dd4aafacb424f58fdbd72d534.

@@ -57,7 +57,10 @@ A3:
   # Python: /path/to/project/python
   Python:
 
-# KVPacket's backend is vendored under methods/KVPacket and shares the main
+# KVPacket's packet code is vendored under methods/KVPacket; its HF/cache backend
+# is shared with Rand/FullRecompute and standalone EPIC in helpers/backends/CacheBackend.
+# These controls use native token IDs and need no trained wrapper or external repo.
+# KVPacket shares the main
 # Python 3.12 or 3.13 / PyTorch / Transformers environment. Run `./setup.py --kvpacket`
 # to check that environment; it does not install or replace shared packages.
 KVPacket:
