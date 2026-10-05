@@ -323,9 +323,9 @@ def ComposeReuse(
         else:
             break
 
+    bestLen = pos
+    bestIndices = list(originalIndices)
     if originalOrder:
-        bestLen = pos
-        bestIndices = list(originalIndices)
         used = [False] * n
         for index in originalIndices:
             used[index] = True
@@ -346,13 +346,14 @@ def ComposeReuse(
                 used[index] = False
 
         extend(pos, list(originalIndices))
-        if bestLen > 0:
+        # Only commit this prefix if no alternative can cover more tokens.
+        # Overlapping chunks can otherwise make the first match suboptimal.
+        if bestLen == min(len(run), sum(len(chunk) for chunk in prepare)):
             return [prepare[index] for index in bestIndices], run[bestLen:]
 
     used = [False] * n
     order: List[int] = []
-    bestLen = 0
-    bestOrder: List[int] = []
+    bestOrder: List[int] = list(bestIndices)
 
     def search(curPos: int) -> None:
         nonlocal bestLen, bestOrder

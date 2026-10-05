@@ -270,8 +270,8 @@ Suggested staged checks:
 2. Run the endpoint/runner boundary tests:
 
    ```bash
-   uvx --with pytest --with pyyaml --with rich --with transformers --with jinja2 \
-     pytest -q tests/test_agent_benchflow.py
+   python -m pytest -q tests/helpers tests/workflows/test_agent_benchflow.py \
+     tests/tasks/test_agent_benchflow.py tests/scripts/test_remote_runtime.py
    ```
 
 3. Run a real single-task smoke test after Docker, the model, and the selected

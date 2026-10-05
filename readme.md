@@ -107,14 +107,26 @@ disables both optional payloads.
 
 # Testing
 
-The default suite is CPU-only and does not load a model or require a GPU:
+The default suite is CPU-only and does not download models or datasets. Numerical
+tests construct tiny models with random weights and tokenizers in memory:
 
 ```bash
 pytest -q
 ```
 
-Regression tests cover the core contracts, batch/Workflow execution loop,
-metrics, prompt-reuse matching, task helpers, and scheduler failure paths.
+Tests are organized by responsibility under `tests/`: `methods`, `backends`,
+`core`, `workflows`, `tasks`, `helpers`, and `scripts`. Each method's suite includes
+its output-retention, reuse, sampling, timing, and lifecycle regressions.
+Shared fixtures live in `tests/conftest.py` and reusable doubles in `tests/support`.
+
+Optional compiled-backend and CUDA tests require explicit opt-in:
+
+```bash
+python -m pytest -q --run-native -m native
+python -m pytest -q --run-gpu -m gpu
+```
+
+See [tests/README.md](tests/README.md) for focused runs and test conventions.
 
 # Summary
 
