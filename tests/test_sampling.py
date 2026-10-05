@@ -102,6 +102,33 @@ def test_backend_translations_keep_greedy_and_override_consistent():
         "do_sample": False,
     }
 
+    # Canonical greedy is authoritative even if stale/raw penalty fields are
+    # present; deterministic default/override policies retain useful penalties.
+    canonical_with_raw = {**greedy, "repetition_penalty": 2.0, "top_p": 0.2}
+    assert VllmSamplingParams(canonical_with_raw, 12) == {
+        "temperature": 0, "max_tokens": 12,
+    }
+    assert TransformersGenerationKwargs(canonical_with_raw, 12) == {
+        "max_new_tokens": 12, "do_sample": False,
+    }
+    for penalty in (
+        {"repetition_penalty": 2.0},
+        {"presence_penalty": 0.5},
+        {"frequency_penalty": 0.5},
+    ):
+        deterministic = {"mode": "override", "do_sample": False, "temperature": 0.0,
+                         "top_p": 0.2, **penalty}
+        expected = {"temperature": 0, "max_tokens": 12, **penalty}
+        assert VllmSamplingParams(deterministic, 12) == expected
+        expected_sglang = {"temperature": 0, "max_new_tokens": 12, **penalty}
+        assert SglangSamplingParams(deterministic, 12) == expected_sglang
+        expected_hf = {"max_new_tokens": 12, "do_sample": False}
+        if "repetition_penalty" in penalty:
+            expected_hf.update(penalty)
+        assert TransformersGenerationKwargs(deterministic, 12) == expected_hf
+        assert "presence_penalty" not in expected_hf
+        assert "frequency_penalty" not in expected_hf
+
     override = {
         "mode": "override",
         "do_sample": True,

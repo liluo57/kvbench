@@ -20,7 +20,9 @@ from .Cache import (
     PrimaryAssembly,
     append_cached_primary_segment,
     assemble_primary_cache,
+    _cache_length,
     select_cache_sequence,
+    select_output_cache,
 )
 from .Recompute import recompute_selected_tokens
 from .Selector import (
@@ -164,10 +166,10 @@ class CacheClip(Method):
         max_new_tokens = ResolveMaxNewTokens(
             maxNewTokens if maxNewTokens is not None else getattr(self, "maxNewTokens", None)
         )
-        _ = retainOutput
         if not self._states:
             states = [{"document_ids": [], "primary_id_tensors": [], "primary": [], "primary_offsets": [],
                        "auxiliary": [], "old_start": 0} for _ in data]
+            self._states = states
         elif len(self._states) != len(data):
             raise RuntimeError(
                 f"CacheClip state has {len(self._states)} case(s), received {len(data)} prompt(s)"
@@ -175,23 +177,26 @@ class CacheClip(Method):
         else:
             states = self._states
         return [
-            self._run_one(state, list(prompt), run_start, max_new_tokens)
-            for state, prompt in zip(states, data)
+            self._run_one(
+                state, list(prompt), run_start, max_new_tokens,
+                bool(retainOutput is not None and index < len(retainOutput) and retainOutput[index]),
+            )
+            for index, (state, prompt) in enumerate(zip(states, data))
         ]
 
     def _run_one(
         self, state: dict[str, Any], prompt_ids: list[int], run_start: float,
-        max_new_tokens: int,
+        max_new_tokens: int, retain_output: bool = False,
     ) -> Result:
         parts = ComposeInterleavedReuse(state["document_ids"], prompt_ids)
         matches = [i for i, (chunk_index, _) in enumerate(parts) if chunk_index is not None]
         if not matches:
             if self.requireReuse:
                 raise RuntimeError("CacheClip strict reuse found no matching prepared token IDs")
-            return self._full_prefill(prompt_ids, run_start, max_new_tokens)
+            return self._full_prefill(prompt_ids, run_start, max_new_tokens, state, retain_output)
         if self._is_contiguous_match(parts, matches):
-            return self._run_contiguous(state, prompt_ids, parts, matches, run_start, max_new_tokens)
-        return self._run_interleaved(state, prompt_ids, parts, matches, run_start, max_new_tokens)
+            return self._run_contiguous(state, prompt_ids, parts, matches, run_start, max_new_tokens, retain_output)
+        return self._run_interleaved(state, prompt_ids, parts, matches, run_start, max_new_tokens, retain_output)
 
     @staticmethod
     def _is_contiguous_match(parts, matches) -> bool:
@@ -202,7 +207,7 @@ class CacheClip(Method):
     def _join_ids(parts) -> list[int]:
         return [token for _, ids in parts for token in ids]
 
-    def _run_contiguous(self, state, prompt_ids, parts, matches, run_start, max_new_tokens):
+    def _run_contiguous(self, state, prompt_ids, parts, matches, run_start, max_new_tokens, retain_output=False):
         first, last = matches[0], matches[-1]
         fresh_prefix = self._join_ids(parts[:first])
         query_ids = self._join_ids(parts[last + 1:])
@@ -238,9 +243,10 @@ class CacheClip(Method):
             assembly, prompt_ids, query_ids, selected, run_start,
             max_new_tokens,
             sum(len(state["document_ids"][index]) for index in ordered_indices),
+            state, retain_output,
         )
 
-    def _run_interleaved(self, state, prompt_ids, parts, matches, run_start, max_new_tokens):
+    def _run_interleaved(self, state, prompt_ids, parts, matches, run_start, max_new_tokens, retain_output=False):
         last_match = matches[-1]
         query_ids = self._join_ids(parts[last_match + 1:])
         fresh_ids = [ids for chunk_index, ids in parts if chunk_index is None]
@@ -304,6 +310,7 @@ class CacheClip(Method):
         return self._generate_from_assembly(
             assembly, prompt_ids, query_ids, selected, run_start,
             max_new_tokens, max(0, cached_count),
+            state, retain_output,
         )
 
     def _select(self, query_text, auxiliary_caches, primary_offsets, prefix_count):
@@ -347,7 +354,7 @@ class CacheClip(Method):
 
     def _generate_from_assembly(
         self, assembly, prompt_ids, query_ids, selected, run_start,
-        max_new_tokens, cached_count,
+        max_new_tokens, cached_count, state=None, retain_output=False,
     ):
         context_ids = self._ids(assembly.context_ids)
         if context_ids + query_ids != prompt_ids:
@@ -364,12 +371,25 @@ class CacheClip(Method):
             generation_ids = [prompt_ids[-1]]
             generation_count = len(context_ids)
         generation_start = perf_counter()
-        text, backend_ttft, total, token_count, output_ids = self._gen.Generate(
-            generation_ids,
-            pastKeyValues=generation_cache,
-            maxNewTokens=max_new_tokens,
-            returnTokenIds=True,
-        )
+        if retain_output:
+            generated = self._gen.Generate(
+                generation_ids, pastKeyValues=generation_cache,
+                maxNewTokens=max_new_tokens, returnCache=True,
+            )
+        else:
+            generated = self._gen.Generate(
+                generation_ids, pastKeyValues=generation_cache,
+                maxNewTokens=max_new_tokens, returnTokenIds=True,
+            )
+        if retain_output:
+            text, backend_ttft, total, token_count, full_cache, raw_ids = generated
+            output_ids = self._gen.OutputTokenIds(raw_ids)
+            if output_ids:
+                retained_start = perf_counter()
+                self._retain_output(state, output_ids, full_cache, len(prompt_ids))
+                total += perf_counter() - retained_start
+        else:
+            text, backend_ttft, total, token_count, output_ids = generated
         # A replayed last cached token is still a cache hit, and is counted
         # once among repaired rows even if the selector already chose it.
         repaired = set(selected)
@@ -393,13 +413,27 @@ class CacheClip(Method):
             metadata={"backend": "transformers", "n_input": generation_count, **diagnostics},
         )
 
-    def _full_prefill(self, prompt_ids: list[int], run_start: float, max_new_tokens: int) -> Result:
+    def _full_prefill(
+        self, prompt_ids: list[int], run_start: float, max_new_tokens: int,
+        state=None, retain_output=False,
+    ) -> Result:
         if self.requireReuse:
             raise RuntimeError("CacheClip strict reuse found no matching prepared token IDs")
         generation_start = perf_counter()
-        text, backend_ttft, total, token_count, output_ids = self._gen.Generate(
-            prompt_ids, maxNewTokens=max_new_tokens, returnTokenIds=True
+        generated = (
+            self._gen.Generate(prompt_ids, maxNewTokens=max_new_tokens, returnCache=True)
+            if retain_output else
+            self._gen.Generate(prompt_ids, maxNewTokens=max_new_tokens, returnTokenIds=True)
         )
+        if retain_output:
+            text, backend_ttft, total, token_count, full_cache, raw_ids = generated
+            output_ids = self._gen.OutputTokenIds(raw_ids)
+            if output_ids:
+                retained_start = perf_counter()
+                self._retain_output(state, output_ids, full_cache, len(prompt_ids))
+                total += perf_counter() - retained_start
+        else:
+            text, backend_ttft, total, token_count, output_ids = generated
         online = generation_start - run_start
         return Result(
             output=text,
@@ -421,6 +455,28 @@ class CacheClip(Method):
     @staticmethod
     def _ids(input_ids: torch.Tensor) -> list[int]:
         return [int(token) for token in input_ids[0].tolist()]
+
+    def _retain_output(self, state, output_ids, full_cache, prompt_length):
+        """Register the generated primary rows and auxiliary selector cache."""
+        ids = [int(token) for token in output_ids]
+        if not ids:
+            return
+        cache = select_output_cache(
+            self._gen.model, full_cache, prompt_length, len(ids),
+            old_start=state["old_start"],
+        )
+        if _cache_length(cache) != len(ids):
+            raise RuntimeError("retained output cache rows do not match output IDs")
+        text, offsets = token_text_and_offsets(self._gen.tokenizer, ids)
+        prefix_text = self.sharedPrefixText or ""
+        auxiliary = self._auxiliary.prefill_documents(prefix_text, [text])[0]
+        state["document_ids"].append(ids)
+        state["primary_id_tensors"].append(
+            torch.tensor([ids], dtype=torch.long)
+        )
+        state["primary_offsets"].append(offsets)
+        state["primary"].append(cache)
+        state["auxiliary"].append(auxiliary)
 
     def Reset(self) -> None:
         self._states = []

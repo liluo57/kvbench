@@ -11,6 +11,7 @@ from core.Method import Method, ResolveMaxNewTokens
 from core.Result import Result, TtftKey, TotalTimeKey, NumOutputTokensKey
 from core.Sampling import ResolveSamplingConfig
 from .Prompt import ComposeInterleavedReuse
+from .CacheBackend.Cache import KVCache, KeyValue
 
 
 @dataclass
@@ -143,13 +144,39 @@ class CacheRecomputeMethod(Method):
                     )
                     cache, logits = out.cache, out.logits[0, -1]
                 output_ids = self._gen.OutputTokenIds(generated)
-                if not self.fullRecompute and retainOutput and retainOutput[case_index]:
-                    if generated and generated[-1] not in self._gen.eosIds:
+                retain = (retainOutput is not None and case_index < len(retainOutput)
+                          and bool(retainOutput[case_index]))
+                if not self.fullRecompute and retain and output_ids:
+                    # The sampling loop forwards every generated token except the last
+                    # non-stop token. Complete that KV once, then keep only the output
+                    # slice as an independent chunk. The slice is stored at local
+                    # positions so shift_cache() can place it at any later prompt span.
+                    if cache.seq_len == len(ids) + len(output_ids) - 1:
                         cache = self._backend.forward(
                             input_ids=inputs.new_tensor([[generated[-1]]]), cache=cache,
                             position_ids=inputs.new_tensor([[len(ids) + len(output_ids) - 1]]),
                         ).cache
-                    self._states[case_index].append(PreparedChunk(ids + output_ids, cache))
+                    start, end = len(ids), len(ids) + len(output_ids)
+                    if cache.seq_len < end:
+                        raise ValueError("retained output KV is incomplete")
+                    output_layers = [
+                        KeyValue(layer.key[:, :, start:end, :].clone(),
+                                 layer.value[:, :, start:end, :].clone(),
+                                 layer.logical_positions[:, start:end].clone())
+                        for layer in cache.layers
+                    ]
+                    output_cache = KVCache(output_layers)
+                    local_positions = torch.arange(
+                        len(output_ids), dtype=torch.long, device=inputs.device
+                    ).unsqueeze(0)
+                    self._backend.assert_rerotatable()
+                    output_cache = output_cache.rerotate(
+                        self._backend.rotary_emb,
+                        output_cache.layers[0].logical_positions,
+                        local_positions,
+                        nope_dim=self._backend.nope_dim,
+                    )
+                    self._states[case_index].append(PreparedChunk(output_ids, output_cache))
                 cached_positions = {pos for hit in hits for pos in range(hit.start, hit.end)}
                 # Reuse measures cache-hit coverage, independently of repair.
                 reused = len(cached_positions)

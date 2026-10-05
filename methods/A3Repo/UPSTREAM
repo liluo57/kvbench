@@ -2,8 +2,10 @@ Source: https://github.com/yczhounlp/ragkv
 Commit: 8f3a3252510cad19325cceff4ff55f3be1862dc8
 
 Retained: complete Llama/Mistral/Qwen2 causal-LM precompute stacks, runtime
-forward functions, attention/recompute selectors, RoPE/masking and greedy
-decode/vanilla functions. Qwen3 support is KVBench's integrated adaptation.
+forward functions, attention/recompute selectors, RoPE/masking and decode/
+vanilla control flow. KVBench routes next-token selection through the shared
+sampling helper; canonical greedy mode retains upstream argmax behavior.
+Qwen3 support is KVBench's integrated adaptation.
 Excluded: datasets, chunking/evaluation/precompute CLI scripts, metrics, plots,
 experiment configs, disk KV utilities, classification/QA heads, eviction
 baselines, global monkeypatch entry points and the upstream environment freeze.
@@ -15,7 +17,12 @@ shared checkpoint storage for precompute/runtime (including tied aliases); isola
 the project Python; Hub/local checkpoint loading without checkout-relative
 cache directories or a forced PyTorch .bin format.
 Latency boundaries wait for offline CUDA precompute to finish and for the
-first generated token to be ready before recording TTFT.
+first generated token to be ready before recording TTFT. Both A3 and matched
+vanilla workers support resolved shared sampling fields (sampling controls,
+history penalties, seed and EOS override); unknown resolved fields fail
+explicitly. EOS override replaces model EOS while the upstream BOS stop rule
+is retained. Terminal stop tokens count toward raw generation length and are
+removed from returned output IDs.
 
 The upstream commit contains no repository-wide LICENSE. Original Apache-2.0
 copyright/license headers in the precompute model files are retained;

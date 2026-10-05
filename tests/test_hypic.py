@@ -1,5 +1,4 @@
 import importlib
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -105,28 +104,33 @@ def test_backend_reported_stop_id_is_stripped_without_removing_interior_special_
     obj = method()
     obj.engine.output = [31, 99, 32, 77]
     obj.engine.finishReason = {'type': 'stop', 'matched': 77}
-    result = obj.Run([[1, 2]], retainOutput=[True])[0]
+    result = obj.Run([[1, 2]], retainOutput=[False])[0]
     assert result.output_ids == [31, 99, 32]
     assert result.performance['num_output_tokens'] == 4
-    assert obj._states == [[[31, 99, 32]]]
+    assert obj._states == [[]]
 
 
 @pytest.mark.parametrize('kind', [HypicMethod, LinearKVMethod])
-def test_output_retention_reuses_authoritative_ids_and_excludes_warmup_timing(kind):
-    obj = method(kind)
+@pytest.mark.parametrize('full_prefill', [False, True])
+@pytest.mark.parametrize('retain', [[True], [True, False]])
+def test_output_retention_fails_before_generation_or_state_mutation(kind, full_prefill, retain):
+    obj = method(kind, fullPrefill=full_prefill)
     obj.Prepare([[[1, 2]]])
-    original = obj._Warmup
-    def delayed(ids):
-        time.sleep(0.02)
-        original(ids)
-    obj._Warmup = delayed
-    start = time.perf_counter()
-    result = obj.Run([[1, 2, 10]], retainOutput=[True], maxNewTokens=8)[0]
-    assert time.perf_counter() - start >= result.performance['total_time'] + 0.015
-    assert obj._states == [[[1, 2], [31, 99, 32]]]
-    assert result.output_ids == [31, 99, 32]
-    obj.Run([[31, 99, 32, 10]])
-    assert obj.engine.calls[-1][:2] == ([31, 99, 32, 10], [(0, 3), (3, 4)])
+    calls_before = list(obj.engine.calls)
+    states_before = [[list(chunk) for chunk in chunks] for chunks in obj._states]
+    with pytest.raises(NotImplementedError, match='native output KV retention'):
+        obj.Run([[1, 2, 10]], retainOutput=retain, maxNewTokens=8)
+    assert obj.engine.calls == calls_before
+    assert obj._states == states_before
+
+
+@pytest.mark.parametrize('kind', [HypicMethod, LinearKVMethod])
+def test_output_retention_defaults_to_false_for_missing_or_false_flags(kind):
+    for retain in (None, [], [False], [False, True]):
+        obj = method(kind)
+        result = obj.Run([[1, 2]], retainOutput=retain)[0]
+        assert result.output_ids == [31, 99, 32]
+        assert obj._states == [[]]
 
 
 def test_no_match_and_full_prefill_keep_exact_ids():

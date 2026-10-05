@@ -281,6 +281,44 @@ def select_cache_sequence(
     return selected
 
 
+def select_output_cache(
+    model: Any,
+    cache: Any,
+    start: int,
+    length: int,
+    *,
+    old_start: int = 0,
+) -> DynamicCache:
+    """Own and position-normalize a generated cache fragment.
+
+    Generation K rows are RoPE encoded at their absolute prompt positions.
+    Prepared document caches use ``old_start`` as their source position, so
+    normalize the selected output rows to that same coordinate before storing.
+    """
+    if start < 0 or length < 0 or old_start < 0:
+        raise ValueError("output cache positions and length must be non-negative")
+    selected = _new_dynamic_cache(model.config)
+    for layer_index, (keys, values) in enumerate(_cache_layer_pairs(cache)):
+        key = keys[:, :, start : start + length, :].clone()
+        value = values[:, :, start : start + length, :].clone()
+        if key.size(-2) != length or value.size(-2) != length:
+            raise ValueError("generated output IDs do not align with cache rows")
+        if length:
+            old_positions = torch.arange(
+                start, start + length, device=key.device
+            ).unsqueeze(0)
+            new_positions = torch.arange(
+                old_start, old_start + length, device=key.device
+            ).unsqueeze(0)
+            key = _rotate_key(
+                key, _layer_rotary_embedding(model, layer_index),
+                old_positions, new_positions,
+                getattr(model.config, "qk_nope_head_dim", None),
+            ).clone()
+        selected.update(key, value, layer_index)
+    return selected
+
+
 __all__ = [
     "PrimaryAssembly",
     "_as_dynamic_cache",
@@ -292,4 +330,5 @@ __all__ = [
     "append_cached_primary_segment",
     "assemble_primary_cache",
     "select_cache_sequence",
+    "select_output_cache",
 ]

@@ -21,48 +21,6 @@ pip install -r requirement.txt
 
 > If you need CacheblendLmcache method, `vllm` and `lmcache` are acquired.
 
-> If you need CacheblendRepo or NaiveCacheblendRepo, install `uv` and a CUDA
-> toolkit, then run `./setup.py --cacheblend` (or `python setup.py --cacheblend`).
-> This installs the project and optional CacheBlend dependencies into the current
-> Python environment, then builds the CUDA extensions. Use Python 3.12 or 3.13;
-> the shared stack uses Torch 2.13.0, Transformers 4.57.6 and xFormers 0.0.35.
-> Running it again checks the installation and skips a ready environment.
-> Use `--rebuild` after changing native CUDA/C++ sources. On older Linux x86-64
-> hosts, setup downloads GCC 12 build tools into `.cache/cacheblend`; you can
-> also supply `CC`, `CXX` and `CUDAHOSTCXX` yourself.
-> The bundled backend supports Llama/Mistral and dense Qwen3, with the private
-> package name `kvbench_cacheblend` to coexist with installed vLLM. The worker
-> uses the same Python as KVBench. No additional CacheBlend checkout is required.
-> `--python` selects an existing project interpreter for installation;
-> `Cacheblend.Python` optionally overrides the runtime worker interpreter.
-> The upgraded stack preserves the worker protocol and reuse metrics, but
-> floating-point differences can change recomputation selections and generated
-> text. Timings from the former Torch 2.2 environment need to be measured again.
-
-> KVPacket's core runtime is vendored in this repository and uses the shared
-> Python 3.12 or 3.13, Torch 2.13.0, Transformers 4.57.6 and PyYAML 6.0.3 environment.
-> Run `./setup.py --kvpacket` to check it offline; this does not install or
-> replace packages. Before running KVPacket, set `KVPacket.WrapperCheckpointPath`
-> to a trained wrapper checkpoint compatible with `ModelPath`. Random wrappers
-> are disabled by default; `AllowUntrainedWrapper: true` is for smoke tests only.
-> Legacy tensor-only wrappers also require `KVPacket.WrapperModelId` to equal the
-> exact runtime Hugging Face `config._name_or_path` value (Hub ID or local directory).
-> This is an explicit source assertion: legacy files contain no revision or weight
-> digest, so KVBench also checks tensor shapes but cannot prove the source weights.
-
-> A3Repo's [ragkv implementation](https://github.com/yczhounlp/ragkv) is bundled
-> under `methods/A3Repo`. Run `./setup.py --a3` to install its optional dependencies
-> in the project Python environment. The isolated worker supports Llama, Mistral,
-> Qwen2 and dense Qwen3; it defaults to the current interpreter, with an optional
-> `A3.Python` override. No external repository path or separate venv is required.
-> Prepared chunks must form a contiguous prompt prefix followed by a fresh query;
-> other prompts use full prefill. Decoding follows upstream's greedy policy.
-> The integrated Qwen3 bridge requires `head_dim == hidden_size / num_attention_heads`.
-
-> HypicMethod and LinearKVMethod are bundled under `methods/hypic`.
-> Run `./setup.py --hypic` to install their dependencies and build CUDA ops
-> in the project environment.
-
 3. Prepare datasets
 ```bash
 python scripts/PrepareDataset.py

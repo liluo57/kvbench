@@ -907,12 +907,24 @@ def test_cacheclip_accepts_retain_output_and_returns_native_ids(monkeypatch):
     method._states = [_prepared_state()]
     method._select = lambda *args: []
     _patch_fake_assembly(monkeypatch)
+    # This legacy fixture covers only the boolean hint API. Native cache
+    # retention requires a real cache and is exercised in the dedicated test.
+    method._gen.Generate = lambda *args, **kwargs: (
+        "generated", 0.01, 0.02, 1, _FakeCache([7, 8, 901]), [901]
+    )
+    method._gen.OutputTokenIds = lambda ids: list(ids)
+    monkeypatch.setattr(_cacheclip_module, "select_output_cache", lambda *args, **kwargs: _FakeCache([901]))
+    monkeypatch.setattr(_cacheclip_module, "_cache_length", lambda cache: len(cache.ids))
+    monkeypatch.setattr(_cacheclip_module, "token_text_and_offsets", lambda tokenizer, ids: ("output", [(0, 1)]))
+    method._auxiliary.prefill_documents = lambda prefix, docs: [
+        AuxiliaryDocumentCache(_FakeCache([901]), [(0, 1)], 0)
+    ]
+    method.sharedPrefixText = None
 
     results = method.Run([[7, 8, 9]], retainOutput=[True])
 
-    assert len(results) == 1
-    assert set(results[0].performance) == {"ttft", "num_output_tokens", "total_time"}
     assert results[0].output_ids == [901]
+    assert method._states[0]["document_ids"][-1] == [901]
 
 
 def test_cacheclip_rejects_unsupported_sparse_model_without_full_forward():

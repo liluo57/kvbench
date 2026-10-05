@@ -170,9 +170,17 @@ class _PicMethod(Method):
                     self._Warmup(chunk)
 
     def Run(self, data: list[list[int]], retainOutput=None, maxNewTokens=None) -> list[Result]:
-        maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(data) > 1:
             raise ValueError("HYPIC and LinearKV accept one case per cache lifecycle")
+        if retainOutput is not None and any(
+            bool(retainOutput[index])
+            for index in range(min(len(data), len(retainOutput)))
+        ):
+            raise NotImplementedError(
+                "HYPIC and LinearKV do not support native output KV retention; "
+                "output tokens cannot be retained by warmup or re-prefill"
+            )
+        maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
         if len(self._states) != len(data):
             self._states = [[] for _ in data]
         results = []
@@ -199,10 +207,6 @@ class _PicMethod(Method):
             result = Result(output=output, output_ids=outputIds, metadata=metadata,
                             performance={TtftKey: ttft, TotalTimeKey: total,
                                          NumOutputTokensKey: int(meta["completion_tokens"])})
-            if retainOutput and index < len(retainOutput) and retainOutput[index]:
-                if not self.fullPrefill and outputIds and outputIds not in prepared:
-                    self._Warmup(outputIds)
-                    prepared.append(list(outputIds))
             results.append(result)
         return results
 

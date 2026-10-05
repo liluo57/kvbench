@@ -273,11 +273,16 @@ class CacheblendLmcache(Method):
         then submitted to :meth:`_GenerateBatch` in one call so the V1 engine
         generates them concurrently.
         """
+        if retainOutput is not None and any(
+            bool(retainOutput[index])
+            for index in range(min(len(data), len(retainOutput)))
+        ):
+            raise NotImplementedError(
+                "CacheblendLmcache does not support native output KV retention; "
+                "the LMCache connector does not expose generated-output retention"
+            )
         runStart = time.perf_counter()
         maxNewTokens = ResolveMaxNewTokens(maxNewTokens)
-        # LMCache owns prefix-cache lifetime; generated-output retention is not
-        # currently exposed by the in-process connector.
-        _ = retainOutput
         tokenStreams: List[List[int]] = []
         metas: List[dict] = []
         for run_input, state in zip(data, self._states):

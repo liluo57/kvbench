@@ -841,20 +841,29 @@ class _DenseProphetRuntime:
     # ------------------------------------------------------------- generation
     def _sample(self, logits, history: Sequence[int], generator=None) -> int:
         torch = self.torch
-        if IsGreedy(self.sampling_config):
-            return int(torch.argmax(logits).item())
-        temperature = float(self.sampling_config.get("temperature", 1.0))
-        scores = logits.float().clone()
+        greedy = IsGreedy(self.sampling_config)
+        canonical_greedy = self.sampling_config.get("mode") == "greedy"
         presence = float(self.sampling_config.get("presence_penalty", 0.0))
         frequency = float(self.sampling_config.get("frequency_penalty", 0.0))
+        penalty = float(self.sampling_config.get("repetition_penalty", 1.0))
+        has_penalties = not canonical_greedy and (
+            presence != 0.0 or frequency != 0.0 or penalty != 1.0
+        )
+        # Keep the common greedy case O(1) in prompt length.  A deterministic
+        # default/override with history penalties still adjusts logits first.
+        if greedy and not has_penalties:
+            return int(torch.argmax(logits).item())
+        scores = logits.float().clone()
         if presence or frequency:
             for token, count in Counter(history).items():
                 scores[token] -= presence + frequency * count
-        penalty = float(self.sampling_config.get("repetition_penalty", 1.0))
         if penalty != 1.0 and history:
             seen = torch.tensor(list(set(history)), dtype=torch.long, device=scores.device)
             selected = scores[seen]
             scores[seen] = torch.where(selected < 0, selected * penalty, selected / penalty)
+        if greedy:
+            return int(torch.argmax(scores).item())
+        temperature = float(self.sampling_config.get("temperature", 1.0))
         scores = scores / max(temperature, 1e-6)
         top_k = int(self.sampling_config.get("top_k", -1))
         if top_k > 0 and top_k < scores.numel():
@@ -893,7 +902,9 @@ class _DenseProphetRuntime:
             return int(torch.argmax(scores).item())
         return int(torch.multinomial(probs, 1, generator=generator).item())
 
-    def decode_from_cache(self, layers_cache, last_hidden_logits, history: List[int]):
+    def decode_from_cache(
+        self, layers_cache, last_hidden_logits, history: List[int], *, return_cache=False
+    ):
         """Decode after partial recomputation using the assembled layer cache."""
         torch = self.torch
         generated: List[int] = []
@@ -960,15 +971,28 @@ class _DenseProphetRuntime:
             layers_cache = new_layers
             logits = self.lm_head(self.final_norm(hidden))[0, -1]
         output_fragment = OutputFragmentIds(generated, self.eos_ids)
-        return (
+        result = (
             self.decode(generated),
             float(ttft or 0.0),
             time.perf_counter() - t0,
             len(generated),
             output_fragment,
         )
+        if return_cache:
+            # The prompt cache precedes generated tokens.  The final sampled
+            # token can be EOS and is intentionally absent from the cache;
+            # output_fragment is the authority for the retained slice.
+            start = len(history) - len(generated)
+            length = len(output_fragment)
+            output_cache = [
+                (key[:, :, start : start + length].detach().clone(),
+                 value[:, :, start : start + length].detach().clone())
+                for key, value in layers_cache
+            ]
+            return (*result, output_cache)
+        return result
 
-    def full_generate(self, ids: Sequence[int]):
+    def full_generate(self, ids: Sequence[int], *, return_cache=False):
         """Reference full-prefill path used when reuse cannot be established."""
         if not ids:
             return "", 0.0, 0.0, 0, []
@@ -995,16 +1019,23 @@ class _DenseProphetRuntime:
             [],
         )
         prefill_ttft = time.perf_counter() - full_start
-        text, decode_ttft, _, n_tokens, output_ids = self.decode_from_cache(
-            cache, logits, list(context_ids)
+        decoded = (
+            self.decode_from_cache(cache, logits, list(context_ids), return_cache=True)
+            if return_cache
+            else self.decode_from_cache(cache, logits, list(context_ids))
         )
-        return (
+        text, decode_ttft, _, n_tokens, output_ids = decoded[:5]
+        output_cache = decoded[5] if return_cache else None
+        result = (
             text,
             prefill_ttft + decode_ttft,
             time.perf_counter() - full_start,
             n_tokens,
             output_ids,
         )
+        if return_cache:
+            return (*result, output_cache)
+        return result
 
 
 class ProphetKV(Method):
@@ -1102,6 +1133,11 @@ class ProphetKV(Method):
         # work and are all measured from the Run boundary above.
         for index, prompt in enumerate(data):
             prompt_ids = list(prompt)
+            retain = bool(
+                retainOutput is not None
+                and index < len(retainOutput)
+                and retainOutput[index]
+            )
             self._runtime.max_new_tokens = min(budget, self.maxModelLen - len(prompt_ids))
             state = self._states[index]
             t_match = time.perf_counter()
@@ -1120,7 +1156,13 @@ class ProphetKV(Method):
                 t0 = time.perf_counter()
                 ids = prompt_ids
                 generation_start = time.perf_counter()
-                text, backend_ttft, _, n_tokens, output_ids = self._runtime.full_generate(ids)
+                generated = (
+                    self._runtime.full_generate(ids, return_cache=True)
+                    if retain else self._runtime.full_generate(ids)
+                )
+                text, backend_ttft, _, n_tokens, output_ids = generated[:5]
+                if retain and output_ids:
+                    self._retain_output(state, output_ids, generated[5])
                 ttft = generation_start - request_start + backend_ttft
                 results.append(
                     self._result(
@@ -1203,7 +1245,7 @@ class ProphetKV(Method):
 
             if not query_ids:
                 results.append(
-                    self._fallback(prompt, "empty_query_span", request_start)
+                    self._fallback(prompt, "empty_query_span", request_start, state, retain)
                 )
                 continue
 
@@ -1219,7 +1261,7 @@ class ProphetKV(Method):
                     flush=True,
                 )
             if not cached_ids:
-                results.append(self._fallback(prompt, "length_limit", request_start))
+                results.append(self._fallback(prompt, "length_limit", request_start, state, retain))
                 continue
             for layer_index in range(len(self._runtime.layers)):
                 context_k_layers.append(
@@ -1276,10 +1318,14 @@ class ProphetKV(Method):
             recompute_only_time = time.perf_counter() - t_recompute
             history = list(full_ids)
             t_decode = time.perf_counter()
-            text, decode_ttft, _, n_tokens, output_ids = self._runtime.decode_from_cache(
-                updated, logits, history
+            decoded = (
+                self._runtime.decode_from_cache(updated, logits, history, return_cache=True)
+                if retain else self._runtime.decode_from_cache(updated, logits, history)
             )
+            text, decode_ttft, _, n_tokens, output_ids = decoded[:5]
             decode_wall_time = time.perf_counter() - t_decode
+            if retain and output_ids:
+                self._retain_output(state, output_ids, decoded[5])
             recompute_time = time.perf_counter() - t_recompute
             if self.debug:
                 print(
@@ -1324,7 +1370,8 @@ class ProphetKV(Method):
         return results
 
     def _fallback(
-        self, prompt: List[int], reason: str, request_start: Optional[float] = None
+        self, prompt: List[int], reason: str, request_start: Optional[float] = None,
+        state: Optional[_CaseState] = None, retain: bool = False,
     ) -> Result:
         if self._runtime is None:
             raise RuntimeError("ProphetKV.Initialize must run before fallback")
@@ -1332,7 +1379,13 @@ class ProphetKV(Method):
             request_start = time.perf_counter()
         ids = list(prompt)
         generation_start = time.perf_counter()
-        text, backend_ttft, _, n_tokens, output_ids = self._runtime.full_generate(ids)
+        generated = (
+            self._runtime.full_generate(ids, return_cache=True)
+            if retain else self._runtime.full_generate(ids)
+        )
+        text, backend_ttft, _, n_tokens, output_ids = generated[:5]
+        if retain and output_ids and state is not None:
+            self._retain_output(state, output_ids, generated[5])
         ttft = generation_start - request_start + backend_ttft
         return self._result(
             text,
@@ -1353,6 +1406,17 @@ class ProphetKV(Method):
             },
             outputIds=output_ids,
         )
+
+    def _retain_output(self, state: _CaseState, output_ids, layers) -> None:
+        ids = list(output_ids)
+        if ids:
+            if not layers or any(
+                key.shape[-2] != len(ids) or value.shape[-2] != len(ids)
+                for key, value in layers
+            ):
+                raise AssertionError("native output KV length differs from retained token IDs")
+            state.chunks.append(ids)
+            state.caches.append(_ChunkCache(ids=ids, layers=layers))
 
     def _result(self, text, ttft, total, n_tokens, metadata, outputIds=None) -> Result:
         return Result(

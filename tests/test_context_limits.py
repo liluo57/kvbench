@@ -81,7 +81,7 @@ def test_recompute_bounds_each_prompt_independently_and_retains_only_reusable_ca
     if cls is FullRecomputeTransformer:
         assert method._states == [[], []]
     else:
-        assert [state[-1].cache.seq_len for state in method._states] == [5, 5]
+        assert [state[-1].cache.seq_len for state in method._states] == [2, 1]
     with pytest.raises(ValueError, match="MaxModelLen=5"):
         method.Run([[2] * 5])
 
@@ -99,6 +99,7 @@ def test_a3_worker_bounds_decode_and_rejects_overlong_collection(context_limit, 
 
     monkeypatch.setattr(utils, "decode", decode)
     worker = object.__new__(A3Worker)
+    worker.sampling_config = {"mode": "greedy", "do_sample": False, "temperature": 0.0}
     worker.args = SimpleNamespace(max_model_len=5, max_new_tokens=8)
     worker._sampling_args = lambda: SimpleNamespace()
     worker.torch = SimpleNamespace(

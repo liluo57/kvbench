@@ -40,6 +40,7 @@ from ..runtime import (
 from ..runtime.matching import Match, string_cover
 from .sample import TrainingSample
 from .store import PacketStore
+from helpers.backends.Tokenization import OutputFragmentIds
 
 __all__ = [
     "Mode",
@@ -106,6 +107,7 @@ class GenerationResult:
     ttft: float = 0.0
     cover: list[Match] = field(default_factory=list)
     prompt_logits: Tensor | None = None
+    output_cache: KVCache | None = None
 
     @property
     def matched_chunk_ids(self) -> list[str]:
@@ -429,6 +431,7 @@ class PacketSession:
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
         seed: int | None = None,
+        return_output_cache: bool = False,
     ) -> GenerationResult:
         """Commit pending content and generate a continuation.
 
@@ -457,6 +460,7 @@ class PacketSession:
             presence_penalty: Additive penalty for tokens present in prompt/history.
             frequency_penalty: Additive penalty scaled by history token counts.
             seed: Optional seed reset for each generation request.
+            return_output_cache: Whether to return the generated native KV suffix.
 
         Returns:
             Generated tokens, decoded text, matches, and serving diagnostics.
@@ -560,6 +564,13 @@ class PacketSession:
             self._record_sample(generated_start, len(gen_ids), gen_logits)
 
         text = self._decode_text(gen_ids)
+        output_cache = None
+        if return_output_cache:
+            output_ids = self._output_fragment_ids(gen_ids, eos)
+            output_cache = self.extract_output_cache(
+                output_ids,
+                trailing_tokens=len(gen_ids) - len(output_ids),
+            )
         return GenerationResult(
             token_ids=gen_ids,
             text=text,
@@ -568,7 +579,62 @@ class PacketSession:
             ttft=ttft,
             cover=cover,
             prompt_logits=prompt_logits,
+            output_cache=output_cache,
         )
+
+    def _output_fragment_ids(self, token_ids: list[int], eos: set[int]) -> list[int]:
+        """Remove only terminal stop IDs, keeping interior native IDs intact."""
+        return OutputFragmentIds(token_ids, eos)
+
+    def extract_output_cache(
+        self, output_ids: list[int], *, trailing_tokens: int = 0
+    ) -> KVCache | None:
+        """Return the completed generated KV suffix as an unwrapped local cache.
+
+        Decode appends one physical KV row per generated token, even when the prompt
+        prefix contains compressed packets. Therefore the generated rows are selected
+        from the physical tail, while their source positions come from the session's
+        logical offset. Terminal stop rows may be omitted with ``trailing_tokens``.
+        """
+        if not output_ids:
+            return None
+        if (
+            isinstance(trailing_tokens, bool)
+            or not isinstance(trailing_tokens, int)
+            or trailing_tokens < 0
+        ):
+            raise ValueError("trailing_tokens must be a non-negative integer")
+        cache = self._cache
+        if cache is None:
+            raise RuntimeError("no generated cache is available")
+        if len(output_ids) + trailing_tokens > cache.seq_len:
+            raise ValueError("generated output length exceeds the committed cache suffix")
+        end = cache.seq_len - trailing_tokens
+        start = end - len(output_ids)
+        logical_start = self._offset - trailing_tokens - len(output_ids)
+        if start < 0 or end > cache.seq_len or logical_start < 0:
+            raise ValueError("generated output is not present in the committed cache")
+        layers = []
+        for layer in cache.layers:
+            key = layer.key[:, :, start:end, :].clone()
+            value = layer.value[:, :, start:end, :].clone()
+            if key.shape[2] != len(output_ids) or value.shape[2] != len(output_ids):
+                raise ValueError("generated output KV slice is incomplete")
+            positions = torch.arange(
+                logical_start,
+                logical_start + len(output_ids),
+                dtype=layer.logical_positions.dtype,
+                device=layer.logical_positions.device,
+            ).unsqueeze(0)
+            layers.append(
+                type(layer)(
+                    key,
+                    value,
+                    positions,
+                )
+            )
+        suffix = KVCache(layers)
+        return self.backend.shift_cache(suffix, -logical_start)
 
     @torch.no_grad()
     def score_continuation(self, token_ids: list[int]) -> ContinuationScore:

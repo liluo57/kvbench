@@ -371,10 +371,9 @@ class KVPacket(Method):
     ) -> List[Result]:
         """Serve complete prompts through independent packet sessions.
 
-        ``retainOutput`` is an optional hint and is not implemented here.
-        Native output IDs are returned for later workflow prompts, but their
-        generated KV is not registered as a prepared packet. Later requests
-        prefill those output IDs as fresh spans; only prepared packets reuse KV.
+        When ``retainOutput`` is true, the generated native output IDs and their
+        completed, unwrapped KV are registered as a reusable packet for later
+        workflow prompts. Terminal stop IDs are excluded from both the IDs and KV.
         """
 
         assert self._backend is not None and self._tokenizer is not None
@@ -446,7 +445,26 @@ class KVPacket(Method):
                 tokenizer=None,
             )
             if state.store.ids():
-                session.register_store_chunks()
+                # The same native IDs may also exist as prepared, wrapped packets.
+                # Prefer their explicitly unwrapped native output packet so matching
+                # never aliases generated KV to a different wrapper source.
+                native_sequences = {
+                    tuple(packet.token_ids)
+                    for chunk_id in state.store.ids()
+                    for packet in [state.store.get(chunk_id)]
+                    if packet.identity.wrapper_id == "native_output"
+                    and packet.token_ids is not None
+                }
+                packet_ids = [
+                    chunk_id
+                    for chunk_id in state.store.ids()
+                    if (
+                        state.store.get(chunk_id).identity.wrapper_id == "native_output"
+                        or tuple(state.store.get(chunk_id).token_ids or ())
+                        not in native_sequences
+                    )
+                ]
+                session.register_store_chunks(packet_ids)
             input_ids = [int(token) for token in prompt]
             session.push(input_ids)
             cover = session.preview_matches()
@@ -462,9 +480,15 @@ class KVPacket(Method):
             )
             if logical_length >= MaxModelLen():
                 raise ValueError(f"Wrapped KVPacket prompt must leave room for generation within MaxModelLen={MaxModelLen()}")
+            retain = (
+                retainOutput is not None
+                and len(results) < len(retainOutput)
+                and bool(retainOutput[len(results)])
+            )
             generated = session.generate(
                 max_new_tokens=min(generation_limit, MaxModelLen() - logical_length),
                 started_at=request_started,
+                return_output_cache=retain,
                 **sampling_kwargs,
             )
             if self._backend.device.type == "cuda":
@@ -484,6 +508,66 @@ class KVPacket(Method):
                 generated.token_ids,
                 self._terminalStopIds,
             )
+            if retain and output_ids:
+                from .backend.kvpacket.fingerprint import (
+                    fingerprint_bytes,
+                    fingerprint_json,
+                    fingerprint_tensor,
+                )
+                from .backend.kvpacket.session.store import PacketIdentity, StoredPacket
+
+                output_cache = generated.output_cache
+                if output_cache is None:
+                    raise RuntimeError("KVPacket did not return requested generated output KV")
+                token_bytes = b"".join(
+                    int(token).to_bytes(8, "little", signed=True)
+                    for token in output_ids
+                )
+                digest = hashlib.sha256(token_bytes).hexdigest()
+                source_id = f"native_output_{digest}"
+                collision = 0
+                while (
+                    source_id in state.store
+                    and state.store.get(source_id).identity.wrapper_id != "native_output"
+                ):
+                    collision += 1
+                    source_id = f"native_output_{digest}_{collision}"
+                token_tensor = self._torch.tensor(
+                    [output_ids], dtype=self._torch.long, device=self._backend.device
+                )
+                with self._torch.no_grad():
+                    encoded = self._backend.embed(token_tensor)
+                identity = PacketIdentity(
+                    source_id=source_id,
+                    source_kind="native_token_ids",
+                    source_content_fingerprint=fingerprint_bytes(
+                        token_bytes, domain="kvpacket.source_content/1"
+                    ),
+                    backend_compatibility_fingerprint=self._backend.compatibility.fingerprint,
+                    wrapper_id="native_output",
+                    wrapper_fingerprint=fingerprint_json(
+                        {"kind": "native_output", "wrapper": None},
+                        domain="kvpacket.wrapper/1",
+                    ),
+                    encoded_input_fingerprint=fingerprint_tensor(encoded),
+                )
+                native_packet = StoredPacket(
+                    chunk_id=source_id,
+                    token_ids=list(output_ids),
+                    match_text=None,
+                    packet=output_cache,
+                    body_len=len(output_ids),
+                    wrapped_len=len(output_ids),
+                    identity=identity,
+                )
+                existing = (
+                    state.store.get(source_id) if source_id in state.store else None
+                )
+                if existing is None or existing.identity.wrapper_id == "native_output":
+                    state.store.put(
+                        native_packet,
+                        replace=existing is not None,
+                    )
             results.append(
                 Result(
                     output=self._tokenizer.decode(

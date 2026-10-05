@@ -287,14 +287,18 @@ class A3Repo(Method):
                 response = self._request({"op": "full", "input_ids": prompt,
                                           "retain_output": retain, "max_new_tokens": budget})
                 full = True
-            results.append(
-                self._result(
-                    response,
-                    full=full,
-                    prompt_variant=variant,
-                    onlineStart=runStart,
-                )
+            result = self._result(
+                response,
+                full=full,
+                prompt_variant=variant,
+                onlineStart=runStart,
             )
+            results.append(result)
+            if retain and result.output_ids:
+                # The worker registers this exact native output fragment as a
+                # reusable chunk; mirror it in prompt composition so later
+                # calls can address the same chunk by its authoritative IDs.
+                chunks.append(list(result.output_ids))
         return results
 
     def _result(

@@ -154,9 +154,12 @@ class Method(ABC):
         ``data[i]`` is the complete prompt token sequence for RUN action ``i``.
         It is assembled from independently tokenized reusable and fresh text
         pieces by the owning Task.
-        ``retainOutput[i]`` is a future-reuse/lifetime hint for that generated
-        output; methods may preserve backend-specific reusable state or ignore
-        it. Returns a list of :class:`Result` objects in input order.
+        ``retainOutput[i]`` requests preservation of the native generated KV
+        matching ``Result.output_ids`` for later reuse. Re-prefilling those
+        output IDs does not implement retention. Full-recompute/analysis
+        baselines intentionally ignore this flag; other unsupported methods
+        reject it explicitly. Missing flags default to false. Returns a list
+        of :class:`Result` objects in input order.
 
         ``maxNewTokens`` is supplied by the owning Task. It is optional only
         for direct/backwards-compatible Method calls outside the Engine.

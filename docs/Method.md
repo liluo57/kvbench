@@ -22,6 +22,22 @@ Each `Result` returned by `Run` should contain decoded generated `output` and ti
 
 Model initialization and reusable state built in `Prepare` are excluded from TTFT. Per-request method metrics belong in `Result.metadata`; keys declared in the class attribute `method_metrics` are aggregated by the Engine into the report's `method_metrics` section.
 
+`retainOutput[i]=True` requests the native generated KV matching
+`Result.output_ids` as reusable state. Running a separate warmup/prefill on
+the generated output does not satisfy this contract. Missing flags default to
+false. Completing the final sampled token's missing KV row is part of the
+original generation; completion, copying and registration count toward
+`total_time`, after first-token latency has already been recorded. An empty
+output fragment creates no retained chunk.
+
+| Methods | `retainOutput=True` behavior |
+| --- | --- |
+| `NaiveTransformer`, `NaiveCacheblendRepo`, `CacheblendRepo`, `KVCommTransformer` | Preserve native output KV. |
+| `EPIC`, `RandRecomputeTransformer`, `A3Repo`, `ProphetKV`, `CacheClip`, `KVPacket` | Preserve native output KV as a reusable output chunk, subject to each method's existing matching and model restrictions. |
+| `HypicMethod`, `LinearKVMethod`, `CacheblendLmcache` | Raise `NotImplementedError` before generation; native output retention requires backend changes. |
+| `FullPrefillTransformer`, `FullPrefillVllm`, `FullRecomputeTransformer`, `DependencyAnalysisMethod` | Ignore the flag and keep baseline behavior without an error. |
+| `RolloutMethod` | Forward the flag to the base method for the final returned rollout only. |
+
 `reuse_ratio` is cache-hit coverage: the number of canonical input token
 positions matched to cached state divided by `n_input`, the complete RUN
 prompt length. Count each matched occurrence, including repeated chunks.
@@ -115,12 +131,11 @@ HF execution and selective-recompute implementation in
 classes alongside `KVPacket`; EPIC lives in `methods/EPIC.py` and imports only
 the shared backend. These methods accept the Task's authoritative token IDs,
 including reordered/repeated chunks and fresh spans between cached chunks.
-Prepared caches are immutable. Methods that implement the optional
-`retainOutput` hint preserve native output IDs and their matching KV for later
-turns. KVPacket returns native `output_ids` but does not retain generated KV:
-only prepared packets are reused, and earlier outputs in later prompts are
-prefilled as fresh spans. TTFT includes matching, cache alignment, repair, fresh rows,
-and first-token selection; GPU precompute finishes before Prepare returns.
+Prepared caches are immutable. EPIC and Rand retain only the output rows,
+normalized to local positions for later relocation. KVPacket registers native
+outputs as unwrapped packets, separate from prepared wrapper packets. TTFT
+includes matching, cache alignment, repair, fresh rows and first-token
+selection; GPU precompute finishes before Prepare returns.
 
 EPIC's `recomputeTokens` (default 32) repairs the first tokens of each cached
 chunk except a chunk already at prompt position zero. Rand's `recomputeRatio`
@@ -134,7 +149,13 @@ EPIC follows the baseline LegoLink policy and is not the authors' vLLM serving
 system. Sources and adaptations are recorded in the shared backend's UPSTREAM.
 
 A3Repo includes the upstream ragkv causal-LM precompute, attention selection,
-selective recomputation, KV fusion and greedy decoding code in `methods/A3Repo`.
+selective recomputation and KV fusion in `methods/A3Repo`. Its decode and
+matched vanilla paths use the shared `ModelConfig` sampling policy: greedy or
+sampled selection, temperature, top-p/top-k/min-p/typical-p, repetition,
+presence and frequency penalties, request seed, and EOS override. Penalties
+use the complete prompt and generated-token history. EOS overrides replace
+the model EOS; ragkv's BOS termination convention remains active. Unsupported
+resolved sampling fields are rejected explicitly.
 Run `./setup.py --a3` for the optional dependencies; its worker shares project
 Python, with an optional `A3.Python` override. No external checkout is used.
 Llama, Mistral, Qwen2 and dense Qwen3 are supported. The integrated Qwen3
@@ -147,6 +168,13 @@ budgets are sent per request. The pinned source commit, retained files and
 adaptations are recorded in `methods/A3Repo/UPSTREAM`.
 Prepare finishes queued CUDA work before returning, and TTFT is recorded
 after the first generated token can be read.
+A3 output retention completes the final token's KV and converts native
+RoPE-encoded keys back to the pre-RoPE format used by its chunk store, without
+output prefill. It supports static, invertible RoPE and retains the same
+contiguous-prefix matching restriction. ProphetKV stores its generated raw
+K/V rows directly. CacheClip keeps native primary-model output KV and builds
+the CPU auxiliary selector view for that chunk; this auxiliary work counts
+toward `total_time`.
 
 HYPIC and LinearKV share the project environment. Run `./setup.py --hypic` to
 prepare their dependencies and compile the bundled CUDA ops against the active
@@ -163,6 +191,6 @@ paper-based LinearKV implementation and static per-chunk prefix selector;
 its recurrent replay currently supports Qwen3.5/Qwen3.8 GDN models. Both accept
 `fullPrefill=True` for the same-backend no-PIC control, which keeps ordinary
 prefix caching enabled. Each case owns an isolated prepare/run/reset lifecycle.
-The Task's input IDs pass through unchanged. Retained outputs are registered
-from authoritative generated IDs with terminal stop IDs removed, outside
-online TTFT/total time.
+The Task's input IDs pass through unchanged. Both reject `retainOutput=True`,
+including with `fullPrefill=True`: their backend releases generated decode
+state, and warming up the output again would not preserve native output KV.

@@ -208,6 +208,17 @@ def IsGreedy(samplingConfig: Optional[Mapping[str, Any]]) -> bool:
     )
 
 
+def _EffectivePenalties(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return only history penalties that can affect selected logits."""
+    result: Dict[str, Any] = {}
+    if config.get("repetition_penalty", 1.0) != 1.0:
+        result["repetition_penalty"] = config["repetition_penalty"]
+    for key in ("presence_penalty", "frequency_penalty"):
+        if config.get(key, 0.0) != 0.0:
+            result[key] = config[key]
+    return result
+
+
 def VllmSamplingParams(
     samplingConfig: Optional[Mapping[str, Any]], maxTokens: int
 ) -> Dict[str, Any]:
@@ -215,7 +226,10 @@ def VllmSamplingParams(
     if samplingConfig and samplingConfig.get("eos_token_id") is not None and samplingConfig.get("mode") != "default":
         raise ValueError("vLLM does not support ModelConfig.eos_token_id replacement; use the model's default EOS")
     if IsGreedy(samplingConfig):
-        return {"temperature": 0, "max_tokens": maxTokens}
+        result = {"temperature": 0, "max_tokens": maxTokens}
+        if samplingConfig and samplingConfig.get("mode") != "greedy":
+            result.update(_EffectivePenalties(samplingConfig))
+        return result
 
     config = samplingConfig or {}
     result: Dict[str, Any] = {"max_tokens": maxTokens}
@@ -241,7 +255,10 @@ def SglangSamplingParams(
     if samplingConfig and samplingConfig.get("eos_token_id") is not None and samplingConfig.get("mode") != "default":
         raise ValueError("SGLang does not support ModelConfig.eos_token_id replacement; use the model's default EOS")
     if IsGreedy(samplingConfig):
-        return {"temperature": 0, "max_new_tokens": maxNewTokens}
+        result = {"temperature": 0, "max_new_tokens": maxNewTokens}
+        if samplingConfig and samplingConfig.get("mode") != "greedy":
+            result.update(_EffectivePenalties(samplingConfig))
+        return result
 
     config = samplingConfig or {}
     result: Dict[str, Any] = {"max_new_tokens": maxNewTokens}
@@ -280,6 +297,10 @@ def TransformersGenerationKwargs(
         ):
             if key in config:
                 result[key] = config[key]
+    elif config.get("mode") != "greedy":
+        repetition_penalty = _EffectivePenalties(config).get("repetition_penalty")
+        if repetition_penalty is not None:
+            result["repetition_penalty"] = repetition_penalty
     if "eos_token_id" in config:
         result["eos_token_id"] = config["eos_token_id"]
     return result

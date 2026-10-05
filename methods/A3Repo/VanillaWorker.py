@@ -90,6 +90,14 @@ class OfficialVanillaWorker:
             rate=0.0,
         )
 
+    def _sampling_policy(self):
+        from .backend.utils import resolve_sampling_policy
+        return resolve_sampling_policy(self.sampling_config, label="A3 vanilla")
+
+    def _stop_ids(self):
+        from .backend.utils import sampling_stop_ids
+        return sampling_stop_ids(self.tokenizer, self.sampling_config)
+
     def run(self, text: str, input_ids=None) -> dict:
         from .backend.utils import vanilla
 
@@ -97,16 +105,13 @@ class OfficialVanillaWorker:
         ids = list(input_ids) if input_ids is not None else self._encode(text)
         if not ids:
             raise ValueError("empty prompt")
+        sampling = self._sampling_policy()
         input_state = {
             "input_ids": self.torch.tensor([ids], device="cuda", dtype=self.torch.long),
             "past_key_values": None,
             "position_ids": self.torch.arange(len(ids), device="cuda").unsqueeze(0),
         }
-        stop = [
-            token_id
-            for token_id in (self.tokenizer.eos_token_id, self.tokenizer.bos_token_id)
-            if token_id is not None
-        ]
+        stop = self._stop_ids()
         generationStart = time.perf_counter()
         # vanilla() prints the decoded sequence.  Keep stdout machine-readable
         # and retain the diagnostic in the worker's stderr instead.
@@ -121,6 +126,7 @@ class OfficialVanillaWorker:
                 self.args.max_new_tokens,
                 self._full_config(),
                 return_token_ids=True,
+                sampling=sampling,
             )
         onlineOffset = generationStart - onlineStart
         ttft = onlineOffset + float(ttft)

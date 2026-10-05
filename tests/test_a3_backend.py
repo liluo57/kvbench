@@ -312,3 +312,87 @@ def test_a3_total_time_includes_adapter_ipc_and_worker_preparation(monkeypatch):
                             full=False, onlineStart=10.0)
     assert result.performance["ttft"] == pytest.approx(1.1)
     assert result.performance["total_time"] == pytest.approx(2.0)
+
+
+def test_a3_resolved_sampling_runs_through_decode_with_history_seed_and_eos(monkeypatch):
+    from methods.A3Repo.Worker import A3Worker
+    from methods.A3Repo.backend import utils
+
+    worker = A3Worker.__new__(A3Worker)
+    worker.tokenizer = SimpleNamespace(eos_token_id=8, bos_token_id=9)
+    worker.sampling_config = {
+        "mode": "override", "do_sample": False, "temperature": 0.0,
+        "top_p": 1.0, "top_k": 0, "min_p": 0.0, "typical_p": 1.0,
+        "repetition_penalty": 2.0, "presence_penalty": 0.0,
+        "frequency_penalty": 0.0, "seed": 17, "eos_token_id": 3,
+    }
+    policy = worker._sampling_policy()
+    assert policy.do_sample is False and policy.repetition_penalty == 2.0
+
+    seen = []
+    seen_positions = []
+    class Model:
+        def __call__(self, **kwargs):
+            seen.append(kwargs["input_ids"].tolist())
+            seen_positions.append(kwargs["position_ids"].tolist())
+            # Prompt includes token 1, so repetition penalty changes the
+            # greedy choice from token 1 to token 2. Token 3 terminates next.
+            logits = torch.tensor([[[0., 10., 8., 0.]]]) if len(seen) == 1 else torch.tensor([[[0., 0., 10., 8.]]])
+            return SimpleNamespace(logits=logits, past_key_values=None)
+
+    state = {"input_ids": torch.tensor([[1]]), "position_ids": torch.tensor([[0]]),
+             "past_key_values": None}
+    monkeypatch.setattr(utils.time, "time", lambda: 5.0)
+    text, _, _, raw_ids = utils.decode(
+        None, Model(), SimpleNamespace(decode=lambda ids, **kw: str(ids)), state,
+        worker._stop_ids(), 5,
+        {"reuse_config": None, "other_config": {"decode": False}},
+        return_token_ids=True, sampling=policy,
+    )
+    assert raw_ids == [2, 3]
+    assert text == "[2]"
+    assert seen_positions == [[[0]], [[1]]]
+    assert worker._stop_ids() == [3, 9]
+    worker.sampling_config["eos_token_id"] = []
+    assert worker._stop_ids() == [9]
+    assert utils.time.time() == 5.0
+
+
+def test_a3_rejects_unresolved_sampling_fields():
+    from methods.A3Repo.Worker import A3Worker
+    worker = A3Worker.__new__(A3Worker)
+    worker.sampling_config = {"mode": "override", "beam_width": 4}
+    with pytest.raises(ValueError, match="beam_width"):
+        worker._sampling_policy()
+
+
+def test_a3_seeded_sampling_generator_is_request_local_and_advances_across_steps(monkeypatch):
+    from methods.A3Repo.backend import utils
+    from helpers.backends.CacheBackend.Sampling import SamplingConfig
+
+    original = utils.select_next_token
+    generators = []
+    def record(logits, sampling, history=(), generator=None):
+        generators.append(generator)
+        return original(logits, sampling, history, generator)
+    monkeypatch.setattr(utils, "select_next_token", record)
+    class Model:
+        def __call__(self, **kwargs):
+            return SimpleNamespace(logits=torch.zeros((1, 1, 16)), past_key_values=None)
+    def run():
+        state = {"input_ids": torch.tensor([[1, 2]]), "position_ids": torch.tensor([[0, 1]]),
+                 "past_key_values": None}
+        return utils.decode(None, Model(), SimpleNamespace(decode=lambda ids, **kw: ""), state,
+            [], 4, {"reuse_config": None, "other_config": {}}, return_token_ids=True,
+            sampling=SamplingConfig(do_sample=True, seed=4321))[3]
+    first = run()
+    first_generators = generators[:]
+    generators.clear()
+    second = run()
+    assert first == second
+    expected_generator = torch.Generator().manual_seed(4321)
+    expected = [int(torch.multinomial(torch.full((16,), 1 / 16), 1,
+                                      generator=expected_generator)) for _ in range(4)]
+    assert first == expected
+    assert len(first_generators) == 4 and len(set(map(id, first_generators))) == 1
+    assert first_generators[0] is not generators[0]

@@ -167,6 +167,33 @@ def test_prophet_sampling_matches_transformers_policy(extra, monkeypatch):
     torch.testing.assert_close(probabilities[0], probabilities[1])
 
 
+@pytest.mark.parametrize("penalty", [
+    {"repetition_penalty": 2.0},
+    {"presence_penalty": 3.0},
+    {"frequency_penalty": 3.0},
+])
+def test_prophet_deterministic_override_applies_history_penalties(penalty):
+    runtime = object.__new__(_DenseProphetRuntime)
+    runtime.torch = torch
+    runtime.sampling_config = {
+        "mode": "override", "do_sample": False, "temperature": 0.0, **penalty,
+    }
+    logits = torch.tensor([10.0, 8.0])
+    original = logits.clone()
+    assert runtime._sample(logits, [0]) == 1
+    torch.testing.assert_close(logits, original)
+
+
+def test_prophet_canonical_greedy_ignores_raw_penalties():
+    runtime = object.__new__(_DenseProphetRuntime)
+    runtime.torch = torch
+    runtime.sampling_config = {
+        "mode": "greedy", "do_sample": False, "temperature": 0.0,
+        "repetition_penalty": 2.0, "presence_penalty": 100.0,
+    }
+    assert runtime._sample(torch.tensor([10.0, 8.0]), [0]) == 0
+
+
 def test_prophet_seed_is_reset_per_request_without_changing_global_rng():
     runtime = object.__new__(_DenseProphetRuntime)
     runtime.torch = torch

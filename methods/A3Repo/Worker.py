@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import sys
 import time
@@ -175,9 +176,8 @@ class A3Worker:
         return {"ok": True, "n_chunks": len(self.chunk_kv)}
 
     def _sampling_args(self):
-        # Official ragkv's decode helper only reads max token count and does
-        # greedy argmax decoding itself.  Keep this namespace compatible with
-        # its utils.decode/decode_step functions.
+        # Keep this namespace compatible with ragkv's decode argument surface;
+        # KVBench supplies the resolved policy through decode's optional hook.
         return SimpleNamespace(
             model=self.args.model,
             reuse=self.args.reuse_method,
@@ -186,7 +186,15 @@ class A3Worker:
             rate=self.args.recomp_ratio,
         )
 
-    def _decode(self, ids, config, max_new_tokens=None):
+    def _sampling_policy(self):
+        from .backend.utils import resolve_sampling_policy
+        return resolve_sampling_policy(self.sampling_config)
+
+    def _stop_ids(self):
+        from .backend.utils import sampling_stop_ids
+        return sampling_stop_ids(self.tokenizer, self.sampling_config)
+
+    def _decode(self, ids, config, max_new_tokens=None, retain_output=False):
         from .backend.utils import decode
         from helpers.backends.Tokenization import OutputFragmentIds
 
@@ -194,18 +202,28 @@ class A3Worker:
             raise ValueError("empty prompt")
         if len(ids) >= self.args.max_model_len:
             raise ValueError(f"A3 prompt must leave room for generation within max_model_len={self.args.max_model_len}")
+        if retain_output:
+            for index, layer in enumerate(self.model.model.layers):
+                rotary = getattr(layer.self_attn, "rotary_emb", None)
+                rope_type = str(getattr(rotary, "rope_type", "default")).lower()
+                if rotary is None or "dynamic" in rope_type:
+                    raise RuntimeError(
+                        f"retain_output requires static invertible RoPE; layer {index} uses {rope_type!r}"
+                    )
         budget = min(
             self.args.max_new_tokens if max_new_tokens is None else max_new_tokens,
             self.args.max_model_len - len(ids),
         )
         decodeCallStart = time.perf_counter()
         args = self._sampling_args()
+        sampling = self._sampling_policy()
+        device = getattr(self.model, "device", "cuda")
         input_state = {
-            "input_ids": self.torch.tensor([ids], device="cuda", dtype=self.torch.long),
+            "input_ids": self.torch.tensor([ids], device=device, dtype=self.torch.long),
             "past_key_values": None,
-            "position_ids": self.torch.arange(len(ids), device="cuda").unsqueeze(0),
+            "position_ids": self.torch.arange(len(ids), device=device).unsqueeze(0),
         }
-        stop = [x for x in (self.tokenizer.eos_token_id, self.tokenizer.bos_token_id) if x is not None]
+        stop = self._stop_ids()
         # The parent adapter combines this backend boundary with its own
         # Method.Run timestamp.  That includes IPC and all worker-side prompt,
         # cache, and config preparation exactly once.
@@ -215,7 +233,7 @@ class A3Worker:
         # otherwise a numeric-only answer (for example ``2009``) is parsed as
         # a JSON integer by the parent adapter instead of as its response.
         with contextlib.redirect_stdout(sys.stderr):
-            text, ttft, _tpot, generatedIds = decode(
+            decoded = decode(
                 args,
                 self.model,
                 self.tokenizer,
@@ -224,9 +242,15 @@ class A3Worker:
                 budget,
                 config,
                 return_token_ids=True,
+                sampling=sampling,
+                return_cache=retain_output,
             )
+        if retain_output:
+            text, ttft, _tpot, generatedIds, cache = decoded
+        else:
+            text, ttft, _tpot, generatedIds = decoded
         total = time.perf_counter() - decodeCallStart
-        return (
+        result = (
             text,
             float(ttft),
             float(total),
@@ -234,6 +258,35 @@ class A3Worker:
             generationStart,
             OutputFragmentIds(generatedIds, stop),
         )
+        return result + ((cache,) if retain_output else ())
+
+    def _retain_output(self, output_ids, cache, prompt_len):
+        from .backend.utils import recover_pre_rope_keys
+        from helpers.backends.TransformersHelper import CacheLayerPairs
+
+        if not output_ids:
+            return
+        cache = list(CacheLayerPairs(cache))
+        output_len = len(output_ids)
+        start, end = prompt_len, prompt_len + output_len
+        if cache is None or len(cache) != len(self.model.model.layers):
+            raise RuntimeError("A3 runtime cache is unavailable for retain_output")
+        layers = []
+        positions = self.torch.arange(start, end, device=cache[0][0].device).unsqueeze(0)
+        for index, (key, value) in enumerate(cache):
+            if key.shape[-2] != end or value.shape[-2] != end:
+                raise RuntimeError(
+                    "A3 runtime cache length does not match prompt plus retained output: "
+                    f"K={key.shape[-2]}, V={value.shape[-2]}, expected={end}"
+                )
+            attention = self.model.model.layers[index].self_attn
+            raw_key = recover_pre_rope_keys(key[:, :, start:end, :], attention.rotary_emb, positions)
+            layers.append([raw_key[0].detach().clone(), value[0, :, start:end, :].detach().clone()])
+        name = "ids:" + hashlib.sha256(
+            b"".join(int(t).to_bytes(4, "little", signed=True) for t in output_ids)
+        ).hexdigest()
+        self.chunk_ids[name] = list(output_ids)
+        self.chunk_kv[name] = layers
 
     def _full_config(self):
         return {
@@ -242,7 +295,7 @@ class A3Worker:
             "other_config": {"decode": False},
         }
 
-    def full(self, text=None, input_ids=None, max_new_tokens=None):
+    def full(self, text=None, input_ids=None, max_new_tokens=None, retain_output=False):
         """Run a complete prefill through the same patched A3 runtime.
 
         This is the worker's fallback for prompts without reusable chunks; it
@@ -253,9 +306,16 @@ class A3Worker:
         baseline process and calls ragkv's ``vanilla()`` entry point.
         """
         ids = list(input_ids) if input_ids is not None else self._encode(text or "")
-        output, ttft, total, n_tokens, generationStart, outputIds = self._decode(
-            ids, self._full_config(), max_new_tokens
+        decoded = self._decode(
+            ids, self._full_config(), max_new_tokens, retain_output
         )
+        if retain_output:
+            output, ttft, total, n_tokens, generationStart, outputIds, cache = decoded
+            retain_start = time.perf_counter()
+            self._retain_output(outputIds, cache, len(ids))
+            total += time.perf_counter() - retain_start
+        else:
+            output, ttft, total, n_tokens, generationStart, outputIds = decoded
         return {
             "ok": True,
             "text": output,
@@ -270,9 +330,9 @@ class A3Worker:
             "algorithm": "full_recompute",
         }
 
-    def reuse(self, chunks, suffix, suffix_ids=None, max_new_tokens=None):
+    def reuse(self, chunks, suffix, suffix_ids=None, max_new_tokens=None, retain_output=False):
         if not chunks:
-            return self.full(suffix, suffix_ids, max_new_tokens)
+            return self.full(suffix, suffix_ids, max_new_tokens, retain_output)
         for text in chunks:
             if text not in self.chunk_kv:
                 raise ValueError(f"chunk was not collected: {text[:80]!r}")
@@ -325,9 +385,14 @@ class A3Worker:
                 },
             },
         }
-        output, ttft, total, n_tokens, generationStart, outputIds = self._decode(
-            full_ids, config, max_new_tokens
-        )
+        decoded = self._decode(full_ids, config, max_new_tokens, retain_output)
+        if retain_output:
+            output, ttft, total, n_tokens, generationStart, outputIds, cache = decoded
+            retain_start = time.perf_counter()
+            self._retain_output(outputIds, cache, len(full_ids))
+            total += time.perf_counter() - retain_start
+        else:
+            output, ttft, total, n_tokens, generationStart, outputIds = decoded
         return {
             "ok": True,
             "text": output,
@@ -367,11 +432,13 @@ class A3Worker:
                         request.get("suffix", ""),
                         request.get("suffix_ids"),
                         request.get("max_new_tokens"),
+                        request.get("retain_output", False),
                     )
                 elif op == "full":
                     response = self.full(
                         request.get("text", ""), request.get("input_ids"),
                         request.get("max_new_tokens"),
+                        request.get("retain_output", False),
                     )
                 elif op == "reset":
                     response = self.reset()

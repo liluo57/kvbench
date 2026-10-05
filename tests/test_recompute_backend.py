@@ -124,16 +124,18 @@ def test_sparse_repair_preserves_unselected_rows_and_full_cache_length():
     assert method.Run([ids[0].tolist()], maxNewTokens=1)[0].metadata["selected_positions"] == [3, 6]
 
 
-def test_retained_generated_ids_and_cache_are_reusable_in_a_later_turn():
+def test_retained_generated_ids_and_cache_are_an_independent_reusable_chunk():
     backend, sampler = runtime()
     method = bind(EPIC(recomputeTokens=100), backend, sampler)
     prompt = [2, 3, 4, 5, 6]
     method.Prepare([[[2, 3], [4, 5]]])
     first = method.Run([prompt], retainOutput=[True], maxNewTokens=2)[0]
     retained = method._states[0][-1]
-    assert retained.ids == prompt + first.output_ids
+    assert retained.ids == first.output_ids
     assert retained.cache.seq_len == len(retained.ids)
-    later = retained.ids + [9, 10]
+    assert retained.cache.doc_len == len(retained.ids)
+    assert retained.cache.layers[0].logical_positions.tolist() == [list(range(len(retained.ids)))]
+    later = [9, *retained.ids, 10]
     result = method.Run([later], maxNewTokens=2)[0]
     expected = bind(FullRecomputeTransformer(), backend, sampler).Run([later], maxNewTokens=2)[0]
     assert result.output_ids == expected.output_ids
@@ -147,7 +149,7 @@ def test_terminal_eos_is_excluded_from_retained_ids_and_kv():
     result = method.Run([[2, 3, 4]], retainOutput=[True], maxNewTokens=5)[0]
     assert result.output_ids == []
     assert result.performance["num_output_tokens"] == 1
-    assert method._states[0][-1].cache.seq_len == 3
+    assert method._states == [[]]
 
 
 def test_full_recompute_does_not_accumulate_unused_kv_or_forward_the_final_sample(monkeypatch):
