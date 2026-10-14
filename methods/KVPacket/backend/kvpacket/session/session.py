@@ -489,16 +489,6 @@ class PacketSession:
         generator = make_generator(sampling, self.backend.device)
         stream_ids, records = self._build_stream()
         cover = self._match(stream_ids, records)
-        # Generation needs at least one freshly forwarded prompt token to
-        # produce its first logits. KVBench RAG/RULER workflows may prepare a
-        # terminal chunk that is also present at the end of the request (for
-        # example, the fixed question/answer suffix in a shuffled prompt).
-        # Keep that final occurrence online instead of substituting it with a
-        # cached packet. This preserves the caller's prompt and lets the
-        # executor use its ordinary fresh-trailing-prompt path; the terminal
-        # packet simply contributes no reuse for this request.
-        if cover and cover[-1].end == len(stream_ids):
-            cover = cover[:-1]
         substitute = self.mode is Mode.SERVE
 
         if capture_logits is None:

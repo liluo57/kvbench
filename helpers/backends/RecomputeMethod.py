@@ -83,6 +83,10 @@ class CacheRecomputeMethod(Method):
     def _select(self, hits):
         raise NotImplementedError("a selective method must choose repair positions")
 
+    def _select_for_prompt(self, hits, prompt_length):
+        """Choose repair positions with access to the prompt's terminal span."""
+        return self._select(hits)
+
     def Run(self, data: list[list[int]], retainOutput=None, maxNewTokens=None):
         entered = time.perf_counter()
         import torch
@@ -117,7 +121,7 @@ class CacheRecomputeMethod(Method):
                     else:
                         hits.append(CacheHit(offset, end, prepared[chunk_index].cache))
                     offset = end
-                repaired = sorted(set(self._select(hits))) if hits else []
+                repaired = sorted(set(self._select_for_prompt(hits, len(ids)))) if hits else []
                 selected = sorted(set(fresh + repaired + [len(ids) - 1]))
                 if hits:
                     cache = assemble_cache(self._backend, inputs, hits)

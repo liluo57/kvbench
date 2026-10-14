@@ -164,16 +164,22 @@ def test_tiny_qwen3_packet_matching_reordering_repetition_and_generation(tiny_ru
     assert result.flops > 0
 
 
-def test_terminal_packet_match_is_forwarded_as_fresh_generation_prompt(tiny_runtime):
+def test_terminal_packet_match_keeps_reuse_with_explicit_fresh_space(tiny_runtime):
     backend, tokenizer, store = tiny_runtime
 
     exact_terminal = _session(backend, tokenizer, store)
     exact_terminal.push("beta")
-    exact_result = exact_terminal.generate(max_new_tokens=2)
+    with pytest.raises(ValueError, match="trailing non-packet prompt"):
+        exact_terminal.generate(max_new_tokens=2)
+
+    terminal_with_space = _session(backend, tokenizer, store)
+    terminal_with_space.push("beta")
+    terminal_with_space.push(" ", match=False)
+    exact_result = terminal_with_space.generate(max_new_tokens=2)
     assert len(exact_result.token_ids) == 2
-    assert exact_result.prompt_len == len(tokenizer("beta")["input_ids"])
-    assert exact_result.cached_tokens == 0
-    assert exact_result.matched_chunk_ids == []
+    assert exact_result.prompt_len == len(tokenizer(" ")["input_ids"])
+    assert exact_result.cached_tokens == len(tokenizer("beta")["input_ids"])
+    assert exact_result.matched_chunk_ids == ["chunk_beta"]
 
     trailing_after_reuse = _session(backend, tokenizer, store)
     trailing_after_reuse.push("alpha beta")
@@ -211,7 +217,7 @@ def test_kvbench_prepare_stores_authoritative_token_chunks(tiny_runtime):
     assert result.metadata["cached_tokens"] == len(alpha_ids)
 
 
-def test_kvpacket_context_limit_counts_wrappers_and_keeps_terminal_match_fresh(tiny_runtime, monkeypatch):
+def test_kvpacket_context_limit_counts_wrappers_and_terminal_space(tiny_runtime, monkeypatch):
     from core import Config
     original_get = Config.Get
     limit = 10
@@ -234,15 +240,20 @@ def test_kvpacket_context_limit_counts_wrappers_and_keeps_terminal_match_fresh(t
     limit = 8
     with pytest.raises(ValueError, match="Wrapped KVPacket prompt"):
         method.Run([alpha_ids + [31]], maxNewTokens=8)
-    limit = 7
-    # A terminal match is fresh, so it consumes no wrapper positions.
-    result = method.Run([alpha_ids], maxNewTokens=8)[0]
-    assert result.performance["num_output_tokens"] == 2
+    limit = 9
+    # Preserve the terminal cache hit and append a fresh whitespace token.
+    result = method.Run([alpha_ids], maxNewTokens=1)[0]
+    assert result.performance["num_output_tokens"] == 1
     assert result.metadata["cached_tokens"] == len(alpha_ids)
-    assert result.metadata["substituted_tokens"] == 0
-    assert result.metadata["reuse_ratio"] == 1.0
+    assert result.metadata["substituted_tokens"] == len(alpha_ids)
+    assert result.metadata["original_n_input"] == len(alpha_ids)
+    assert result.metadata["n_input"] == len(alpha_ids) + 1
+    assert result.metadata["appended_space_tokens"] == 1
+    assert result.metadata["reuse_ratio"] == pytest.approx(
+        len(alpha_ids) / (len(alpha_ids) + 1)
+    )
     method._states = [SimpleNamespace(chunks=[], store=PacketStore(backend=backend))]
-    baseline = method.Run([alpha_ids], maxNewTokens=8)[0]
+    baseline = method.Run([alpha_ids], maxNewTokens=1)[0]
     assert result.output_ids == baseline.output_ids
     assert result.performance["num_output_tokens"] == baseline.performance["num_output_tokens"]
 

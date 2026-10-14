@@ -468,12 +468,29 @@ class KVPacket(Method):
             input_ids = [int(token) for token in prompt]
             session.push(input_ids)
             cover = session.preview_matches()
-            matched_tokens = sum(item.end - item.start for item in cover)
-            # PacketSession keeps a terminal match fresh to obtain first-token
-            # logits. Count only substituted occurrences, including their
-            # wrapper positions even when their physical KV is compressed.
+            original_input_tokens = len(input_ids)
+            appended_space_tokens = 0
+            # KVPacket needs a fresh trailing prompt to compute first-token
+            # logits. Preserve a terminal packet hit by adding a tokenized space
+            # as an explicitly non-matchable suffix instead of dropping that
+            # hit from the cover.
             if cover and cover[-1].end == len(input_ids):
-                cover = cover[:-1]
+                space_encoding = self._tokenizer(" ", add_special_tokens=False)
+                space_ids = [int(token) for token in space_encoding["input_ids"]]
+                if not space_ids:
+                    raise RuntimeError(
+                        "KVPacket needs a fresh trailing prompt token, but the "
+                        "tokenizer produced no IDs for a space"
+                    )
+                input_ids.extend(space_ids)
+                appended_space_tokens = len(space_ids)
+                session.push(space_ids, match=False)
+                cover = session.preview_matches()
+                if cover and cover[-1].end == len(input_ids):
+                    raise RuntimeError(
+                        "KVPacket could not reserve a fresh trailing prompt token"
+                    )
+            matched_tokens = sum(item.end - item.start for item in cover)
             logical_length = len(input_ids) + sum(
                 state.store.get(item.chunk_id).wrapped_len - (item.end - item.start)
                 for item in cover
@@ -497,11 +514,10 @@ class KVPacket(Method):
                 self._torch.cuda.synchronize(self._backend.device)
 
             n_input = len(input_ids)
-            # Report semantic prompt coverage, including a terminal packet that
-            # is deliberately forwarded fresh to provide first-token logits.
-            # Wrapper positions and physically stored compressed rows are not
-            # input-token coverage and therefore do not affect this metric.
-            cached_tokens = matched_tokens
+            # Use the cover actually consumed by PacketSession. This counts
+            # source prompt tokens substituted from packets, excluding the
+            # fresh whitespace suffix and wrapper-only positions.
+            cached_tokens = int(generated.cached_tokens)
             substituted_tokens = int(generated.cached_tokens)
             reuse_ratio = cached_tokens / n_input if n_input else 0.0
             output_ids = OutputFragmentIds(
@@ -591,6 +607,8 @@ class KVPacket(Method):
                         "substituted_tokens": substituted_tokens,
                         "matched_chunk_ids": generated.matched_chunk_ids,
                         "n_input": n_input,
+                        "original_n_input": original_input_tokens,
+                        "appended_space_tokens": appended_space_tokens,
                         "flops": int(generated.flops),
                     },
                 )
