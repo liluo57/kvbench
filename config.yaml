@@ -55,6 +55,12 @@ Cacheblend:
   # Defaults to the project's current Python. Relative overrides use the root.
   # Python: /path/to/project/python
 
+# CacheRepair uses the target-specific upstream Qwen2.5-3B-Instruct repairer.
+# Set ModelPath above to the matching target checkpoint before running repair.
+CacheRepair:
+  RepairerPath: gwang3456/cacherepair
+  RepairerSize: M
+
 # A^3 is bundled in methods/A3Repo; ./setup.py --a3 installs optional dependencies.
 # Its isolated worker defaults to the current project Python.
 A3:

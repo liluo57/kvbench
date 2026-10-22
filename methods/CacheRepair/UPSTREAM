@@ -1,0 +1,6 @@
+Repository: https://github.com/genglinWang/CacheRepair-code
+Commit: 4eb96cd92df4be4f679ad8ac42a51442249683c2
+License: Apache-2.0 (see backend/LICENSE and backend/NOTICE)
+
+The contents of backend/ are copied from this upstream commit. KVBench-specific
+integration is in Method.py; upstream source files are otherwise unmodified.

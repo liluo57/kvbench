@@ -386,9 +386,10 @@ def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
                     targets = [matches[0]]
                     if archive_member.parent != Path("."):
                         targets.insert(0, str(archive_member.parent))
-                    archive.extract(
-                        path=extracted_dir, targets=targets, recursive=False
-                    )
+                    # py7zr 0.20.8 exposes ``extract(path, targets)`` without
+                    # a ``recursive`` keyword. The exact target list above
+                    # limits extraction to this member and its parent path.
+                    archive.extract(path=extracted_dir, targets=targets)
                     raw_path = extracted_dir / archive_member
             except Exception as exc:
                 raise ValueError(f"could not extract SAMSum {archive_file!r}") from exc
@@ -712,8 +713,8 @@ def _adapt_govreport_raw(raw_files: Sequence[str]) -> Iterable[Dict[str, Any]]:
 def _adapt_multinews(row: Mapping[str, Any]) -> Dict[str, Any]:
     document, summary = _text(row.get("document")), _text(row.get("summary"))
     documents = [piece.strip() for piece in document.split("|||||") if piece.strip()]
-    if not documents or not summary.strip():
-        raise ValueError("MultiNews row is missing document or summary")
+    if not summary.strip():
+        raise ValueError("MultiNews row is missing summary")
 
     def normalize_document(text: str) -> str:
         return text.replace("NEWLINE_CHAR", "\n")
@@ -722,6 +723,9 @@ def _adapt_multinews(row: Mapping[str, Any]) -> Dict[str, Any]:
         f"Passage {index}:\n{normalize_document(text)}"
         for index, text in enumerate(documents, 1)
     )
+    # Keep source rows with an empty document so the converted split retains
+    # its declared row count. KBBase.Cases skips them because they have no
+    # usable context; never substitute the reference summary as model input.
     return {
         "input": "",
         "context": context,

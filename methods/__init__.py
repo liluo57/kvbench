@@ -37,6 +37,7 @@ from .Naive import NaiveTransformer
 from .KVComm import KVCommTransformer
 from .ProphetKV import ProphetKV
 from .CacheClip import CacheClip
+from .CacheRepair import CacheRepairMethod
 from .DependencyAnalysis import DependencyAnalysisMethod
 from .Rollout import RolloutMethod
 from .EPIC import EPIC
@@ -59,6 +60,7 @@ __all__ = [
     "KVCommTransformer",
     "ProphetKV",
     "CacheClip",
+    "CacheRepairMethod",
     "DependencyAnalysisMethod",
     "RolloutMethod",
     "KVPacket",
