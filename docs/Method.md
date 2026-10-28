@@ -191,7 +191,9 @@ paper-based LinearKV implementation and static per-chunk prefix selector;
 its recurrent replay requires a compatible Qwen3_5 GDN architecture. Both accept
 `fullPrefill=True` for the same-backend no-PIC control, which keeps ordinary
 prefix caching enabled. Each case owns an isolated prepare/run/reset lifecycle.
-The Task's input IDs pass through unchanged. Both reject `retainOutput=True`,
+The Task's input IDs pass through unchanged. LinearKV retains the declared chunk
+boundaries when prepared chunks exactly cover a prefix of the prompt followed
+by fresh tokens, including when document contents repeat. Both reject `retainOutput=True`,
 including with `fullPrefill=True`: their backend releases generated decode
 state, and warming up the output again would not preserve native output KV.
 

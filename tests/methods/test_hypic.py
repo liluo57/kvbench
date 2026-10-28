@@ -1111,3 +1111,15 @@ def test_worker_rejects_dynamic_split_prefill_before_building_batch(selector):
     batch = SimpleNamespace(pic_mode='linearkv', split_index=0)
     with pytest.raises(ValueError, match='split prefill'):
         worker.forward_batch_split_prefill(batch)
+
+
+@pytest.mark.parametrize('selector', ['epic', 'cacheblend', 'prophetkv'])
+def test_linearkv_preserves_prepared_prefix_boundaries_with_repeated_content(selector):
+    obj = method(LinearKVMethod, selector=selector)
+    chunks = [[1, 2], [1, 2], [1, 2, 1]]
+    obj.Prepare([chunks])
+    ids = sum(chunks, []) + [2, 1, 2]
+    obj.Run([ids], maxNewTokens=1)
+    sent, segments, _ = obj.engine.calls[-1]
+    assert sent == ids
+    assert segments == [(0, 2), (2, 4), (4, 7), (7, 10)]
