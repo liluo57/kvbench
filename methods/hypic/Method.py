@@ -203,7 +203,17 @@ class _PicMethod(Method):
             if not ids:
                 raise ValueError("HYPIC prompt token IDs cannot be empty")
             prepared = self._states[index]
-            parts = [(None, ids)] if self.fullPrefill else ComposeInterleavedReuse(prepared, ids)
+            prefix_length = sum(map(len, prepared))
+            if self.fullPrefill:
+                parts = [(None, ids)]
+            elif (self.picMode == 'linearkv' and prepared and prefix_length < len(ids)
+                  and [token for chunk in prepared for token in chunk] == ids[:prefix_length]):
+                # Preserve framework-owned fixed chunk boundaries for a
+                # prepared prefix. Repeated VT noise can otherwise admit
+                # alternative equally covering matches with shifted seams.
+                parts = [(i, chunk) for i, chunk in enumerate(prepared)] + [(None, ids[prefix_length:])]
+            else:
+                parts = ComposeInterleavedReuse(prepared, ids)
             _, segments = _PackSegments([part for _, part in parts])
             output, outputIds, ttft, total, meta = self._Generate(
                 ids, None if self.fullPrefill else segments,
