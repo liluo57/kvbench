@@ -994,6 +994,9 @@ class HybridLinearAttnBackend(AttentionBackend):
     ):
         # PIC dispatch: route through mode-specific paths; leave
         # the non-PIC path untouched so existing requests keep working.
+        selector_probe = getattr(forward_batch, "pic_selector_probe", None)
+        if selector_probe is not None and self._is_full_attn(layer, kwargs.get("layer_id")):
+            selector_probe.observe(self, layer, forward_batch, q, v)
         if getattr(forward_batch, "pic_mode", None) is not None:
             if forward_batch.pic_policy.is_linearkv:
                 return self._forward_extend_pic_linearkv(
@@ -1646,6 +1649,12 @@ class HybridLinearAttnBackend(AttentionBackend):
         rope_meta: List[Dict[str, object]],
     ):
 
+        # Probe scoring has already relocated this layer's frozen hit KV.
+        # The marker belongs to the probe; formal replay relocates again.
+        probe = getattr(forward_batch, "pic_selector_probe", None)
+        prepared = getattr(probe, "_prepared_kv_layers", None)
+        if prepared is not None and layer.layer_id in prepared:
+            return
         device = forward_batch.input_ids.device
         head_dim = layer.head_dim
         rotary_dim = self._pic_rope_rotary_dim
@@ -1679,6 +1688,8 @@ class HybridLinearAttnBackend(AttentionBackend):
         )
         k_buffer[dst] = k_real
         v_buffer[dst] = v_zero
+        if prepared is not None:
+            prepared.add(layer_id)
 
     def _build_pic_rope_phase_b_cache(
         self,

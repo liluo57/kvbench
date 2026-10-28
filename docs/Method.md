@@ -75,7 +75,7 @@ Refer to each class constructor for its implementation and configurable paramete
 | `FullPrefillTransformer`, `FullPrefillVllm` | Full-prefill baselines using Transformers and vLLM, respectively. |
 | `NaiveTransformer`, `NaiveCacheblendRepo` | Controls that directly reuse cached state without repairing context changes. |
 | `CacheblendRepo`, `CacheblendLmcache` | CacheBlend recomputation and fusion implementations; the former runs the bundled backend in `methods/Cacheblend` through a worker sharing the main project's Python environment. |
-| `HypicMethod`, `LinearKVMethod` | Built-in hybrid position-independent reuse in `methods/hypic`; both accept token IDs and explicit segment boundaries. HYPIC defaults to transition/RoPE/seam repair; LinearKV uses the last matched GDN state and static chunk-prefix repair. |
+| `HypicMethod`, `LinearKVMethod` | Built-in hybrid position-independent reuse in `methods/hypic`; both accept token IDs and explicit segment boundaries. HYPIC defaults to transition/RoPE/seam repair; LinearKV uses the last matched GDN state with EPIC, CacheBlend, or ProphetKV selection. |
 | `A3Repo` | A^3 with bundled precompute, selection, fusion and decoding; Llama/Mistral/Qwen2/dense Qwen3. |
 | `ProphetKV` | ProphetKV implementation. |
 | `CacheClip` | CPU auxiliary-token selection with sparse repair of primary KV caches. Prepared chunks and prompts remain authoritative primary-model token IDs; selector text and character spans are derived locally from each prepared ID chunk. |
@@ -188,9 +188,62 @@ checkpoints on NVIDIA GPUs. `Hypic.MaxMambaCacheSize` caps per-rank recurrent st
 `HypicMethod(picMode="transition_rope_recompute", seamTokens=8)` exposes the
 upstream HYPIC modes. `LinearKVMethod(recompRatio=0.2)` uses the branch's
 paper-based LinearKV implementation and static per-chunk prefix selector;
-its recurrent replay currently supports Qwen3.5/Qwen3.8 GDN models. Both accept
+its recurrent replay requires a compatible Qwen3_5 GDN architecture. Both accept
 `fullPrefill=True` for the same-backend no-PIC control, which keeps ordinary
 prefix caching enabled. Each case owns an isolated prepare/run/reset lifecycle.
 The Task's input IDs pass through unchanged. Both reject `retainOutput=True`,
 including with `fullPrefill=True`: their backend releases generated decode
 state, and warming up the output again would not preserve native output KV.
+
+### LinearKV selectors on the bundled HYPIC backend
+
+```python
+from methods import LinearKVMethod
+
+methods = [
+    LinearKVMethod(gpuNums=2, selector="epic", recompRatio=0.2),
+    LinearKVMethod(gpuNums=2, selector="cacheblend", recompRatio=0.2),
+    LinearKVMethod(gpuNums=2, selector="prophetkv", recompRatio=0.2),
+]
+```
+
+These adapters share the existing LinearKV last-block (LB) initializer and
+selective replay. At each GDN layer, LB restores the last matched document's
+independently cached recurrent state and paired convolution history. Fresh
+positions, including Query, always run; selected cached positions are replayed
+in their original prompt order. FA reuses the other cached KV rows with the
+backend's position relocation. ProphetKV requires a fresh terminal Query segment and rejects a cached terminal segment.
+
+| Selector | Selection and budget |
+| --- | --- |
+| `epic` (default) | Repair each matched chunk's prefix. Partial repair excludes the chunk beginning at prompt position zero, without reallocating its budget. The count is `floor(r * chunk_length)`, at least one for a positive budget. |
+| `cacheblend` | Probe the full prompt through the first FA layer, then rank squared differences between current and cached V over all matched positions. `selectorLayer` optionally chooses an absolute FA layer index. |
+| `prophetkv` | Probe fresh positions against the document KV and LB state. Score only the terminal Query's context attention, average over heads and FA layers, then select one shared set of document positions. |
+
+Dynamic selectors use a global `floor(r * matched_tokens)` budget (at least one
+when positive), with ties resolved by original position. All TP ranks reduce
+scores before selection. A ratio of zero skips document repair; a ratio of one
+replays all matched rows, including the first chunk, and bypasses probing.
+Full replay still uses LB initialization; it is not ordinary full prefill.
+
+Probe changes to request-private recurrent state are restored before formal
+replay, including on failure. Prepared document state and public KV stay frozen.
+The adapter reports `selector`, `target_recompute_ratio`, `recompute_ratio`,
+`num_recomputed_tokens`, and `num_matched_tokens` separately from cache-hit
+coverage. In particular, EPIC's first-chunk exclusion can make its actual ratio
+lower than the requested ratio.
+
+The bundled LinearKV model path requires a `Qwen3_5` architecture, including
+compatible Qwen3.6 checkpoints. OLMo is not supported by this backend. Dynamic
+probes support one request and tensor parallelism only (`PP=DP=1`), disable
+scheduler overlap, and reject embedding overrides and speculative batches.
+PD multiplexing / split prefill is explicitly rejected for dynamic selectors.
+They require an explicit ratio rather than a fixed token count.
+
+CacheBlend uses a separate probe and replay here; this does not implement its
+author runtime's fused layer-wise pruning optimization. The selector adapters
+support method comparisons within KVBench's input/scoring protocol and do not
+by themselves establish complete reproduction of the original papers.
+
+CPU regressions: `python -m pytest -q tests/methods/test_hypic.py`.
+CUDA/model validation remains separate from these dependency-isolated tests.
