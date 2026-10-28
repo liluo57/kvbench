@@ -1263,7 +1263,7 @@ class Req(ReqDllmMixin):
                     self.pic_linearkv_skip_cache = len(self.pic_segments) != 1
                     from methods.hypic.backend.kvbench_hypic.srt.pic.selector import (
                         merge_online_positions,
-                        select_epic_positions,
+                        select_initial_positions,
                     )
 
                     server_args = get_global_server_args()
@@ -1271,9 +1271,14 @@ class Req(ReqDllmMixin):
                         server_args, "pic_epic_tokens_per_chunk", None
                     )
                     epic_ratio = getattr(server_args, "pic_epic_ratio", None)
-                    self.pic_linearkv_selected_positions = select_epic_positions(
+                    selector = getattr(server_args, "pic_linearkv_selector", "epic")
+                    self.pic_linearkv_selected_positions = select_initial_positions(
                         self.pic_hit_segments,
+                        selector,
                         tokens_per_chunk=tokens_per_chunk,
+                        # Dynamic selectors need every cached row available
+                        # for their probe. The worker narrows the physical
+                        # stream before the final LinearKV replay.
                         ratio=epic_ratio,
                     )
                     positions = merge_online_positions(

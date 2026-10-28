@@ -493,6 +493,10 @@ class TpModelWorker(BaseTpWorker):
             self.set_hicache_consumer(batch.hicache_consumer_index)
 
             forward_batch = ForwardBatch.init_new(batch, self.model_runner)
+            if batch.pic_mode == "linearkv" and batch.forward_mode.is_extend():
+                from methods.hypic.backend.kvbench_hypic.srt.pic.runtime_selector import prepare_linearkv_selection
+
+                forward_batch = prepare_linearkv_selection(batch, forward_batch, self.model_runner)
         else:
             # FIXME(lsyin): unify the interface of forward_batch
             assert forward_batch is not None
@@ -509,6 +513,15 @@ class TpModelWorker(BaseTpWorker):
                 pp_proxy_tensors=pp_proxy_tensors,
             )
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+            if batch is not None and batch.pic_mode == "linearkv" and batch.forward_mode.is_extend():
+                from methods.hypic.backend.kvbench_hypic.srt.pic.runtime_selector import selection_metadata
+
+                if logits_output.customized_info is None:
+                    logits_output.customized_info = {}
+                selector = self.model_runner.server_args.pic_linearkv_selector
+                logits_output.customized_info["linearkv_selection"] = [
+                    selection_metadata(req, selector) for req in batch.reqs
+                ]
             batch_result = GenerationBatchResult(
                 logits_output=logits_output,
                 can_run_cuda_graph=can_run_cuda_graph,
@@ -572,6 +585,9 @@ class TpModelWorker(BaseTpWorker):
             )
 
     def forward_batch_split_prefill(self, batch: ScheduleBatch):
+        if (batch.pic_mode == "linearkv"
+                and self.model_runner.server_args.pic_linearkv_selector != "epic"):
+            raise ValueError("Dynamic LinearKV selectors do not support split prefill")
         if batch.split_index == 0:
             forward_batch = ForwardBatch.init_new(batch, self.model_runner)
             batch.split_forward_batch = forward_batch

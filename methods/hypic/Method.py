@@ -37,6 +37,7 @@ def _BuildHypicEngineKwargs(
     modelPath: str, gpuIds: Sequence[int], *, dtype: str,
     maxModelLen: int, memFractionStatic: float, picMode: str,
     fullPrefill: bool, seamTokens: float = 8, recompRatio: Optional[float] = None,
+    selector: str = "epic", selectorLayer: Optional[int] = None,
 ) -> dict[str, Any]:
     options = dict(
         model_path=modelPath, dtype=dtype, tp_size=len(gpuIds),
@@ -59,6 +60,12 @@ def _BuildHypicEngineKwargs(
         options.update(pic_mode=picMode, pic_seam_sink=seamTokens)
         if picMode == "linearkv":
             options["pic_epic_ratio"] = recompRatio
+            options["pic_linearkv_selector"] = selector
+            options["pic_linearkv_selector_layer"] = selectorLayer
+            # Selector probes and replay share request-private slots. Keep
+            # their execution on the same stream without scheduler overlap.
+            if selector != "epic":
+                options["disable_overlap_schedule"] = True
     return options
 
 
@@ -97,6 +104,7 @@ class _PicMethod(Method):
     def __init__(self, gpuNums=1, perfWeight=1.0, *, memFractionStatic=0.80,
                  dtype="bfloat16", picMode="transition_rope_recompute",
                  seamTokens=8, recompRatio=None, fullPrefill=False, tag=None,
+                 selector="epic", selectorLayer=None,
                  **legacy):
         super().__init__(gpuNums=gpuNums, perfWeight=perfWeight, tag=tag)
         legacy.pop("maxNewTokens", None)
@@ -117,6 +125,7 @@ class _PicMethod(Method):
         self.dtype, self.picMode = dtype, picMode
         self.seamTokens, self.recompRatio = float(seamTokens), recompRatio
         self.fullPrefill = fullPrefill
+        self.selector, self.selectorLayer = selector, selectorLayer
         self.engine = None
         self._states: list[list[list[int]]] = []
         self._systemIds: list[int] = []
@@ -137,7 +146,10 @@ class _PicMethod(Method):
         if self.picMode == "linearkv":
             architectures = getattr(config, "architectures", []) or []
             if not any(arch.startswith("Qwen3_5") for arch in architectures):
-                raise ValueError("LinearKV currently supports Qwen3.5/Qwen3.8 GDN models")
+                raise ValueError(
+                    "LinearKV requires a Qwen3_5 architecture (including compatible "
+                    "Qwen3.6 checkpoints); OlmoHybridForCausalLM is not implemented"
+                )
         self._tokenizer = _tokenizer(self.modelPath)
         self._terminalStopIds = TerminalStopIdsFromTokenizer(self._tokenizer, self.samplingConfig)
         self._systemIds = self._tokenizer.encode(_QWEN35_SYSTEM, add_special_tokens=False)
@@ -147,6 +159,7 @@ class _PicMethod(Method):
             maxModelLen=self.maxModelLen, memFractionStatic=self.memFractionStatic,
             picMode=self.picMode, fullPrefill=self.fullPrefill,
             seamTokens=self.seamTokens, recompRatio=self.recompRatio,
+            selector=self.selector, selectorLayer=self.selectorLayer,
         )
 
     def _Warmup(self, chunk: list[int]) -> None:
@@ -204,6 +217,11 @@ class _PicMethod(Method):
             else:
                 metadata.update(pic_mode=self.picMode, n_pic_segments=len(segments),
                                 matched_prepared_segments=sum(i is not None for i, _ in parts))
+                if self.picMode == "linearkv":
+                    metadata.update(selector=self.selector, target_recompute_ratio=self.recompRatio)
+                    selections = meta.get("linearkv_selection") or []
+                    if selections:
+                        metadata.update(selections[-1])
             result = Result(output=output, output_ids=outputIds, metadata=metadata,
                             performance={TtftKey: ttft, TotalTimeKey: total,
                                          NumOutputTokensKey: int(meta["completion_tokens"])})
@@ -275,8 +293,24 @@ class HypicMethod(_PicMethod):
 
 class LinearKVMethod(_PicMethod):
     name = "linearkv"
+    method_metrics = ("reuse_ratio", "recompute_ratio", "num_recomputed_tokens")
 
-    def __init__(self, gpuNums=1, perfWeight=1.0, *, recompRatio=0.2, **kwargs):
+    def __init__(self, gpuNums=1, perfWeight=1.0, *, recompRatio=0.2,
+                 selector="epic", selectorLayer=None, tag=None, **kwargs):
         if isinstance(recompRatio, bool) or not math.isfinite(float(recompRatio)) or not 0 <= recompRatio <= 1:
             raise ValueError("recompRatio must be a finite number in [0, 1]")
-        super().__init__(gpuNums, perfWeight, picMode="linearkv", recompRatio=float(recompRatio), **kwargs)
+        if not isinstance(selector, str) or selector.lower() not in {"epic", "cacheblend", "prophetkv"}:
+            raise ValueError("selector must be epic, cacheblend, or prophetkv")
+        selector = selector.lower()
+        if selectorLayer is not None and (
+            isinstance(selectorLayer, bool) or not isinstance(selectorLayer, int) or selectorLayer < 0
+        ):
+            raise ValueError("selectorLayer must be a non-negative layer index or None")
+        if selectorLayer is not None and selector != "cacheblend":
+            raise ValueError("selectorLayer is only supported by the CacheBlend selector")
+        if tag is None:
+            tag = "full_prefill" if kwargs.get("fullPrefill") else f"{selector},r={float(recompRatio):g}"
+            if selectorLayer is not None and not kwargs.get("fullPrefill"):
+                tag += f",layer={selectorLayer}"
+        super().__init__(gpuNums, perfWeight, picMode="linearkv", recompRatio=float(recompRatio),
+                         selector=selector, selectorLayer=selectorLayer, tag=tag, **kwargs)
