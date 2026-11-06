@@ -1,5 +1,14 @@
 # CacheRepair for KVBench
 
+The Qwen3.8-27B repairer body is available separately in
+[`qwen38/`](qwen38/README.md). It includes runtime full-attention geometry,
+partial MRoPE cache conversion, and checkpoint validation. Data preparation and
+the upstream-loop training adapter are described in [`qwen38/TRAINING.md`](qwen38/TRAINING.md).
+The completed 256-example training pilot is recorded in [`qwen38/STAGE_B_REPORT.md`](qwen38/STAGE_B_REPORT.md).
+The hybrid target's online Method is [`HybridCacheRepair`](../HybridCacheRepair/README.md),
+combining Hypic TRR recurrent history with the trained attention repairer.
+The adapter below continues to serve the existing Qwen2.5 checkpoints.
+
 This adapter runs the upstream CacheRepair inference code over KVBench's
 existing PREPARE/RUN token IDs. It does not add or alter Tasks and does not
 train weights.

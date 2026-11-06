@@ -1,0 +1,12 @@
+{
+  "target_model_id": "Qwen/Qwen3.8-27B",
+  "capacity": "M",
+  "repair_config": {
+    "d_b": 640,
+    "n_blocks": 6,
+    "n_heads": 10,
+    "d_seg": 16,
+    "mlp_ratio": 3.0,
+    "rope_theta": 10000.0
+  }
+}

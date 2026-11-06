@@ -1,0 +1,28 @@
+{
+  "target_model_id": "Qwen/Qwen3.8-27B",
+  "expected_kv_shape": [16, 4, 2, 256],
+  "scope": "Stage B one-epoch pilot; training-source residual validation; no generation-quality or TTFT experiment",
+  "repair_config": {
+    "d_b": 640,
+    "n_blocks": 6,
+    "n_heads": 10,
+    "d_seg": 16,
+    "mlp_ratio": 3.0,
+    "rope_theta": 10000.0
+  },
+  "training": {
+    "seed": 7,
+    "initialization_seed": 853119240,
+    "epochs": 1,
+    "schedule_epochs": 1,
+    "effective_batch_size": 4,
+    "statistics_examples": 64
+  },
+  "data": {
+    "train_examples": 256,
+    "validation_examples": 32,
+    "max_total_tokens": 1024,
+    "max_chunk_tokens": 256,
+    "max_chunks": 8
+  }
+}

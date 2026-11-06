@@ -1,7 +1,7 @@
-"""LongBench HotpotQA task.
+"""HotpotQA distractor validation task.
 
-The checked-in snapshot lives under ``data/hotpotqa`` and is loaded locally;
-this task has no dependency on the HYPIC checkout.  HotpotQA is scored with
+The complete labeled split is prepared under ``data/hotpotqa`` and loaded
+locally. Official test labels are private. HotpotQA is scored with
 the standard normalized token F1 and exact-match accuracy used by KVBench's
 other QA tasks.
 """

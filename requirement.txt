@@ -9,6 +9,12 @@ transformers==4.57.6
 datasets==5.0.0
 gdown==5.2.1
 py7zr==0.20.8
+# Official RULER generators and their essay downloader (HF tokenizer mode).
+nltk==3.9.2
+wonderwords==2.2.0
+html2text==2025.4.15
+beautifulsoup4==4.15.0
+tenacity==9.1.4
 requests==2.34.2
 benchflow==0.7.5
 pytest==9.1.1

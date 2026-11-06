@@ -61,6 +61,10 @@ CacheRepair:
   RepairerPath: gwang3456/cacherepair
   RepairerSize: M
 
+# Qwen3.8 hybrid method: Hypic TRR GDN + the trained attention repairer.
+HybridCacheRepair:
+  RepairerPath: outputs/cacherepair-qwen38/stage-b-training-v1/checkpoint-64
+
 # A^3 is bundled in methods/A3Repo; ./setup.py --a3 installs optional dependencies.
 # Its isolated worker defaults to the current project Python.
 A3:
@@ -123,24 +127,32 @@ DatasetPreparation:
 
   # Direct downloads use upstream benchmark releases. MuSiQue is downloaded
   # from the authors' archive; SAMSum from the paper's original corpus archive.
-  # The adapters retain only each complete labeled evaluation split.
+  # Prefer complete labeled test splits. Datasets whose test answers are
+  # private retain their labeled dev/validation split for local quality metrics.
   Direct:
     - Output: musique/musique_ans_dev.jsonl
       GoogleDriveId: 1tGdADlNjWFaHLeZZGShh2IRcpO6Lv24h
-      Format: musique_ans_dev_google_drive_zip
+      Format: musique_ans_google_drive_zip
+      Split: dev
+      SplitReason: Official test answers are private; use labeled dev for F1/EM.
       ArchiveFile: data/musique_ans_v1.0_dev.jsonl
       ExpectedRows: 2417
     - Output: samsum/samsum_test.jsonl
+      Split: test
       Url: https://arxiv.org/src/1911.12237v2/anc/corpus.7z
       Format: samsum_test_7z
       ArchiveFile: test.json
       ExpectedRows: 819
     - Output: 2wikimultihopqa/2wikimultihopqa_dev.json
+      # Official test has no public answer/support annotations.
+      Split: dev
+      SplitReason: Official test answers are private; use labeled dev for F1/EM.
       Url: https://www.dropbox.com/scl/fi/aasqsj45yokx71pnm8ctr/data_ids.zip?rlkey=72n2p6jywhfmm6kdeuzz8c55u&dl=1
       Format: 2wikimultihopqa_dev_zip
       ArchiveFile: data_ids/dev.json
       ExpectedRows: 12576
     - Output: govreport/govreport.jsonl
+      Split: test
       Urls:
         - https://huggingface.co/datasets/launch/gov_report/resolve/32feeaede49fed993aef070bc4da09263fd0429a/data/gao_test.jsonl
         - https://huggingface.co/datasets/launch/gov_report/resolve/32feeaede49fed993aef070bc4da09263fd0429a/data/crs_test.jsonl
@@ -154,6 +166,7 @@ DatasetPreparation:
       Revision: 1908d6afbbead072334abe2965f91bd2709910ab
       Config: distractor
       Split: validation
+      SplitReason: Distractor test is private; use labeled validation for F1/EM.
       Adapter: hotpotqa
       Output: hotpotqa/hotpotqa.jsonl
       ExpectedRows: 7405
@@ -167,6 +180,7 @@ DatasetPreparation:
       Revision: 0f7faf33a3908546c6fd5b73a660e0f8ff173c2f
       Config: rc
       Split: validation
+      SplitReason: Official test answers are private; use labeled validation for F1/EM.
       Adapter: triviaqa
       Output: triviaqa/triviaqa.jsonl
       ExpectedRows: 17944
@@ -191,26 +205,28 @@ DatasetPreparation:
       Output: humaneval/humaneval-py.jsonl
       ExpectedRows: 164
 
-  # RULER generation consumes the exact tokenizer and limits declared above.
-  # Its synthetic data is regenerated, not downloaded from a partial snapshot.
+  # Use the unmodified official RULER generators and their task definitions.
+  # Split=test is passed to each generator; output bytes are preserved locally.
   Ruler:
+    Revision: c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a
+    ArchiveSha256: 3d6dd03fc79a145cc05dd1219164535e4618af8b2ad5b325083256254c28acab
+    Split: test
     Tokenizer: ModelPath
-    CorpusUrls: https://raw.githubusercontent.com/NVIDIA/RULER/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a/scripts/data/synthetic/json/PaulGrahamEssays_URLs.txt
-    # english_words.json is Git-LFS-backed; media.githubusercontent.com resolves
-    # the blob rather than returning the small LFS pointer file.
-    WordList: https://media.githubusercontent.com/media/NVIDIA/RULER/c3f5e3b4f87f97e048793bb510a3a6b19a46bf3a/scripts/data/synthetic/json/english_words.json
     Tasks:
       - Task: niah
+        OfficialTask: niah_single_2
         Lengths: [4096, 8192]
         Samples: 500
         TokensToGenerate: 128
         Seed: 42
       - Task: vt
+        OfficialTask: vt
         Lengths: [4096, 8192]
         Samples: 500
         TokensToGenerate: 30
         Seed: 42
       - Task: cwe
+        OfficialTask: cwe
         Lengths: [4096, 8192]
         Samples: 500
         TokensToGenerate: 120

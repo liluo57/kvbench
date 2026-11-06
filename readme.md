@@ -29,7 +29,33 @@ python scripts/PrepareDataset.py
 The benchmark data is intentionally not stored in git.  The command reads all
 dataset sources, splits, revisions, and RULER generation parameters from
 `config.yaml`, prepares complete declared splits, and installs them under
-`DatasetPath`.
+`DatasetPath`. Sources use `test` where labeled test data is public. MuSiQue,
+2WikiMultiHopQA, HotpotQA, and TriviaQA retain their labeled dev/validation
+splits because their official test answers are private; each exception is
+documented in `SplitReason`.
+
+RULER uses NVIDIA's pinned official generators for `niah_single_2`, `vt`, and
+`cwe`, explicitly passing `--subset test`. Source code and the LFS word list
+are checksum-verified and cached under `.cache/ruler/`. Every official essay
+URL is fetched with retries and cached before the unchanged upstream parser
+builds the NIAH corpus. Missing sources or parser failures stop preparation;
+partial corpora are never installed. HTTP is upgraded to HTTPS, and GitHub
+raw links use the equivalent `raw.githubusercontent.com` transport. Install
+the RULER dependencies in `requirement.txt` before preparation; the first run
+also downloads NLTK tokenizer resources. Original generator output is kept
+unchanged in the local `*_len*.jsonl` files, with revision, split, parameters,
+asset hashes, and output hashes in `data/ruler/provenance.json`. Real dataset
+sources are recorded in each dataset's `_metadata/source.json`.
+Download counts, raw source hashes, and the complete-corpus status are recorded
+in RULER provenance, with the parser log in the cache.
+
+Run `python scripts/PrepareDataset.py --dry-run` to inspect the source/split
+plan. Rerun preparation after changing it; existing data is not regenerated
+by running `Main.py`. Preparation records every output hash and the producing
+configuration/code in `data/preparation.json`. Check the installed data without
+network access with `python scripts/PrepareDataset.py --verify`. Previous
+datasets are retained under `.data.backups/`; installation failures roll back
+all replaced directories.
 
 
 4. Set `ModelPath` and any optional third-party repository paths in `config.yaml`.

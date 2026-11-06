@@ -34,7 +34,7 @@ output fragment creates no retained chunk.
 | --- | --- |
 | `NaiveTransformer`, `NaiveCacheblendRepo`, `CacheblendRepo`, `KVCommTransformer` | Preserve native output KV. |
 | `EPIC`, `RandRecomputeTransformer`, `A3Repo`, `ProphetKV`, `CacheClip`, `KVPacket` | Preserve native output KV as a reusable output chunk, subject to each method's existing matching and model restrictions. |
-| `HypicMethod`, `LinearKVMethod`, `CacheblendLmcache` | Raise `NotImplementedError` before generation; native output retention requires backend changes. |
+| `HypicMethod`, `LinearKVMethod`, `HybridCacheRepair`, `CacheblendLmcache` | Raise `NotImplementedError` before generation; native output retention requires backend changes. |
 | `FullPrefillTransformer`, `FullPrefillVllm`, `FullRecomputeTransformer`, `DependencyAnalysisMethod` | Ignore the flag and keep baseline behavior without an error. |
 | `RolloutMethod` | Forward the flag to the base method for the final returned rollout only. |
 
@@ -76,6 +76,7 @@ Refer to each class constructor for its implementation and configurable paramete
 | `NaiveTransformer`, `NaiveCacheblendRepo` | Controls that directly reuse cached state without repairing context changes. |
 | `CacheblendRepo`, `CacheblendLmcache` | CacheBlend recomputation and fusion implementations; the former runs the bundled backend in `methods/Cacheblend` through a worker sharing the main project's Python environment. |
 | `HypicMethod`, `LinearKVMethod` | Built-in hybrid position-independent reuse in `methods/hypic`; both accept token IDs and explicit segment boundaries. HYPIC defaults to transition/RoPE/seam repair; LinearKV uses the last matched GDN state and static chunk-prefix repair. |
+| `HybridCacheRepair` | Qwen3.8 Hypic TRR GDN history with independently prefetched KV corrected by the trained repairer; details in `methods/HybridCacheRepair/README.md`. |
 | `A3Repo` | A^3 with bundled precompute, selection, fusion and decoding; Llama/Mistral/Qwen2/dense Qwen3. |
 | `ProphetKV` | ProphetKV implementation. |
 | `CacheClip` | CPU auxiliary-token selection with sparse repair of primary KV caches. Prepared chunks and prompts remain authoritative primary-model token IDs; selector text and character spans are derived locally from each prepared ID chunk. |

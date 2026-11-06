@@ -1,5 +1,7 @@
 """2WikiMultiHopQA task using the complete official labeled dev split.
 
+Official test answers are private, so local quality evaluation uses dev.
+
 Dataset: ``<DatasetPath>/2wikimultihopqa``
 (``2wikimultihopqa_dev.json``), prepared by :mod:`scripts.PrepareDataset` from
 the official authors' release. See :mod:`tasks.bases.KBBase` for the record

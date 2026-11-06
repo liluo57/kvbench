@@ -18,15 +18,20 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import gzip
 import hashlib
-import html
+import importlib.util
 import io
 import json
-import random
+import os
 import re
+import runpy
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -37,6 +42,8 @@ import yaml
 
 ProjectRoot = Path(__file__).resolve().parent.parent
 DefaultConfigPath = ProjectRoot / "config.yaml"
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(ProjectRoot))
 
 
 # ---------------------------------------------------------------------------
@@ -65,19 +72,64 @@ def _relative_path(value: Any, name: str) -> Path:
     return path
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _source_cache(url: str) -> Path:
+    return ProjectRoot / ".cache/dataset_sources" / _sha256(url.encode())
+
+
+def _google_drive_url(identifier: str) -> str:
+    return f"https://drive.usercontent.google.com/download?id={identifier}&export=download&confirm=t"
+
+
+def _download_file(url: str, timeout: int = 180) -> Path:
+    cache = _source_cache(url)
+    payload, metadata = cache / "payload", cache / "source.json"
+    if payload.is_file() and metadata.is_file():
+        saved = json.loads(metadata.read_text())
+        if saved["url"] != url or _file_sha256(payload) != saved["sha256"]:
+            raise ValueError(f"cached source was modified: {payload}")
+        return payload
+    cache.mkdir(parents=True, exist_ok=True)
+    partial = cache / "payload.part"
+    error = None
+    for attempt in range(4):
+        try:
+            if attempt == 0 and not partial.exists():
+                with urlopen(Request(url, headers={"User-Agent": "KVBench/PrepareDataset"}), timeout=timeout) as response:
+                    with partial.open("wb") as stream:
+                        shutil.copyfileobj(response, stream, 1024 * 1024)
+            else:
+                subprocess.run(
+                    ["curl", "--fail", "--location", "--silent", "--show-error",
+                     "--continue-at", "-", "--connect-timeout", "15", "--max-time", str(timeout),
+                     url, "--output", str(partial)], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 10,
+                )
+            if not partial.is_file() or not partial.stat().st_size:
+                raise ValueError("source download was empty")
+            partial.replace(payload)
+            _write_json(metadata, {"url": url, "sha256": _file_sha256(payload), "bytes": payload.stat().st_size})
+            return payload
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            error = str(exc)
+            if isinstance(exc, subprocess.CalledProcessError):
+                error += ": " + exc.stderr.decode("utf-8", "replace")
+                if "byte ranges" in error.lower():
+                    partial.unlink(missing_ok=True)
+            if attempt < 3:
+                time.sleep(attempt + 1)
+    raise RuntimeError(f"could not download {url}: {error}")
+
+
 def _download(url: str, timeout: int = 180) -> bytes:
-    request = Request(url, headers={"User-Agent": "KVBench/PrepareDataset"})
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            status = getattr(response, "status", 200)
-            if status != 200:
-                raise RuntimeError(f"HTTP {status} while downloading {url}")
-            body = response.read()
-    except Exception as exc:  # noqa: BLE001 - add the source URL to the error
-        raise RuntimeError(f"could not download {url}: {exc}") from exc
-    if not body:
-        raise RuntimeError(f"empty download: {url}")
-    return body
+    return _download_file(url, timeout).read_bytes()
 
 
 def _sha256(body: bytes) -> str:
@@ -192,9 +244,12 @@ def _adapt_musique_ans(row: Mapping[str, Any]) -> Dict[str, Any]:
     question = _text(row.get("question")).strip()
     answer = _text(row.get("answer")).strip()
     if not question or not answer:
-        raise ValueError("MuSiQue-Ans row is missing question or answer")
+        raise ValueError(
+            "MuSiQue-Ans row is missing question or answer; the official test "
+            "has private labels, so local F1/EM requires the labeled dev split"
+        )
     if row.get("answerable") is False:
-        raise ValueError("MuSiQue-Ans dev unexpectedly contains an unanswerable row")
+        raise ValueError("MuSiQue-Ans unexpectedly contains an unanswerable row")
 
     paragraphs = row.get("paragraphs")
     if not isinstance(paragraphs, list) or not paragraphs:
@@ -277,6 +332,8 @@ def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
     output = _relative_path(entry.get("Output"), "Direct.Output")
     fmt = entry.get("Format", "bytes")
     if fmt == "govreport_jsonl":
+        if entry.get("Split") != "test":
+            raise ValueError("GovReport's GAO/CRS test adapter requires Split=test")
         urls = entry.get("Urls")
         if not isinstance(urls, list) or not urls:
             raise ValueError("Direct.Urls must be non-empty for govreport_jsonl")
@@ -291,35 +348,27 @@ def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
                 )
         print(f"[dataset] materialized {count} govreport rows -> {output}")
         return
-    if fmt == "musique_ans_dev_google_drive_zip":
+    if fmt == "musique_ans_google_drive_zip":
         drive_id = entry.get("GoogleDriveId")
-        archive_file = entry.get("ArchiveFile", "data/musique_ans_v1.0_dev.jsonl")
+        split = entry.get("Split")
+        if split not in {"dev", "test"}:
+            raise ValueError("MuSiQue Split must be dev or test")
+        archive_file = entry.get("ArchiveFile")
+        if archive_file != f"data/musique_ans_v1.0_{split}.jsonl":
+            raise ValueError("MuSiQue ArchiveFile must match its declared Split")
         if not isinstance(drive_id, str) or not drive_id:
             raise ValueError("Direct.GoogleDriveId must be non-empty for MuSiQue")
         if not isinstance(archive_file, str) or not archive_file:
             raise ValueError("Direct.ArchiveFile must be a non-empty string")
+        url = _google_drive_url(drive_id)
+        archive_path = _download_file(url, timeout=900)
         try:
-            import gdown
-        except ImportError as exc:
-            raise RuntimeError(
-                "MuSiQue preparation needs gdown; install requirement.txt first"
-            ) from exc
-        with tempfile.TemporaryDirectory(prefix="kvbench-musique-") as temporary:
-            archive_path = Path(temporary) / "musique_v1.0.zip"
-            downloaded = gdown.download(
-                id=drive_id, output=str(archive_path), quiet=False
-            )
-            if not downloaded or not archive_path.is_file():
-                raise RuntimeError("could not download the official MuSiQue archive")
-            try:
-                with zipfile.ZipFile(archive_path) as archive:
-                    raw = archive.read(archive_file)
-            except KeyError as exc:
-                raise ValueError(
-                    f"official MuSiQue archive does not contain {archive_file!r}"
-                ) from exc
-            except zipfile.BadZipFile as exc:
-                raise ValueError("official MuSiQue download is not a valid ZIP") from exc
+            with zipfile.ZipFile(archive_path) as archive:
+                raw = archive.read(archive_file)
+        except KeyError as exc:
+            raise ValueError(f"official MuSiQue archive does not contain {archive_file!r}") from exc
+        except zipfile.BadZipFile as exc:
+            raise ValueError("official MuSiQue download is not a valid ZIP") from exc
         try:
             rows = [
                 json.loads(line)
@@ -339,9 +388,9 @@ def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
             expected_rows = _positive_int(expected_rows, "Direct.ExpectedRows")
             if count != expected_rows:
                 raise ValueError(
-                    f"MuSiQue-Ans dev has {count} rows; expected {expected_rows}"
+                    f"MuSiQue-Ans {split} has {count} rows; expected {expected_rows}"
                 )
-        print(f"[dataset] materialized all {count} official MuSiQue-Ans dev rows -> {output}")
+        print(f"[dataset] materialized all {count} official MuSiQue-Ans {split} rows -> {output}")
         return
     url = entry.get("Url")
     if not isinstance(url, str) or not url:
@@ -354,6 +403,8 @@ def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
         )
 
     if fmt == "samsum_test_7z":
+        if entry.get("Split") != "test":
+            raise ValueError("SAMSum test adapter requires Split=test")
         archive_file = entry.get("ArchiveFile", "test.json")
         if not isinstance(archive_file, str) or not archive_file:
             raise ValueError("Direct.ArchiveFile must be a non-empty string")
@@ -410,6 +461,8 @@ def _prepare_direct(entry: Mapping[str, Any], stage: Path) -> None:
 
     if fmt == "2wikimultihopqa_dev_zip":
         archive_file = entry.get("ArchiveFile", "data_ids/dev.json")
+        if entry.get("Split") != "dev" or archive_file != "data_ids/dev.json":
+            raise ValueError("2Wiki labeled dev adapter requires Split=dev and data_ids/dev.json")
         if not isinstance(archive_file, str) or not archive_file:
             raise ValueError("Direct.ArchiveFile must be a non-empty string")
         try:
@@ -537,10 +590,12 @@ def _answers_from_trivia(row: Mapping[str, Any]) -> List[str]:
         candidates = [answer]
     for candidate in candidates:
         value = _text(candidate).strip()
-        if value and value not in values:
+        if value and value.lower() != "<unk>" and value not in values:
             values.append(value)
     if not values:
-        raise ValueError("TriviaQA row has no answer")
+        raise ValueError(
+            "TriviaQA row has no public answer; local F1/EM requires the labeled validation split"
+        )
     return values
 
 
@@ -786,6 +841,17 @@ def _prepare_huggingface(entry: Mapping[str, Any], stage: Path) -> None:
     adapter = entry.get("Adapter")
     output = _relative_path(entry.get("Output"), "HuggingFace.Output")
     dataset = _load_huggingface(entry)
+    source_files = []
+    for cached in dataset.cache_files:
+        path = Path(cached["filename"])
+        revision = entry.get("Revision")
+        if revision and revision not in path.parts:
+            raise ValueError(f"cannot verify pinned HF revision {revision} from cache path {path}")
+        source_files.append({"file": str(path), "sha256": _file_sha256(path), "bytes": path.stat().st_size})
+    _write_json(stage / _top_level_directory(output) / "_metadata/huggingface.json", {
+        "dataset": entry["Dataset"], "revision": entry.get("Revision"),
+        "split": entry["Split"], "fingerprint": dataset._fingerprint, "cache_files": source_files,
+    })
     rows = (_row_dict(row) for row in dataset)
 
     if adapter == "mmlu":
@@ -856,262 +922,245 @@ def _prepare_huggingface(entry: Mapping[str, Any], stage: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-_NiahTemplate = (
-    "[INST] A special magic number is hidden within the following text. "
-    "Make sure to memorize it. I will quiz you about the number afterwards.\n"
-    "{context}\n"
-    "What is the special magic number for {query} mentioned in the provided text? [/INST]"
-)
-_NiahAnswerPrefix = " The special magic number for {query} mentioned in the provided text is"
-_NiahNeedle = "One of the special magic numbers for {key} is: {value}."
-_NiahPrefixMarker = " The speci"
-_VtTemplate = (
-    "[INST] Memorize and track the chain(s) of variable assignment hidden in "
-    "the following text.\n\n{context}\nQuestion: Find all variables that are "
-    "assigned the value {query} in the text above. [/INST]"
-)
-_VtAnswerPrefix = (
-    " Answer: According to the chain(s) of variable assignment in the text "
-    "above, {num_v} variables are assigned the value {query}, they are: "
-)
-_VtPrefixMarker = " Answer: "
-_CweTemplate = (
-    "[INST] Below is a numbered list of words. In these words, some appear "
-    "more often than others. Memorize the ones that appear most often.\n"
-    "{context}\nQuestion: What are the 10 most common words in the above list? [/INST]"
-)
-_CweAnswerPrefix = " Answer: The top 10 words that appear most often in the list are:"
-_CwePrefixMarker = " Answer: "
-_NoiseSentences = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again."
-
-
-def _num_tokens(tokenizer: Any, text: str) -> int:
+def _run_ruler(command: List[str], cwd: Path, env: Mapping[str, str]) -> str:
+    """Run unmodified, pinned upstream scripts with this interpreter."""
     try:
-        return len(tokenizer.encode(text, add_special_tokens=False))
-    except TypeError:
-        return len(tokenizer(text, add_special_tokens=False)["input_ids"])
+        completed = subprocess.run(
+            command, cwd=cwd, env=dict(env), check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            timeout=1800,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"official RULER script failed:\n{exc.stdout}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("official RULER script exceeded 30 minutes") from exc
+    if completed.stdout:
+        print(completed.stdout, end="", flush=True)
+    return completed.stdout or ""
 
 
-def _split_answer_prefix(full_prompt: str, marker: str) -> Tuple[str, str]:
-    index = full_prompt.rfind(marker)
-    if index < 0:
-        raise RuntimeError(f"RULER answer-prefix marker not found: {marker!r}")
-    return full_prompt[:index], full_prompt[index:]
+def _cached_ruler_download(url: str, path: Path, expected: str) -> bytes:
+    body = path.read_bytes() if path.is_file() else _download(url)
+    if _sha256(body) != expected:
+        raise ValueError(f"RULER checksum mismatch: {url} (cache: {path})")
+    if not path.is_file():
+        _write_bytes(path, body)
+    return body
 
 
-def _sentences(text: str) -> List[str]:
-    return [part for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part]
+def _ruler_source(config: Mapping[str, Any], work: Path, cache: Path) -> Path:
+    revision = _text(config.get("Revision"))
+    checksum = _text(config.get("ArchiveSha256"))
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("Ruler.Revision must pin a full official Git commit")
+    if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+        raise ValueError("Ruler.ArchiveSha256 must pin the source archive checksum")
+    archive = _cached_ruler_download(
+        f"https://codeload.github.com/NVIDIA/RULER/zip/{revision}",
+        cache / "source.zip", checksum,
+    )
+    prefix = f"RULER-{revision}/scripts/"
+    scripts = work / "scripts"
+    with zipfile.ZipFile(io.BytesIO(archive)) as source:
+        for member in source.infolist():
+            if member.is_dir() or not member.filename.startswith(prefix):
+                continue
+            relative = _relative_path(member.filename[len(prefix):], "RULER source member")
+            _write_bytes(scripts / relative, source.read(member))
+    if not (scripts / "data/prepare.py").is_file():
+        raise ValueError("official RULER archive contains no generation scripts")
+    return scripts
 
 
-def _largest_fit(
-    build: Callable[[int], Tuple[str, Any]],
-    tokenizer: Any,
-    maximum: int,
-    tokens_to_generate: int,
-    incremental: int,
-) -> int:
-    initial, _ = build(incremental)
-    tokens_per_unit = max(_num_tokens(tokenizer, initial) / incremental, 1.0)
-    lower, upper = incremental, max(int(maximum / tokens_per_unit * 3), incremental * 2)
-    best: Optional[int] = None
-    while lower <= upper:
-        middle = (lower + upper) // 2
-        full, _ = build(middle)
-        if _num_tokens(tokenizer, full) + tokens_to_generate <= maximum:
-            best = middle
-            lower = middle + 1
-        else:
-            upper = middle - 1
-    return best if best is not None else incremental
+def _ruler_assets(scripts: Path, cache: Path, revision: str, needs_essays: bool,
+                  env: Mapping[str, str]) -> Dict[str, str]:
+    assets = scripts / "data/synthetic/json"
+    pointer = (assets / "english_words.json").read_text(encoding="utf-8")
+    match = re.search(r"^oid sha256:([0-9a-f]{64})$", pointer, re.MULTILINE)
+    if not match:
+        raise ValueError("official RULER English word list has no Git LFS checksum")
+    words = _cached_ruler_download(
+        f"https://media.githubusercontent.com/media/NVIDIA/RULER/{revision}/"
+        "scripts/data/synthetic/json/english_words.json",
+        cache / "english_words.json", match.group(1),
+    )
+    _write_bytes(assets / "english_words.json", words)
+    hashes = {"english_words.json": _sha256(words)}
+    if needs_essays:
+        from scripts.PrepareRulerCorpus import prepare_sources
+
+        # Never reuse the incomplete corpus produced by the old best-effort fetch.
+        sources = prepare_sources(assets / "PaulGrahamEssays_URLs.txt", cache)
+        source_count = len(json.loads(sources.read_text())["sources"])
+        source_hash = _file_sha256(sources)
+        corpus_path, report_path = cache / "PaulGrahamEssays.json", cache / "corpus_sources.json"
+        saved = json.loads(report_path.read_text()) if report_path.is_file() else {}
+        valid = (
+            saved.get("complete") is True
+            and saved.get("raw_manifest_sha256") == source_hash
+            and corpus_path.is_file()
+            and saved.get("corpus_sha256") == _file_sha256(corpus_path)
+        )
+        if not valid:
+            print("[dataset] rendering the complete official NIAH corpus from verified source files", flush=True)
+            wrapper = ProjectRoot / "scripts/PrepareRulerCorpus.py"
+            log = _run_ruler([
+                sys.executable, str(wrapper), "--render", str(assets / "download_paulgraham_essay.py"),
+                "--manifest", str(sources),
+            ], assets, env)
+            _write_bytes(cache / "essay_download.log", log.encode("utf-8"))
+            counts = [int(value) for value in re.findall(r"Download (\d+) essays", log)]
+            if "Fail download " in log or sum(counts) != source_count:
+                raise RuntimeError("official RULER parser skipped source files; refusing a partial corpus")
+            corpus = (assets / "PaulGrahamEssays.json").read_bytes()
+            if not _text(json.loads(corpus).get("text")).strip():
+                raise ValueError("official RULER parser produced an empty corpus")
+            _write_bytes(corpus_path, corpus)
+            _write_json(report_path, {
+                "complete": True, "requested_urls": source_count,
+                "downloaded_essays": source_count, "failed_downloads": 0,
+                "raw_manifest_sha256": source_hash, "corpus_sha256": _sha256(corpus),
+            })
+        corpus = corpus_path.read_bytes()
+        _write_bytes(assets / "PaulGrahamEssays.json", corpus)
+        hashes["PaulGrahamEssays.json"] = _sha256(corpus)
+        hashes["corpus_sources_manifest.json"] = source_hash
+    return hashes
 
 
-def _load_ruler_words(url: str) -> List[str]:
-    body = _download(url).decode("utf-8")
-    try:
-        payload = json.loads(body)
-        values = payload.values() if isinstance(payload, Mapping) else payload
-        words = [_text(word).strip().lower() for word in values]
-    except json.JSONDecodeError:
-        words = [line.strip().lower() for line in body.splitlines()]
-    words = sorted({word for word in words if re.fullmatch(r"[a-z][a-z-]{2,30}", word)})
-    if len(words) < 20:
-        raise ValueError(f"RULER word source has too few usable words: {url}")
-    return words
+def _ruler_environment(cache: Path) -> Dict[str, str]:
+    required = ("nltk", "wonderwords", "html2text", "bs4", "tenacity")
+    missing = [name for name in required if importlib.util.find_spec(name) is None]
+    if missing:
+        raise RuntimeError(
+            f"official RULER generation needs {', '.join(missing)}; "
+            "install requirement.txt first"
+        )
+    import nltk
+
+    # Keep NLTK downloads inside the project, including in upstream subprocesses.
+    nltk_dir = cache / "nltk_data"
+    nltk_dir.mkdir(parents=True, exist_ok=True)
+    for resource in ("punkt", "punkt_tab"):
+        try:
+            nltk.data.find(f"tokenizers/{resource}", paths=[str(nltk_dir)])
+        except LookupError:
+            if not nltk.download(resource, download_dir=str(nltk_dir), quiet=True, raise_on_error=True):
+                raise RuntimeError(f"could not download NLTK {resource} for official RULER")
+    env = dict(os.environ)
+    env["NLTK_DATA"] = str(nltk_dir)
+    return env
 
 
-def _load_ruler_corpus(urls_url: str) -> str:
-    urls = [line.strip() for line in _download(urls_url).decode("utf-8").splitlines() if line.strip()]
-    chunks: List[str] = []
-    for url in urls:
-        raw = _download(url).decode("utf-8", "replace")
-        if ".html" in url:
-            body = re.search(r"<font[^>]*>(.*?)</font>", raw, re.IGNORECASE | re.DOTALL)
-            text = body.group(1) if body else raw
-            text = html.unescape(re.sub(r"<[^>]+>", " ", text))
-        else:
-            text = raw
-        text = re.sub(r"\s+", " ", text).strip()
-        if len(text) > 2000:
-            chunks.append(text)
-    if not chunks:
-        raise RuntimeError("RULER corpus download produced no usable essays")
-    return "\n".join(chunks)
-
-
-def _write_ruler_records(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
-    _write_jsonl(path, records)
-
-
-def _generate_niah(tokenizer: Any, corpus: str, words: Sequence[str], spec: Mapping[str, Any], path: Path) -> None:
-    samples = _positive_int(spec.get("Samples"), "Ruler.Tasks[].Samples")
-    maximum = _positive_int(spec.get("Length"), "Ruler task length")
-    budget = _positive_int(spec.get("TokensToGenerate"), "Ruler.Tasks[].TokensToGenerate")
-    seed = int(spec.get("Seed", 42))
-    random.seed(seed)
-    haystack = re.sub(r"\s+", " ", corpus).strip().split(" ")
-
-    def build(count: int) -> Tuple[str, Dict[str, Any]]:
-        text = " ".join((haystack * ((count + len(haystack) - 1) // len(haystack)))[:count])
-        sentence_list = _sentences(text)
-        depth = random.randint(0, 100)
-        key = random.choice(words)
-        value = str(random.randint(10**6, 10**7 - 1))
-        needle = _NiahNeedle.format(key=key, value=value)
-        position = int(len(sentence_list) * depth / 100)
-        context = " ".join(sentence_list[:position] + [needle] + sentence_list[position:])
-        full = _NiahTemplate.format(context=context, query=key) + _NiahAnswerPrefix.format(query=key)
-        return full, {"needle": needle, "value": value, "depth": depth}
-
-    count = _largest_fit(build, tokenizer, maximum, budget, 500)
-    records: List[Dict[str, Any]] = []
-    for index in range(samples):
-        full, meta = build(count)
-        input_text, answer_prefix = _split_answer_prefix(full, _NiahPrefixMarker)
-        answer_offset = input_text.find(meta["value"])
-        records.append({
-            "index": answer_offset,
-            "input": input_text,
-            "outputs": [meta["value"]],
-            "length": _num_tokens(tokenizer, full) + budget,
-            "length_w_model_temp": _num_tokens(tokenizer, full) + budget,
-            "answer_prefix": answer_prefix,
-            "token_position_answer": _num_tokens(tokenizer, input_text[:answer_offset]),
-            "needle": meta["needle"],
-            "depth_percent": meta["depth"],
-        })
-    _write_ruler_records(path, records)
-
-
-def _generate_vt(tokenizer: Any, spec: Mapping[str, Any], path: Path) -> None:
-    samples = _positive_int(spec.get("Samples"), "Ruler.Tasks[].Samples")
-    maximum = _positive_int(spec.get("Length"), "Ruler task length")
-    budget = _positive_int(spec.get("TokensToGenerate"), "Ruler.Tasks[].TokensToGenerate")
-    seed = int(spec.get("Seed", 42))
-    random.seed(seed)
-
-    def build(count: int) -> Tuple[str, Dict[str, Any]]:
-        variables = ["".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ", k=5)) for _ in range(5)]
-        while len(set(variables)) != len(variables):
-            variables = ["".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ", k=5)) for _ in range(5)]
-        value = str(random.randint(10000, 99999))
-        chain = [f"VAR {variables[0]} = {value}"] + [
-            f"VAR {variables[index]} = VAR {variables[index - 1]} " for index in range(1, 5)
-        ]
-        sentences = [_NoiseSentences] * count
-        positions = sorted(random.sample(range(len(sentences)), len(chain)))
-        for offset, sentence in enumerate(chain):
-            sentences.insert(positions[offset] + offset, sentence)
-        context = "\n".join(sentences).replace(". \n", ".\n")
-        full = _VtTemplate.format(context=context, query=value) + _VtAnswerPrefix.format(query=value, num_v=5)
-        return full, {"variables": variables}
-
-    count = _largest_fit(build, tokenizer, maximum, budget, 5)
-    records: List[Dict[str, Any]] = []
-    for index in range(samples):
-        full, meta = build(count)
-        input_text, answer_prefix = _split_answer_prefix(full, _VtPrefixMarker)
-        length = _num_tokens(tokenizer, full) + budget
-        records.append({
-            "index": index,
-            "input": input_text,
-            "outputs": meta["variables"],
-            "length": length,
-            "length_w_model_temp": length,
-            "answer_prefix": answer_prefix,
-        })
-    _write_ruler_records(path, records)
-
-
-def _generate_cwe(tokenizer: Any, words: Sequence[str], spec: Mapping[str, Any], path: Path) -> None:
-    samples = _positive_int(spec.get("Samples"), "Ruler.Tasks[].Samples")
-    maximum = _positive_int(spec.get("Length"), "Ruler task length")
-    budget = _positive_int(spec.get("TokensToGenerate"), "Ruler.Tasks[].TokensToGenerate")
-    seed = int(spec.get("Seed", 42))
-    random.seed(seed)
-
-    def build(count: int) -> Tuple[str, Dict[str, Any]]:
-        if count > len(words):
-            raise ValueError("RULER CWE needs more configured words than the source provides")
-        selected = random.sample(list(words), count)
-        common, uncommon = selected[:10], selected[10:]
-        items = list(common) * 30 + list(uncommon) * 3
-        random.shuffle(items)
-        context = " ".join(f"{index}. {word}" for index, word in enumerate(items, 1))
-        return _CweTemplate.format(context=context) + _CweAnswerPrefix, {"common": common}
-
-    count = _largest_fit(build, tokenizer, maximum, budget, 50)
-    records: List[Dict[str, Any]] = []
-    for index in range(samples):
-        full, meta = build(count)
-        input_text, answer_prefix = _split_answer_prefix(full, _CwePrefixMarker)
-        length = _num_tokens(tokenizer, full) + budget
-        records.append({
-            "index": index,
-            "input": input_text,
-            "outputs": meta["common"],
-            "length": length,
-            "length_w_model_temp": length,
-            "answer_prefix": answer_prefix,
-        })
-    _write_ruler_records(path, records)
+def _validate_ruler_output(path: Path, samples: int, length: int) -> None:
+    if not path.is_file():
+        raise RuntimeError(f"official RULER did not generate the requested test file: {path}")
+    rows = _read_json_records(path)
+    if len(rows) != samples:
+        raise ValueError(f"official RULER generated {len(rows)} rows, expected {samples}: {path}")
+    for index, row in enumerate(rows):
+        outputs = row.get("outputs")
+        if not _text(row.get("input")).strip() or not isinstance(outputs, list) or not outputs:
+            raise ValueError(f"official RULER row {index} has no input or answers: {path}")
+        if any(value is None or not str(value).strip() for value in outputs):
+            raise ValueError(f"official RULER row {index} has an empty answer: {path}")
+        if not isinstance(row.get("length"), int) or not 0 < row["length"] <= length:
+            raise ValueError(f"official RULER row {index} exceeds length {length}: {path}")
 
 
 def _prepare_ruler(config: Mapping[str, Any], stage: Path, full_config: Mapping[str, Any]) -> None:
     tasks = config.get("Tasks")
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("Ruler.Tasks must be a non-empty list")
+    if config.get("Split") != "test":
+        raise ValueError("Ruler.Split must explicitly be test")
     tokenizer_name = config.get("Tokenizer")
     if tokenizer_name == "ModelPath":
         tokenizer_name = full_config.get("ModelPath")
     if not isinstance(tokenizer_name, str) or not tokenizer_name:
         raise ValueError("Ruler.Tokenizer must be a path or ModelPath")
-    try:
-        from transformers import AutoTokenizer
-    except ImportError as exc:
-        raise RuntimeError("RULER preparation needs transformers") from exc
-    print(f"[dataset] loading RULER tokenizer {tokenizer_name}")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    words = _load_ruler_words(str(config.get("WordList")))
-    corpus = _load_ruler_corpus(str(config.get("CorpusUrls")))
+    tokenizer_path = Path(tokenizer_name).expanduser()
+    if tokenizer_path.exists():
+        tokenizer_name = str(tokenizer_path.resolve())
 
-    for raw_spec in tasks:
-        task = _mapping(raw_spec, "Ruler.Tasks[]")
-        name = task.get("Task")
-        lengths = task.get("Lengths")
-        if name not in {"niah", "vt", "cwe"} or not isinstance(lengths, list) or not lengths:
-            raise ValueError("Ruler task must declare Task=niah/vt/cwe and non-empty Lengths")
-        for length_value in lengths:
-            length = _positive_int(length_value, "Ruler.Tasks[].Lengths[]")
-            spec = dict(task)
-            spec["Length"] = length
-            output = stage / "ruler" / f"{name}_len{length}.jsonl"
-            if name == "niah":
-                _generate_niah(tokenizer, corpus, words, spec, output)
-            elif name == "vt":
-                _generate_vt(tokenizer, spec, output)
-            else:
-                _generate_cwe(tokenizer, words, spec, output)
-            print(f"[dataset] generated RULER {output.relative_to(stage)}")
+    revision = _text(config.get("Revision"))
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("Ruler.Revision must pin a full official Git commit")
+    cache = ProjectRoot / ".cache/ruler" / revision
+    cache.mkdir(parents=True, exist_ok=True)
+    env = _ruler_environment(cache)
+    provenance: Dict[str, Any] = {
+        "repository": "https://github.com/NVIDIA/RULER", "revision": revision,
+        "archive_sha256": config.get("ArchiveSha256"), "split": "test",
+        "tokenizer": tokenizer_name, "model_template": "base", "files": [],
+    }
+    with tempfile.TemporaryDirectory(prefix="kvbench-ruler-") as temporary:
+        work = Path(temporary)
+        scripts = _ruler_source(config, work, cache)
+        official = yaml.safe_load((scripts / "synthetic.yaml").read_text())
+        constants = runpy.run_path(str(scripts / "data/synthetic/constants.py"))["TASKS"]
+        generators = {"niah": "niah", "vt": "variable_tracking", "cwe": "common_words_extraction"}
+        resolved = []
+        for raw in tasks:
+            task = _mapping(raw, "Ruler.Tasks[]")
+            name, official_name = task.get("Task"), task.get("OfficialTask")
+            if name not in generators or official_name not in official:
+                raise ValueError("Ruler task must declare Task=niah/vt/cwe and an official OfficialTask")
+            definition = official[official_name]
+            if definition["task"] != generators[name]:
+                raise ValueError(f"Ruler task {name} does not match official task {official_name}")
+            lengths = task.get("Lengths")
+            if not isinstance(lengths, list) or not lengths:
+                raise ValueError("Ruler.Tasks[].Lengths must be a non-empty list")
+            samples = _positive_int(task.get("Samples"), "Ruler.Tasks[].Samples")
+            resolved.append((task, definition, constants[definition["task"]], samples))
+        provenance["assets_sha256"] = _ruler_assets(
+            scripts, cache, revision,
+            any(definition["args"].get("type_haystack") == "essay" for _, definition, _, _ in resolved), env,
+        )
+        corpus_report = cache / "corpus_sources.json"
+        if corpus_report.is_file() and "PaulGrahamEssays.json" in provenance["assets_sha256"]:
+            provenance["corpus_download"] = json.loads(corpus_report.read_text())
+            _write_bytes(stage / "ruler/_metadata/corpus_sources.json",
+                         (cache / "corpus_sources_manifest.json").read_bytes())
+            report = provenance["corpus_download"]
+            print(
+                f"[dataset] official NIAH corpus: {report['downloaded_essays']}/"
+                f"{report['requested_urls']} essays, {report['failed_downloads']} failed URLs; "
+                "recorded in provenance", flush=True,
+            )
+        for task, definition, defaults, samples in resolved:
+            name, official_name = task["Task"], task["OfficialTask"]
+            seed = int(task.get("Seed", 42))
+            budget = _positive_int(task.get("TokensToGenerate", defaults["tokens_to_generate"]),
+                                   "Ruler.Tasks[].TokensToGenerate")
+            for raw_length in task["Lengths"]:
+                length = _positive_int(raw_length, "Ruler.Tasks[].Lengths[]")
+                output_dir = work / "generated" / str(length)
+                command = [
+                    sys.executable, str(scripts / f"data/synthetic/{definition['task']}.py"),
+                    "--save_dir", str(output_dir), "--save_name", official_name,
+                    "--subset", "test", "--tokenizer_path", tokenizer_name,
+                    "--tokenizer_type", "hf", "--max_seq_length", str(length),
+                    "--tokens_to_generate", str(budget), "--num_samples", str(samples),
+                    "--random_seed", str(seed),
+                    "--template", defaults["template"] + defaults.get("answer_prefix", ""),
+                ]
+                for key, value in definition["args"].items():
+                    command.extend([f"--{key}", str(value)])
+                print(f"[dataset] official RULER {official_name}/test length={length} samples={samples}", flush=True)
+                _run_ruler(command, scripts, env)
+                generated = output_dir / official_name / "test.jsonl"
+                _validate_ruler_output(generated, samples, length)
+                output = stage / "ruler" / f"{name}_len{length}.jsonl"
+                body = generated.read_bytes()
+                _write_bytes(output, body)
+                provenance["files"].append({
+                    "file": output.name, "official_task": official_name, "samples": samples,
+                    "max_seq_length": length, "seed": seed, "tokens_to_generate": budget,
+                    "args": definition["args"], "sha256": _sha256(body),
+                })
+        _write_json(stage / "ruler/provenance.json", provenance)
 
 
 # ---------------------------------------------------------------------------
@@ -1132,7 +1181,17 @@ def _validate_preparation_config(config: Mapping[str, Any]) -> Mapping[str, Any]
         raise ValueError("DatasetPreparation.Direct must be a list")
     if not isinstance(preparation.get("HuggingFace", []), list):
         raise ValueError("DatasetPreparation.HuggingFace must be a list")
-    _mapping(preparation.get("Ruler"), "DatasetPreparation.Ruler")
+    for group in ("Direct", "HuggingFace"):
+        for raw in preparation.get(group, []):
+            entry = _mapping(raw, f"DatasetPreparation.{group}[]")
+            if entry.get("Split") != "test" and not _text(entry.get("SplitReason")).strip():
+                raise ValueError(
+                    f"{entry.get('Output')}: use Split=test, or explain the labeled "
+                    "evaluation exception in SplitReason"
+                )
+    ruler = _mapping(preparation.get("Ruler"), "DatasetPreparation.Ruler")
+    if ruler.get("Split") != "test":
+        raise ValueError("Ruler.Split must explicitly be test")
     return preparation
 
 
@@ -1148,6 +1207,101 @@ def _planned_outputs(preparation: Mapping[str, Any]) -> List[str]:
     return [str(item) for item in outputs]
 
 
+def _record_source(stage: Path, entry: Mapping[str, Any], kind: str) -> None:
+    directory = _top_level_directory(_relative_path(entry.get("Output"), f"{kind}.Output"))
+    urls = entry.get("Urls") or ([entry["Url"]] if entry.get("Url") else [])
+    if entry.get("GoogleDriveId"):
+        urls = [_google_drive_url(entry["GoogleDriveId"])]
+    artifacts = []
+    for url in urls:
+        metadata = _source_cache(url) / "source.json"
+        if metadata.is_file():
+            artifacts.append(json.loads(metadata.read_text()))
+    _write_json(stage / directory / "_metadata/source.json", {"kind": kind, **entry, "downloaded_artifacts": artifacts})
+
+
+def _preparation_fingerprint(config: Mapping[str, Any]) -> str:
+    ruler = config["DatasetPreparation"]["Ruler"]
+    tokenizer = config.get("ModelPath") if ruler.get("Tokenizer") == "ModelPath" else ruler.get("Tokenizer")
+    return _sha256(json.dumps({"preparation": config["DatasetPreparation"], "tokenizer": tokenizer},
+                              sort_keys=True, ensure_ascii=False).encode())
+
+
+def _generator_hashes() -> Dict[str, str]:
+    return {f"scripts/{name}": _file_sha256(Path(__file__).with_name(name))
+            for name in ("PrepareDataset.py", "PrepareRulerCorpus.py")}
+
+
+def _write_preparation_manifest(stage: Path, config: Mapping[str, Any]) -> None:
+    preparation = config["DatasetPreparation"]
+    files = []
+    for directory in preparation["DatasetDirectories"]:
+        for path in sorted((stage / directory).rglob("*")):
+            if path.is_file():
+                files.append({"path": path.relative_to(stage).as_posix(),
+                              "sha256": _file_sha256(path), "bytes": path.stat().st_size})
+    sources = [{"kind": group, **entry} for group in ("Direct", "HuggingFace")
+               for entry in preparation.get(group, [])]
+    _write_json(stage / "preparation.json", {
+        "schema": 1, "created_utc": datetime.now(timezone.utc).isoformat(),
+        "preparation_sha256": _preparation_fingerprint(config),
+        "generators": _generator_hashes(), "sources": sources,
+        "ruler": json.loads((stage / "ruler/provenance.json").read_text()),
+        "directories": preparation["DatasetDirectories"], "files": files,
+    })
+
+
+def verify(config_path: Path) -> Dict[str, Any]:
+    """Verify the installed bytes against the producing code and source plan."""
+    config = _load_config(config_path)
+    root = _dataset_root(config, config_path)
+    manifest_path = root / "preparation.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"no preparation manifest: {manifest_path}; regenerate the data first")
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("schema") != 1:
+        raise ValueError("unsupported preparation manifest schema")
+    if manifest["preparation_sha256"] != _preparation_fingerprint(config) or manifest["generators"] != _generator_hashes():
+        raise ValueError("dataset configuration or producing scripts changed; regenerate the data")
+    expected = {entry["path"] for entry in manifest["files"]}
+    actual = {path.relative_to(root).as_posix() for directory in manifest["directories"]
+              for path in (root / directory).rglob("*") if path.is_file()}
+    if actual != expected:
+        raise ValueError(f"prepared data files changed: missing={sorted(expected-actual)}, extra={sorted(actual-expected)}")
+    for entry in manifest["files"]:
+        path = root / _relative_path(entry["path"], "manifest file")
+        if path.stat().st_size != entry["bytes"] or _file_sha256(path) != entry["sha256"]:
+            raise ValueError(f"prepared data failed integrity verification: {path}")
+    print(f"[dataset] verified {len(expected)} files against current configuration and producing scripts: {root}")
+    return manifest
+
+
+def _install_prepared(stage: Path, root: Path, directories: Sequence[str]) -> Path:
+    """Keep the old datasets and roll back if any installation step fails."""
+    backup_parent = root.parent / f".{root.name}.backups"
+    backup_parent.mkdir(parents=True, exist_ok=True)
+    backup = Path(tempfile.mkdtemp(prefix=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-"), dir=backup_parent))
+    root.mkdir(parents=True, exist_ok=True)
+    units = [*directories, "preparation.json"]
+    installed, saved = [], []
+    try:
+        for name in units:
+            destination = root / name
+            if destination.exists():
+                destination.rename(backup / name)
+                saved.append(name)
+            (stage / name).rename(destination)
+            installed.append(name)
+    except Exception:
+        for name in reversed(installed):
+            (root / name).rename(stage / name)
+        for name in reversed(saved):
+            (backup / name).rename(root / name)
+        raise
+    print(f"[dataset] previous data retained at {backup}")
+    return backup
+
+
 def prepare(config_path: Path, dry_run: bool = False) -> Path:
     config = _load_config(config_path)
     preparation = _validate_preparation_config(config)
@@ -1157,8 +1311,8 @@ def prepare(config_path: Path, dry_run: bool = False) -> Path:
     if dry_run:
         print(f"[dataset] DatasetPath: {root}")
         for entry in preparation.get("Direct", []):
-            source = entry.get("Url", entry.get("Urls"))
-            print(f"[dataset] direct: {source} -> {entry.get('Output')}")
+            source = entry.get("Url", entry.get("Urls")) or f"GoogleDrive:{entry.get('GoogleDriveId')}"
+            print(f"[dataset] direct: {source} split={entry.get('Split')} -> {entry.get('Output')}")
         for entry in preparation.get("HuggingFace", []):
             print(
                 f"[dataset] hf: {entry.get('Dataset')}"
@@ -1166,29 +1320,34 @@ def prepare(config_path: Path, dry_run: bool = False) -> Path:
             )
         for directory in directories:
             print(f"[dataset] replaces: {directory}/")
-        print("[dataset] RULER generation is configured")
+        ruler = preparation["Ruler"]
+        for task in ruler.get("Tasks", []):
+            print(
+                f"[dataset] official RULER: {task.get('OfficialTask')}/{ruler.get('Split')} "
+                f"lengths={task.get('Lengths')} samples={task.get('Samples')} "
+                f"revision={ruler.get('Revision')}"
+            )
         return root
 
     root.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{root.name}.prepare-", dir=root.parent))
     try:
         for raw in preparation.get("Direct", []):
-            _prepare_direct(_mapping(raw, "DatasetPreparation.Direct[]"), stage)
+            entry = _mapping(raw, "DatasetPreparation.Direct[]")
+            _prepare_direct(entry, stage)
+            _record_source(stage, entry, "Direct")
         for raw in preparation.get("HuggingFace", []):
-            _prepare_huggingface(_mapping(raw, "DatasetPreparation.HuggingFace[]"), stage)
+            entry = _mapping(raw, "DatasetPreparation.HuggingFace[]")
+            _prepare_huggingface(entry, stage)
+            _record_source(stage, entry, "HuggingFace")
         _prepare_ruler(_mapping(preparation.get("Ruler"), "DatasetPreparation.Ruler"), stage, config)
 
         for directory in directories:
             staged = stage / directory
             if not staged.is_dir():
                 raise RuntimeError(f"configured dataset directory was not generated: {directory}")
-        root.mkdir(parents=True, exist_ok=True)
-        for directory in directories:
-            destination = root / directory
-            if destination.exists():
-                shutil.rmtree(destination)
-            shutil.move(str(stage / directory), str(destination))
-            print(f"[dataset] installed {destination}")
+        _write_preparation_manifest(stage, config)
+        _install_prepared(stage, root, directories)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
     return root
@@ -1207,7 +1366,11 @@ def main() -> None:
         action="store_true",
         help="validate and print the configured plan without downloading or writing",
     )
+    parser.add_argument("--verify", action="store_true", help="check installed file hashes and producing configuration/code without downloading")
     args = parser.parse_args()
+    if args.verify:
+        verify(args.config.resolve())
+        return
     root = prepare(args.config.resolve(), dry_run=args.dry_run)
     print(f"[dataset] ready: {root}")
 

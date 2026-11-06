@@ -83,3 +83,23 @@ def test_ruler_loader_rejects_missing_or_blank_outputs(tmp_path, outputs):
 
     with pytest.raises(ValueError, match=r"sample_len8\.jsonl:1"):
         _RulerTask(dataDir=str(tmp_path))._LoadSamples()
+
+
+def test_official_cwe_fewshot_stays_before_shuffled_test_list(tmp_path, modelPath):
+    from tasks.Cwe import CWEShuffleTask
+
+    header = "Below is a numbered list of words. Memorize the ones that appear most often.\n"
+    question = "Question: What are the 10 most common words in the above list?"
+    demonstration = header + "1. example 2. example\n" + question + " Answer: example\n"
+    test_list = " ".join(f"{i + 1}. word{i}" for i in range(20)) + "\n"
+    row = {"input": demonstration + header + test_list + question,
+           "outputs": ["word0"], "answer_prefix": " Answer:", "index": 42}
+    (tmp_path / "cwe_len4096.jsonl").write_text(json.dumps(row) + "\n")
+    task = CWEShuffleTask(dataDir=str(tmp_path))
+    sample = task._LoadSamples()[0]
+    body, prefix = task._StripTemplate(sample)
+    segments = task._SplitSegments(sample, body, prefix)
+    assert demonstration + header in segments[0]
+    assert "".join(segments[1:-1]) == test_list
+    assert "".join(task._Shuffled(segments[1:-1], 42)) != test_list
+    assert len(list(task.Cases())) == 1
