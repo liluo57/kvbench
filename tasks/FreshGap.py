@@ -3,12 +3,12 @@
 Structure:
 
     Prepare: [A, C]
-    Run:      A + [fresh B] + C + Q
+    Run:      [fresh instruction] + A + [fresh B] + C + [fresh question]
 
-``Q`` is the fresh assistant-generation suffix.  It is intentionally not part
-of C: HYPIC reserves the final PIC segment for the query whose logits seed
-decode. Keeping Q separate lets the benchmark test reuse of the *final
-prepared segment* C without bypassing that runtime contract.
+The instruction and question stay outside the prepared document chunks. The
+assistant-generation suffix follows the question and also stays fresh. Keeping
+the question after C lets the benchmark test reuse of the *final prepared
+segment* without bypassing HYPIC's final-query-token contract.
 
 A and C are both long and roughly equal in size. B is only a few tokens.
 
@@ -60,15 +60,15 @@ class FreshGapTask(Task):
         # This is an exact-answer microbenchmark; disable the model's optional
         # chain-of-thought preamble so the answer fits in the smoke budget.
         thinking = False
-        self._a = user_turn_prefix(modelPath, thinking=thinking) + (
+        self._instruction = user_turn_prefix(modelPath, thinking=thinking) + (
             "Read the following context and answer the final question. "
             "Return only the requested numeric code.\n\n"
-            + self._Filler("A")
         )
 
-        self._c = (
-            self._Filler("C")
-            + "\nWhat is the transient code? "
+        self._a = self._Filler("A")
+        self._c = self._Filler("C")
+        self._query = (
+            "\nWhat is the transient code? "
             "Answer with the numeric code only.\n"
         )
         # HYPIC's last segment is the query segment and is deliberately not
@@ -85,7 +85,10 @@ class FreshGapTask(Task):
 
             data = RAGInput(
                 prepare_input=[self._a, self._c],
-                run_input=self._a + fresh + self._c + self._query_tail,
+                run_input=(
+                    self._instruction + self._a + fresh + self._c
+                    + self._query + self._query_tail
+                ),
             )
 
             yield Case(

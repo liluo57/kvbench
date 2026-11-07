@@ -27,7 +27,7 @@ Case payload contract
     ``workflow = RAGWorkflow`` (skip Prepare, just Run)
 
 :class:`VTShuffleTask`:
-    ``input = RAGInput(prepare_input=segments, run_input=shuffled_prompt)``
+    ``input = RAGInput(prepare_input=segments[1:-1], run_input=shuffled_prompt)``
     ``workflow = RAGWorkflow`` (Prepare → Run)
 
 ``chain`` is the test example's assignments, each paired with the noise that
@@ -79,15 +79,15 @@ class VTTask(RulerBase):
 class VTShuffleTask(VTTask):
     """The same content, but the test chain's assignments are shuffled.
 
-    ``prepare_input`` is ``[head, *chain, tail]`` — the original-order segments
-    handed to reuse methods as a chunk-isolated context; ``run_input`` keeps
-    ``head``/``tail`` in place and permutes ``chain``, the test example's
-    assignments (each with its trailing noise). The reorder changes the prompt
-    text but leaves every assignment readable, so a cacheblend method that
-    re-detects the segments and reuses the stored per-chunk KV can still resolve
-    the chain; the naive control that blindly serves the stale stitched KV
-    cannot. ``_Shuffled`` guarantees the shuffled join differs from the original
-    text.
+    ``prepare_input`` is ``[*chain]`` — only the test example's assignment/noise
+    document segments. The ``head`` (few-shot example + instruction + leading
+    noise) and ``tail`` (trailing noise + question + assistant header) stay
+    fresh. ``run_input`` keeps them in place and permutes the chain segments.
+    The reorder changes the prompt text but leaves every assignment readable,
+    so a cacheblend method that re-detects and reuses the document chunks can
+    still resolve the chain; the naive control that blindly serves the stale
+    stitched KV cannot. ``_Shuffled`` guarantees the shuffled join differs from
+    the original text.
     """
 
     name = "vt_shuffle"
@@ -131,7 +131,7 @@ class VTShuffleTask(VTTask):
             fullPrompt = "".join(segments)
             chain = self._Shuffled(segments[1:-1], seed=int(s.get("index", i)))
             run_input = segments[0] + "".join(chain) + segments[-1]
-            data = RAGInput(prepare_input=segments, run_input=run_input)
+            data = RAGInput(prepare_input=segments[1:-1], run_input=run_input)
             yield Case(
                 input=data,
                 workflow=RAGWorkflow(case_id=i, data=data),

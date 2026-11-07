@@ -42,4 +42,4 @@ class TriviaQATask(QABase):
             return [], ""
         # ``input`` already contains the final Passage/Question/Answer block
         # from LongBench, so it is the fresh suffix after the cached examples.
-        return PassageChunks(context, prefix=self.prefixPrompt), f"\n\n{question}"
+        return PassageChunks(context), f"\n\n{question}"

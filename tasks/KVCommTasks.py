@@ -101,7 +101,10 @@ def _cases(rows, specs, decision, metadata=None):
         yield Case(
             text,
             MultiAgentFullConnectionWorkflow(
-                i, MultiAgentFullConnectionInput(text, specs, decision)
+                i,
+                MultiAgentFullConnectionInput(
+                    text, specs, decision, prepareSharedTask=False
+                ),
             ),
             meta if metadata is None else metadata(meta),
         )
@@ -209,7 +212,16 @@ class KVCommHumanEvalTask(Task):
         decision = AgentSpec("Final Decision", "Return only the best Python implementation in a ```python block.\n\n{task}")
         for i, r in enumerate(self._rows):
             text = r.get("prompt", ""); meta = {"test": r.get("test", ""), "entry_point": r.get("entry_point", "")}
-            yield Case(text, MultiAgentFullConnectionWorkflow(i, MultiAgentFullConnectionInput(text, specs, decision)), meta)
+            yield Case(
+                text,
+                MultiAgentFullConnectionWorkflow(
+                    i,
+                    MultiAgentFullConnectionInput(
+                        text, specs, decision, prepareSharedTask=False
+                    ),
+                ),
+                meta,
+            )
     def Evaluate(self, result, metadata):
         code = _extract_python(result.output)
         entry_point = metadata.get("entry_point")
@@ -273,7 +285,16 @@ class KVCommCopyTask(Task):
         specs = [AgentSpec("Copy Machine", " Ω" * 512 + "\nRandomly output Ω or Δ 512 times.\n\n{task}") for _ in range(self.agentCount)]
         for i in range(self.nCases):
             text = " ".join(rng.choices(["Δ", "Ω"], k=1000))
-            yield Case(text, MultiAgentFullConnectionWorkflow(i, MultiAgentFullConnectionInput(text, specs)), {})
+            yield Case(
+                text,
+                MultiAgentFullConnectionWorkflow(
+                    i,
+                    MultiAgentFullConnectionInput(
+                        text, specs, prepareSharedTask=False
+                    ),
+                ),
+                {},
+            )
     def Evaluate(self, result, metadata): return {}
 
 

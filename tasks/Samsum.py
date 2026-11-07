@@ -24,7 +24,6 @@ class SamsumTask(KBBase):
     def _Build(self, sample: Dict[str, Any]) -> Tuple[List[str], str]:
         chunks = [c["text"] for c in sample.get("ctxs", [])]
         suffix = "\n\n" + sample["question"]
-        chunks = [self.prefixPrompt + chunks[0]] + chunks[1:] if chunks else []
         return chunks, suffix
 
     def Evaluate(self, result: Result, metadata: Dict[str, Any]) -> Dict[str, float]:

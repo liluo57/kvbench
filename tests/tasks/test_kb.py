@@ -70,13 +70,14 @@ def test_govreport_default_and_requested_chunk_counts(tmp_path):
     context = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
     task = GovReportTask(dataDir=str(tmp_path), nChunks=1)
     one, suffix = task._Build({"context": context})
-    assert one == [task.prefixPrompt + context]
+    assert one == [context]
+    assert task.prefixPrompt not in one[0]
     assert suffix == task.suffixPrompt
 
     splitTask = GovReportTask(dataDir=str(tmp_path), nChunks=3)
     chunks, _ = splitTask._Build({"context": context})
     assert len(chunks) == 3
-    assert "".join(chunks) == task.prefixPrompt + context
+    assert "".join(chunks) == context
 
 
 def test_govreport_max_sample_length_filters_complete_prompts(tmp_path, monkeypatch):

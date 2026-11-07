@@ -50,5 +50,5 @@ class HotpotQATask(QABase):
         question = str(sample.get("input") or "").strip()
         if not context or not question:
             return [], ""
-        chunks = PassageChunks(context, prefix=self.prefixPrompt)
+        chunks = PassageChunks(context)
         return chunks, f"{self.queryPrompt}{question}\nAnswer:"

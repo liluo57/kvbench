@@ -1394,10 +1394,17 @@ def WrapUvInstallRun(body: str) -> str:
         "*) echo 'unsupported uv architecture' >&2; exit 1 ;; "
         "esac; "
         'uv_asset="uv-${uv_arch}-unknown-linux-gnu"; '
+        "if command -v curl >/dev/null 2>&1; then "
         "curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused "
         f'--max-time 1800 "{primaryUrl}" -o /tmp/.kvbench-uv.tar.gz '
         "|| curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused "
         f'--max-time 1800 "{fallbackUrl}" -o /tmp/.kvbench-uv.tar.gz; '
+        "elif command -v wget >/dev/null 2>&1; then "
+        "wget -q --tries=5 --waitretry=3 --timeout=1800 "
+        f'"{primaryUrl}" -O /tmp/.kvbench-uv.tar.gz '
+        "|| wget -q --tries=5 --waitretry=3 --timeout=1800 "
+        f'"{fallbackUrl}" -O /tmp/.kvbench-uv.tar.gz; '
+        "else echo 'curl or wget is required to install uv' >&2; exit 1; fi; "
         "rm -rf /tmp/.kvbench-uv; mkdir -p /tmp/.kvbench-uv; "
         "tar -xzf /tmp/.kvbench-uv.tar.gz -C /tmp/.kvbench-uv; "
         "install -m 0755 /tmp/.kvbench-uv/${uv_asset}/uv /usr/local/bin/uv; "

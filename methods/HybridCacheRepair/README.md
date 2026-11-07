@@ -71,12 +71,13 @@ embedding、private-only KV 写回、prepared store 不变及 token-ID/retention
 
 ```bash
 python scripts/EvaluateHybridCacheRepair.py \
-  --config outputs/hybrid-cacherepair-10task-20261022/eval.yaml \
-  --frozen outputs/kvbench-evaluation/qwen38-test-v1/frozen_tasks.pkl \
-  --output outputs/hybrid-cacherepair-10task-20261022 --samples 64
+  --config outputs/kvbench-evaluation/qwen38-tasklogic-v2-20261106/eval.yaml \
+  --frozen outputs/kvbench-evaluation/qwen38-tasklogic-v2-20261106/frozen_tasks.pkl \
+  --output outputs/kvbench-evaluation/qwen38-tasklogic-v2-20261106/results \
+  --samples 64 --arms full,trr,cacherepair
 ```
 
-`--frozen` 是可信本地输入快照；新评测使用 `outputs/kvbench-evaluation/qwen38-test-v1/frozen_tasks.pkl`。
+`--frozen` 是可信本地输入快照；新评测使用 `outputs/kvbench-evaluation/qwen38-tasklogic-v2-20261106/frozen_tasks.pkl`，由当前 `Main.py` 和任务类重新构建。
 `--samples 64` 从统一后的 10-task 新样本快照中按固定顺序取每个任务前 64 例。脚本逐例检查 case IDs、
 完整输入 token hashes 和 generation budgets，使用相同输入比较 Full Prefill、Hypic TRR 和 Stage B Hybrid。
 旧的 `hypic-ablation-64-20261014` 快照保留作历史记录，不应与新快照的结果当作同一测试集比较。

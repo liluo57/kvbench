@@ -28,7 +28,7 @@ workflow = RAGWorkflow(case_id=case_index, data=data)
 
 ### `MultiAgentFullConnectionWorkflow`
 
-Represents a fixed fully connected multi-agent conversation. It first prepares the shared task text, then runs agents in sequence; each agent's prompt may include outputs from earlier agents. An optional decision agent runs last to produce a final answer. `retainOutput` indicates whether a RUN result may be reused by a later agent.
+Represents a fixed fully connected multi-agent conversation. It can optionally prepare shared task text, then runs agents in sequence; each agent's prompt may include outputs from earlier agents. An optional decision agent runs last to produce a final answer. KVComm leaves task text fresh and uses `retainOutput` for agent outputs that later agents consume.
 
 ### `AgentBenchFlowWorkflow`
 

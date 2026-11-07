@@ -76,9 +76,7 @@ class GovReportTask(KBBase):
         context = str(sample.get("context") or "")
         if not context:
             return [], ""
-        return ParagraphChunks(
-            context, self.nChunks, prefix=self.prefixPrompt
-        ), self.suffixPrompt
+        return ParagraphChunks(context, self.nChunks), self.suffixPrompt
 
     def Evaluate(self, result: Result, metadata: Dict[str, Any]) -> Dict[str, float]:
         prediction = str(result.output or "").lstrip()

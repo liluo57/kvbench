@@ -41,7 +41,7 @@ class MultiNewsTask(KBBase):
         context = str(sample.get("context") or "")
         if not context:
             return [], ""
-        return PassageChunks(context, prefix=self.prefixPrompt), self.suffixPrompt
+        return PassageChunks(context), self.suffixPrompt
 
     def Evaluate(self, result: Result, metadata: Dict[str, Any]) -> Dict[str, float]:
         prediction = str(result.output or "").lstrip()

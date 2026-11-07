@@ -251,6 +251,9 @@ class KBBase(Task):
 
     #: dataset name resolved against ``DatasetPath``; overridden per task.
     defaultDataset = ""
+    #: Fresh task prompt prefix. Kept outside ``prepare_input`` so PIC reuse
+    #: can target only source-document chunks.
+    prefixPrompt = ""
 
     def __init__(
         self,
@@ -315,7 +318,7 @@ class KBBase(Task):
                 continue
 
             fullPrompt = render_user_prompt(
-                "".join(chunks) + suffix,
+                self.prefixPrompt + "".join(chunks) + suffix,
                 modelPath=modelPath, thinking=False,
             )
             ragInput = RAGInput(prepare_input=chunks, run_input=fullPrompt)
@@ -378,7 +381,6 @@ class QABase(KBBase):
     def _Build(self, sample: Dict[str, Any]) -> Tuple[List[str], str]:
         q = self._normalizeQuestion(sample["question"])
         chunks = [f"{c['title']}\n\n{c['text']}\n\n" for c in sample["ctxs"]]
-        chunks = [self.prefixPrompt + chunks[0]] + chunks[1:] if chunks else []
         suffix = f"{self.queryPrompt}{q}\nAnswer:"
         return chunks, suffix
 

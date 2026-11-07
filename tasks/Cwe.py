@@ -27,7 +27,7 @@ Case payload contract
     ``workflow = RAGWorkflow`` (skip Prepare, just Run)
 
 :class:`CWEShuffleTask`:
-    ``input = RAGInput(prepare_input=segments, run_input=shuffled_prompt)``
+    ``input = RAGInput(prepare_input=segments[1:-1], run_input=shuffled_prompt)``
     ``workflow = RAGWorkflow`` (Prepare → Run)
 
 ``chunks`` are fixed-size blocks of the test list's numbered items. ``head``
@@ -84,14 +84,14 @@ class CWETask(RulerBase):
 class CWEShuffleTask(CWETask):
     """The same content, but the test list's item blocks are shuffled.
 
-    ``prepare_input`` is ``[head, *chunks, tail]`` — the original-order segments
-    handed to reuse methods as a chunk-isolated context; ``run_input`` keeps
-    ``head``/``tail`` in place and permutes ``chunks``, the test list's
-    numbered items in fixed-size blocks. Reordering the items preserves their
-    frequencies, so a cacheblend method that re-detects the segments and reuses
-    the stored per-chunk KV can still name the same top-10 words; the naive
-    control that blindly serves the stale stitched KV cannot. ``_Shuffled``
-    guarantees the shuffled join differs from the original text.
+    ``prepare_input`` is ``[*chunks]`` — only the test list's numbered-item
+    blocks. The ``head`` (few-shot example + test instruction) and ``tail``
+    (question + assistant header + answer prefix) stay fresh. ``run_input``
+    keeps them in place and permutes the blocks. Reordering the items preserves
+    their frequencies, so a cacheblend method that re-detects and reuses the
+    document chunks can still name the same top-10 words; the naive control
+    that blindly serves the stale stitched KV cannot. ``_Shuffled`` guarantees
+    the shuffled join differs from the original text.
     """
 
     name = "cwe_shuffle"
@@ -138,7 +138,7 @@ class CWEShuffleTask(CWETask):
             fullPrompt = "".join(segments)
             chunks = self._Shuffled(segments[1:-1], seed=int(s.get("index", i)))
             run_input = segments[0] + "".join(chunks) + segments[-1]
-            data = RAGInput(prepare_input=segments, run_input=run_input)
+            data = RAGInput(prepare_input=segments[1:-1], run_input=run_input)
             yield Case(
                 input=data,
                 workflow=RAGWorkflow(case_id=i, data=data),

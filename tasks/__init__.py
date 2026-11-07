@@ -11,10 +11,11 @@ Each task's dataset is resolved by *name* against ``DatasetPath`` from
   (:mod:`tasks.Cwe`), read from ``<DatasetPath>/ruler/cwe_len*.jsonl``.
 
   Each RULER family ships a *shuffle* variant. Its ``Case.input`` is an
-  :class:`workflow.RAGWorkflow.RAGInput`: ``prepare_input`` contains the
-  original-order informative units and ``run_input`` contains their
-  non-identity permutation. These are RAGInput fields, not Case fields. A
-  method that detects the change recomputes; a naive one serves stale KV.
+  :class:`workflow.RAGWorkflow.RAGInput`: ``prepare_input`` contains only the
+  original-order informative units; the instruction/question head and tail
+  remain fresh in ``run_input`` while the units receive a non-identity
+  permutation. These are RAGInput fields, not Case fields. A method that
+  detects the change recomputes; a naive one serves stale KV.
 
 - :class:`MusiqueTask` / :class:`TwoWikiMultiHopQATask` /
   :class:`SamsumTask` — the knowledge-base workflows the original CacheBlend

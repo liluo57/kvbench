@@ -40,9 +40,13 @@ class MultiAgentFullConnectionWorkflow(Workflow):
     def __init__(self, case_id: int, data: MultiAgentFullConnectionInput):
         self.case_id = case_id
         self._data = data
-        # PREPARE and each RUN occurrence use these exact independently
-        # tokenized shared-task IDs.
-        self._taskIds = EncodeChunks([data.task], data.modelPath)[0]
+        # When enabled, PREPARE and every RUN occurrence use these exact
+        # independently tokenized shared-task IDs. Tasks that keep their input
+        # fresh encode it together with the surrounding prompt text instead.
+        self._taskIds = (
+            EncodeChunks([data.task], data.modelPath)[0]
+            if data.prepareSharedTask else []
+        )
         self._prepared = not data.prepareSharedTask
         self._agentIndex = 0
         self._outputs: List[tuple[str, Optional[List[int]]]] = []
@@ -63,7 +67,10 @@ class MultiAgentFullConnectionWorkflow(Workflow):
         for index, text in enumerate(templateParts):
             appendText(text)
             if index < len(templateParts) - 1:
-                appendIds(self._data.task, self._taskIds)
+                if self._data.prepareSharedTask:
+                    appendIds(self._data.task, self._taskIds)
+                else:
+                    appendText(self._data.task)
         if self._outputs:
             appendText(
                 "\n\nAt the same time, the outputs of other agents are as follows:\n\n"

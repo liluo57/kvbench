@@ -12,16 +12,16 @@ Case payload contract
     ``workflow = RAGWorkflow`` (skip Prepare, just Run)
 
 :class:`NIAHShuffleTask`:
-    ``input = RAGInput(prepare_input=parts, run_input=shuffled_prompt)``
+    ``input = RAGInput(prepare_input=parts[1:-1], run_input=shuffled_prompt)``
     ``workflow = RAGWorkflow`` (Prepare → Run)
 
 ``prefix`` (user opener + instruction) and ``suffix`` (question + assistant
-header + answer prefix) are kept in place, so the shuffled prompt stays a
-coherent, answerable chat — only the haystack chunks (``essays``) and the
-needle sentence reorder. The needle value remains findable anywhere in the
-reordered haystack, so a cacheblend method that re-detects the segments and
-reuses the stored per-chunk KV still answers, while a naive one that blindly
-serves the stale stitched KV fails.
+header + answer prefix) are fresh and kept in place, so the shuffled prompt
+stays a coherent, answerable chat — only the haystack chunks (``essays``) and
+the needle sentence reorder. The needle value remains findable anywhere in the
+reordered haystack, so a cacheblend method that re-detects the document
+segments and reuses their stored KV still answers, while a naive one that
+blindly serves the stale stitched KV fails.
 """
 
 from typing import Any, Dict, Iterator, List, Tuple
@@ -62,12 +62,11 @@ class NIAHTask(RulerBase):
 class NIAHShuffleTask(NIAHTask):
     """The same content, but the haystack chunks and needle are shuffled.
 
-    ``prepare_input`` is ``[prefix, *essays, needle, suffix]`` — the original
-    order segments handed to reuse methods as a chunk-isolated context. The
-    ``prefix`` (user opener + instruction) and ``suffix`` (question + assistant
-    header + answer prefix) stay in place, and ``run_input`` permutes only the
-    middle: the haystack chunks and the needle sentence, so the prompt remains a
-    coherent, answerable chat that no longer starts with the cached context.
+    ``prepare_input`` is ``[*essays, needle]`` — only the original-order
+    haystack/document segments are handed to reuse methods. The ``prefix``
+    (user opener + instruction) and ``suffix`` (question + assistant header +
+    answer prefix) stay fresh and in place, while ``run_input`` permutes only
+    the middle so the prompt remains coherent and answerable.
 
     The point is to test whether reuse survives re-ordering: a cacheblend method
     re-detects the segments in their run order and reuses the stored per-chunk
@@ -88,7 +87,7 @@ class NIAHShuffleTask(NIAHTask):
             parts, fullPrompt = self._SplitSegments(s)
             shuffled = self._Shuffled(parts[1:-1], seed=int(s.get("index", i)))
             run_input = parts[0] + "".join(shuffled) + parts[-1]
-            data = RAGInput(prepare_input=parts, run_input=run_input)
+            data = RAGInput(prepare_input=parts[1:-1], run_input=run_input)
             yield Case(
                 input=data,
                 workflow=RAGWorkflow(case_id=i, data=data),
