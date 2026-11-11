@@ -24,7 +24,7 @@ Deliberately **not** re-exported from this barrel:
   circular shape and made future engine sub-splits harder to land.
 """
 
-from .Config import DatasetDir, Get, LoadConfig, MaxModelLen, ModelPath
+from .Config import DatasetDir, Get, LoadConfig, MaxModelLen, MaxSampleLen, ModelPath
 from .Metrics import Metric
 from .Method import Method
 from .Result import NumOutputTokensKey, Result, TotalTimeKey, TtftKey
@@ -41,6 +41,7 @@ __all__ = [
     "Get",
     "LoadConfig",
     "MaxModelLen",
+    "MaxSampleLen",
     "Metric",
     "Method",
     "ModelPath",

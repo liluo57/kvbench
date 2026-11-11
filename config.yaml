@@ -6,6 +6,12 @@ ModelPath: mistralai/Mistral-7B-Instruct-v0.3
 # backend-specific; see docs/Method.md for remaining-window validation.
 MaxModelLen: 32768
 
+# Exclusive maximum tokenized sample length emitted by any Task. Samples at
+# this limit or above are skipped because generation needs one free token.
+# Task generators continue past overlong samples until they produce their
+# requested number of usable cases. Keep this aligned with MaxModelLen.
+MaxSampleLen: 32768
+
 # Shared model sampling policy.
 #   greedy   - deterministic argmax decoding
 #   default  - use the model's generation_config.json (or config.json)

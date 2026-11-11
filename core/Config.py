@@ -75,3 +75,19 @@ def MaxModelLen(config: Optional[Dict[str, Any]] = None) -> int:
     if value < 1:
         raise ValueError("MaxModelLen must be at least 1")
     return value
+
+
+def MaxSampleLen(config: Optional[Dict[str, Any]] = None) -> int:
+    """Return the largest supported task sample length in model tokens.
+
+    The default follows ``MaxModelLen`` so older configs gain the same
+    overlength filtering behavior without needing a new key.
+    """
+    value = Get("MaxSampleLen", MaxModelLen(config=config), config=config)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("MaxSampleLen must be an integer")
+    if value < 1:
+        raise ValueError("MaxSampleLen must be at least 1")
+    if value > MaxModelLen(config=config):
+        raise ValueError("MaxSampleLen must not exceed MaxModelLen")
+    return value

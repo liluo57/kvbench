@@ -179,16 +179,37 @@ class CacheblendRepo(Method):
     def _Request(self, payload: Dict[str, Any], timeout: float = 3600.0) -> Dict[str, Any]:
         deadline = time.monotonic() + timeout
         self._WriteUntil(payload, deadline)
-        line = self._ReadlineUntil(deadline)
-        if not line:
-            if self._drainThread is not None:
-                self._drainThread.join(timeout=0.5)
-            err = self._StderrTail()[-2000:]
-            raise RuntimeError(f"cacheblend helper closed stdout: {err}")
-        resp = json.loads(line)
-        if not resp.get("ok"):
-            raise RuntimeError(f"cacheblend helper error: {resp.get('error')}")
-        return resp
+        while True:
+            line = self._ReadlineUntil(deadline)
+            if not line or not line.strip():
+                if self._proc.poll() is None:
+                    continue
+                if self._drainThread is not None:
+                    self._drainThread.join(timeout=0.5)
+                err = self._StderrTail()[-2000:]
+                raise RuntimeError(f"cacheblend helper closed stdout: {err}")
+            try:
+                resp = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if self._proc.poll() is not None:
+                    if self._drainThread is not None:
+                        self._drainThread.join(timeout=0.5)
+                    err = self._StderrTail()[-2000:]
+                    raise RuntimeError(
+                        "cacheblend helper exited with non-JSON stdout "
+                        f"{line[:200]!r}: {err}"
+                    ) from exc
+                # Some vLLM builds emit progress lines on stdout despite the
+                # helper's JSONL protocol. Ignore those lines and keep reading
+                # for the response, while preserving them for diagnostics.
+                print(f"[cacheblend-helper-stdout] {line.rstrip()}", file=sys.stderr, flush=True)
+                continue
+            if not isinstance(resp, dict) or "ok" not in resp:
+                print(f"[cacheblend-helper-stdout] {line.rstrip()}", file=sys.stderr, flush=True)
+                continue
+            if not resp.get("ok"):
+                raise RuntimeError(f"cacheblend helper error: {resp.get('error')}")
+            return resp
 
     def _WriteUntil(self, payload: Dict[str, Any], deadline: float) -> None:
         wire = memoryview((json.dumps(payload) + "\n").encode("utf-8"))
