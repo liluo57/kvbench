@@ -1023,16 +1023,32 @@ def test_dynamic_selector_skips_probe_when_no_prepared_chunk_hits(monkeypatch):
     assert case.observed == []
 
 
-@pytest.mark.parametrize('ratio', [0., .2, 1.])
-def test_scheduled_epic_skips_position_zero_chunk_only_for_partial_repair(ratio):
-    hits = [(0, 10, b'first'), (10, 20, b'second')]
+@pytest.mark.parametrize('ratio,counts', [
+    (0., (0, 0)), (.05, (25, 23)), (.2, (102, 95)),
+    (.5, (256, 238)), (1., (512, 476)),
+])
+def test_scheduled_epic_skips_position_zero_chunk_without_redistributing_budget(ratio, counts):
+    hits = [(0, 512, b'first'), (512, 1024, b'second'), (1024, 1500, b'short')]
     selected = select_initial_positions(hits, 'epic', ratio=ratio)
-    if ratio == 1:
-        assert selected == {(0, 10): list(range(10)), (10, 20): list(range(10, 20))}
-    elif ratio == 0:
-        assert selected == {}
-    else:
-        assert selected == {(10, 20): [10, 11]}  # No budget redistribution.
+    expected = {}
+    if counts[0]:
+        expected[(512, 1024)] = list(range(512, 512 + counts[0]))
+    if counts[1]:
+        expected[(1024, 1500)] = list(range(1024, 1024 + counts[1]))
+    assert selected == expected
+
+
+def test_scheduled_epic_fixed_prefix_skips_position_zero_and_keeps_short_chunks():
+    hits = [(0, 512, b'first'), (512, 1024, b'second'), (1024, 1027, b'short')]
+    assert select_initial_positions(hits, 'epic', tokens_per_chunk=32) == {
+        (512, 1024): list(range(512, 544)), (1024, 1027): [1024, 1025, 1026],
+    }
+
+
+def test_scheduled_epic_repairs_first_hit_after_a_fresh_prefix():
+    assert select_initial_positions([(100, 110, b'first-hit')], 'epic', ratio=.2) == {
+        (100, 110): [100, 101],
+    }
 
 
 @pytest.mark.parametrize('selector', ['cacheblend', 'prophetkv'])

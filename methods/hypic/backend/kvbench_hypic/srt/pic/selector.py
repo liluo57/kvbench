@@ -1,7 +1,7 @@
 """Token-selection adapters for hybrid PIC methods.
 
-EPIC repairs chunk prefixes, excluding the already-positioned first chunk
-for partial repair. CacheBlend ranks squared value drift; ProphetKV ranks
+EPIC repairs chunk prefixes, excluding the already-positioned first chunk.
+CacheBlend ranks squared value drift; ProphetKV ranks
 context-conditioned query attention to frozen cached keys.
 The dynamic probe orchestration lives in runtime_selector. Outputs always
 use absolute prompt positions in context order, irrespective of score order.
@@ -21,10 +21,10 @@ def select_initial_positions(hit_segments, selector="epic", *, ratio=None, token
     after scoring. This function never changes the mandatory miss/query rows.
     """
     if selector == "epic":
-        # Preserve the full-replay endpoint. Partial EPIC repair has no work
-        # to do on the first chunk, whose independent positions already match
-        # the request. Do not redistribute its budget to later chunks.
-        eligible = hit_segments if ratio == 1 else [seg for seg in hit_segments if seg[0] != 0]
+        # The first chunk's independent positions already match the request.
+        # EPIC never repairs it, including at ratio=1. The cold full-prefill
+        # control is separate. Do not redistribute its budget to later chunks.
+        eligible = [seg for seg in hit_segments if seg[0] != 0]
         return select_epic_positions(eligible, ratio=ratio, tokens_per_chunk=tokens_per_chunk)
     if selector not in {"cacheblend", "prophetkv"}:
         raise ValueError("unknown LinearKV selector")

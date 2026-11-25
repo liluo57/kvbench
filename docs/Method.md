@@ -219,15 +219,16 @@ backend's position relocation. ProphetKV requires a fresh terminal Query segment
 
 | Selector | Selection and budget |
 | --- | --- |
-| `epic` (default) | Repair each matched chunk's prefix. Partial repair excludes the chunk beginning at prompt position zero, without reallocating its budget. The count is `floor(r * chunk_length)`, at least one for a positive budget. |
+| `epic` (default) | Repair each matched chunk's prefix, excluding the chunk beginning at prompt position zero at every ratio, including 1, without reallocating its budget. The count is `floor(r * chunk_length)`, at least one for a positive budget. |
 | `cacheblend` | Probe the full prompt through the first FA layer, then rank squared differences between current and cached V over all matched positions. `selectorLayer` optionally chooses an absolute FA layer index. |
 | `prophetkv` | Probe fresh positions against the document KV and LB state. Score only the terminal Query's context attention, average over heads and FA layers, then select one shared set of document positions. |
 
 Dynamic selectors use a global `floor(r * matched_tokens)` budget (at least one
 when positive), with ties resolved by original position. All TP ranks reduce
-scores before selection. A ratio of zero skips document repair; a ratio of one
-replays all matched rows, including the first chunk, and bypasses probing.
-Full replay still uses LB initialization; it is not ordinary full prefill.
+scores before selection. A ratio of zero skips document repair. For dynamic
+selectors, a ratio of one replays all matched rows and bypasses probing; EPIC
+still excludes the position-zero chunk. Both endpoints retain LB initialization.
+Use `fullPrefill=True` for the ordinary full-prefill control.
 
 Probe changes to request-private recurrent state are restored before formal
 replay, including on failure. Prepared document state and public KV stay frozen.

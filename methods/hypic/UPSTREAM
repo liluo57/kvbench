@@ -27,6 +27,6 @@ and its need for model-level validation.
 
 KVBench extends LinearKV selection with CacheBlend V-drift and ProphetKV
 query-attention probes on the bundled backend. Probe effects stay request-private
-and are restored before LB replay. EPIC partial repair excludes the chunk at
-prompt position zero; full replay still includes it. These are local adapters,
+and are restored before LB replay. EPIC excludes the chunk at prompt position
+zero at every ratio, including 1, without reallocating its budget. These are local adapters,
 not claims of upstream author-runtime performance equivalence.
