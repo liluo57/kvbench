@@ -67,6 +67,10 @@ all replaced directories.
 python Main.py
 ```
 
+For Qwen hybrid models, see the [LinearKV selector guide](docs/LinearKV.md)
+to run EPIC, CacheBlend, and ProphetKV selection with a small smoke task or
+the existing QA tasks, without changing the default benchmark matrix.
+
 ## Design Philosophy
 
 KV optimization methods are highly diverse.

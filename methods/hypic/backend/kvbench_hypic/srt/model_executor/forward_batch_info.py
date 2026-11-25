@@ -603,6 +603,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             self.mark_forward_metadata_ready()
 
     # PIC: None when PIC is disabled for this batch.
+    pic_selector_probe: Optional[Any] = None
     pic_mode: Optional[str] = None
     pic_hit_segments: Optional[List[List[Tuple[int, int, bytes]]]] = None
     pic_miss_segments: Optional[List[List[Tuple[int, int]]]] = None

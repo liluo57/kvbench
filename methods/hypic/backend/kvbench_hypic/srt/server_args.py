@@ -1891,7 +1891,13 @@ class ServerArgs:
     ] = None
     pic_epic_ratio: A[
         Optional[float],
-        "LinearKV EPIC/LegoLink repair ratio per matched chunk in [0, 1]; mutually exclusive with pic_epic_tokens_per_chunk.",
+        "LinearKV repair ratio in [0, 1] (EPIC per chunk; dynamic selectors global); mutually exclusive with pic_epic_tokens_per_chunk.",
+    ] = None
+    pic_linearkv_selector: A[
+        str, "LinearKV repair selector: epic, cacheblend, or prophetkv."
+    ] = "epic"
+    pic_linearkv_selector_layer: A[
+        Optional[int], "CacheBlend probe layer (absolute FA layer index); default first FA layer."
     ] = None
     pic_scatter_timeout_s: A[
         float,
@@ -6436,7 +6442,7 @@ class ServerArgs:
         # scheduler assembly (which has access to the resolved HF config).
         # Here we only check known model families by path substring.
         _PIC_MODEL_PATTERNS = (
-            "Qwen3.5", "Qwen3_5", "Qwen3.8", "Qwen3_8",
+            "Qwen3.5", "Qwen3_5", "Qwen3.6", "Qwen3_6", "Qwen3.8", "Qwen3_8",
             "Kimi", "kimi", "Ring", "Bailing", "bailing",
         )
         if not any(p in self.model_path for p in _PIC_MODEL_PATTERNS):
@@ -6454,6 +6460,23 @@ class ServerArgs:
             f"pic_mode must be a known enum, got {self.pic_mode!r}"
         )
         if self.pic_mode == "linearkv":
+            if self.pic_linearkv_selector not in {"epic", "cacheblend", "prophetkv"}:
+                raise ValueError("unknown pic_linearkv_selector")
+            if self.pic_linearkv_selector_layer is not None and (
+                self.pic_linearkv_selector != "cacheblend"
+                or isinstance(self.pic_linearkv_selector_layer, bool)
+                or not isinstance(self.pic_linearkv_selector_layer, int)
+                or self.pic_linearkv_selector_layer < 0
+            ):
+                raise ValueError("pic_linearkv_selector_layer requires a non-negative CacheBlend layer index")
+            if self.pic_linearkv_selector != "epic":
+                if self.enable_pdmux:
+                    raise ValueError("Dynamic LinearKV selectors do not support PD multiplexing / split prefill")
+                if self.pic_epic_tokens_per_chunk is not None or self.pic_epic_ratio is None:
+                    raise ValueError("dynamic LinearKV selectors require pic_epic_ratio")
+                if self.pp_size != 1 or self.dp_size != 1 or self.enable_dp_attention:
+                    raise ValueError("LinearKV selector probes support tensor parallelism only (PP=DP=1)")
+                self.disable_overlap_schedule = True
             if (
                 self.pic_epic_tokens_per_chunk is not None
                 and self.pic_epic_ratio is not None
